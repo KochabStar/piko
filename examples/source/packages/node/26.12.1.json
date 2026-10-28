@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "name": "node",
+  "version": "26.12.1",
+  "platforms": {
+    "windows-x64": {
+      "url": "https://nodejs.org/dist/v26.12.1/node-v26.12.1-win-x64.zip",
+      "sha256": "b3efd5c70cba3308ed46e7e699a9b8aac075bbc6b027fcb39c84c31acc25e2b4",
+      "format": "zip",
+      "stripPrefix": "node-v26.12.1-win-x64",
+      "bin": {
+        "node": "node.exe",
+        "npm": { "path": "node_modules/npm/bin/npm-cli.js", "kind": "node" },
+        "npx": { "path": "node_modules/npm/bin/npx-cli.js", "kind": "node" }
+      }
+    }
+  }
+}

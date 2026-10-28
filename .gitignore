@@ -1,0 +1,28 @@
+# Dependencies and generated artifacts
+node_modules/
+dist/
+coverage/
+.cache/
+*.tsbuildinfo
+
+# Temporary design and planning documents
+/docs/
+
+# Local tools and test sandboxes
+.tmp/
+.tools/
+.sandbox/
+*.log
+
+# Local environment and credentials; keep shareable templates
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.*.example
+!.env.*.template
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

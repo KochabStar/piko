@@ -1,0 +1,37 @@
+{
+  "name": "piko",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit --noUnusedLocals --noUnusedParameters",
+    "format": "prettier --write src tests scripts package.json tsconfig.json",
+    "format:check": "prettier --check src tests scripts package.json tsconfig.json",
+    "benchmark": "bun scripts/benchmark.ts",
+    "release": "bun scripts/release.ts",
+    "build": "bun scripts/build.ts",
+    "verify": "bun run typecheck && bun run build && bun test",
+    "source:serve": "bun scripts/serve-source.ts",
+    "source:check": "bun scripts/check-source.ts",
+    "release:check": "bun scripts/check-release.ts",
+    "smoke:real": "bun scripts/smoke-real.ts",
+    "m0": "bun scripts/m0.ts",
+    "build:network-probe": "bun scripts/build-network-probe.ts",
+    "sandbox:prepare": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-sandbox.ps1",
+    "sandbox:check": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/sandbox.test.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/sandbox-report.test.ps1"
+  },
+  "dependencies": {
+    "semver": "7.8.5",
+    "yauzl": "3.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4",
+    "@types/semver": "7.8.0",
+    "@types/yauzl": "3.4.0",
+    "bun": "1.4.4",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2"
+  }
+}

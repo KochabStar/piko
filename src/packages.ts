@@ -1,0 +1,928 @@
+import {
+  cp,
+  mkdir,
+  writeFile,
+  rename,
+  lstat,
+  readlink,
+} from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { artifactBytes } from "./cache.ts";
+import { Store, packageKey, installId, upgradeState } from "./store.ts";
+import {
+  makeSource,
+  refresh,
+  loadManifest,
+  parseSpec,
+  chooseVersion,
+} from "./catalog.ts";
+import { extractZip } from "./artifacts.ts";
+import {
+  capture,
+  commandName,
+  component,
+  exists,
+  fail,
+  noLinks,
+  noLinksTree,
+  removeTree,
+  sha256,
+  versionKey,
+  atomicJson,
+  inside,
+} from "./util.ts";
+import {
+  saveNpmSnapshot,
+  scriptPlan,
+  npmSnapshotPath,
+  npmTreeHash,
+  rebuildNpm,
+} from "./scripts.ts";
+import { npmContext, resolveNpm, prepareNpm } from "./npm.ts";
+import type { Bin, Install, Source, State } from "./types.ts";
+
+export class Packages {
+  readonly store: Store;
+  constructor(readonly root: string) {
+    this.store = new Store(root);
+  }
+  async addSource(
+    alias: string,
+    url: string,
+    type: "http" | "git" = "http",
+    ref?: string,
+  ): Promise<void> {
+    const source = makeSource(alias, url, type, ref);
+    await this.store.mutate(async (state) => {
+      if (Object.hasOwn(state.sources, source.alias))
+        fail("Source already exists; remove it explicitly before replacing it");
+      await refresh(this.root, source);
+      state.sources[source.alias] = source;
+    });
+  }
+  async refreshSources(alias?: string): Promise<void> {
+    await this.store.mutate(async (state) => {
+      const sources = alias
+        ? [state.sources[component(alias)] ?? fail("Unknown source")]
+        : Object.values(state.sources);
+      for (const s of sources) await refresh(this.root, s);
+    });
+  }
+  async removeSource(alias: string, force = false): Promise<void> {
+    await this.store.mutate(async (state) => {
+      const s = state.sources[component(alias)];
+      if (!s) fail("Unknown source");
+      if (
+        !force &&
+        Object.values(state.installs).some(
+          (i) => i.source.identity === s.identity,
+        )
+      )
+        fail(
+          "Source is referenced by installed packages; use --force to remove only its configuration",
+        );
+      delete state.sources[s.alias];
+    });
+  }
+  async search(
+    query: string,
+  ): Promise<{ source: string; name: string; latest: string }[]> {
+    const results: { source: string; name: string; latest: string }[] = [];
+    await this.store.mutate(async (state) => {
+      for (const s of Object.values(state.sources)) {
+        const index = await refresh(this.root, s);
+        for (const [name, p] of Object.entries(index.packages))
+          if (name.includes(query.toLowerCase()))
+            results.push({ source: s.alias, name, latest: p.latest });
+      }
+    });
+    return results;
+  }
+  private installed(
+    state: State,
+    spec: string,
+  ): { key: string; installs: Install[]; request?: string } {
+    const p = parseSpec(spec),
+      matches = Object.values(state.installs).filter(
+        (i) => i.name === p.name && (!p.source || i.source.alias === p.source),
+      );
+    const keys = [...new Set(matches.map((i) => i.key))];
+    if (!keys.length) fail("Package is not installed");
+    if (keys.length > 1) fail("Ambiguous package; specify <source>/<package>");
+    return { key: keys[0]!, installs: matches, request: p.request };
+  }
+  private select(
+    state: State,
+    key: string,
+    id: string,
+    request: string,
+    noCommands = false,
+  ): void {
+    upgradeState(state);
+    const install = state.installs[id];
+    if (!install || install.key !== key) fail("Missing installed target");
+    const prior = state.defaults[key];
+    const enabled = noCommands
+      ? []
+      : (prior?.commands ?? Object.keys(install.bins));
+    for (const alias of Object.values(state.aliases!)) {
+      if (alias.key === key && !install.bins[alias.command])
+        fail(
+          `New version does not provide aliased command ${alias.command}; remove the alias first`,
+        );
+    }
+    for (const command of enabled) {
+      if (!install.bins[command])
+        fail(
+          `New version does not provide enabled command ${command}; release it first`,
+        );
+      const owner = state.commands[command];
+      if ((owner && owner !== key) || state.aliases![command])
+        fail(
+          `Command conflict: ${command} is owned by another package or alias; no default was changed`,
+        );
+    }
+    for (const [command, owner] of Object.entries(state.commands))
+      if (owner === key) delete state.commands[command];
+    state.defaults[key] = { id, request, commands: enabled };
+    for (const command of enabled) state.commands[command] = key;
+  }
+  async use(
+    spec: string,
+    options: { noCommands?: boolean } = {},
+  ): Promise<void> {
+    await this.store.mutate(async (state) => {
+      const match = this.installed(state, spec);
+      if (!match.request && match.installs.length !== 1)
+        fail("Multiple versions are installed; specify a version");
+      const request = match.request ?? match.installs[0]!.version;
+      const version = chooseVersion(
+        match.installs.map((i) => i.version),
+        request,
+      );
+      this.select(
+        state,
+        match.key,
+        match.installs.find((i) => i.version === version)!.id,
+        request,
+        options.noCommands,
+      );
+    });
+  }
+  private clearCommands(state: State, key: string): void {
+    for (const [command, owner] of Object.entries(state.commands))
+      if (owner === key) delete state.commands[command];
+    for (const [name, alias] of Object.entries(state.aliases ?? {}))
+      if (alias.key === key) delete state.aliases![name];
+  }
+  private selectedInstall(state: State, spec: string): Install {
+    const match = this.installed(state, spec),
+      selection = state.defaults[match.key];
+    if (!selection)
+      fail(
+        "Select a default version first; use --no-commands when resolving a conflict",
+      );
+    const install = state.installs[selection.id]!;
+    if (
+      match.request &&
+      chooseVersion([install.version], match.request) !== install.version
+    )
+      fail("Command operations require the selected default version");
+    return install;
+  }
+  async claimCommand(name: string, spec: string): Promise<void> {
+    name = commandName(name);
+    await this.store.mutate(async (state) => {
+      upgradeState(state);
+      if (state.aliases![name])
+        fail("This name is an alias; remove it explicitly before claiming it");
+      const install = this.selectedInstall(state, spec);
+      if (!install.bins[name]) fail(`Package does not provide ${name}`);
+      const previous = state.commands[name];
+      if (previous && previous !== install.key) {
+        const selection = state.defaults[previous]!;
+        selection.commands = (
+          selection.commands ??
+          Object.entries(state.commands)
+            .filter(([, key]) => key === previous)
+            .map(([n]) => n)
+        ).filter((n) => n !== name);
+      }
+      const selection = state.defaults[install.key]!;
+      selection.commands = [
+        ...new Set([
+          ...(selection.commands ?? Object.keys(install.bins)),
+          name,
+        ]),
+      ];
+      state.commands[name] = install.key;
+    });
+  }
+  async aliasCommand(
+    name: string,
+    spec: string,
+    provided: string,
+  ): Promise<void> {
+    name = commandName(name);
+    provided = commandName(provided);
+    await this.store.mutate(async (state) => {
+      upgradeState(state);
+      if (state.commands[name] || state.aliases![name])
+        fail(
+          "Command or alias name already exists; remove it explicitly first",
+        );
+      const install = this.selectedInstall(state, spec);
+      if (!install.bins[provided])
+        fail(
+          `Package does not provide ${provided}; aliases cannot target aliases`,
+        );
+      state.aliases![name] = { key: install.key, command: provided };
+    });
+  }
+  async removeAlias(name: string): Promise<void> {
+    name = commandName(name);
+    await this.store.mutate(async (state) => {
+      upgradeState(state);
+      if (!state.aliases![name]) fail("Not a command alias");
+      delete state.aliases![name];
+    });
+  }
+  async releaseCommand(name: string): Promise<void> {
+    name = commandName(name);
+    await this.store.mutate(async (state) => {
+      upgradeState(state);
+      const key = state.commands[name];
+      if (!key) fail("Not an owned command; use unalias for an alias");
+      const selection = state.defaults[key]!;
+      selection.commands = (
+        selection.commands ?? Object.keys(state.installs[selection.id]!.bins)
+      ).filter((n) => n !== name);
+      delete state.commands[name];
+    });
+  }
+  async unuse(spec: string): Promise<void> {
+    await this.store.mutate(async (state) => {
+      const { key } = this.installed(state, spec);
+      delete state.defaults[key];
+      this.clearCommands(state, key);
+    });
+  }
+  async install(spec: string, skipChecksum = false): Promise<Install> {
+    return await this.store.mutate(async (state) => {
+      const parsed = parseSpec(spec),
+        request = parsed.request ?? "latest";
+      if (parsed.source === "npm") {
+        if (skipChecksum) fail("--skip-checksum does not bypass npm integrity");
+        const context = await npmContext(this.root, state),
+          resolved = await resolveNpm(
+            context,
+            parsed.name,
+            request,
+            join(this.root, "apps", "piko"),
+          );
+        const key = packageKey(resolved.source, parsed.name),
+          id = installId(key, resolved.version),
+          prior = state.installs[id];
+        if (prior) return prior;
+        const operation = crypto.randomUUID(),
+          stage = join(this.root, "staging", operation, "app"),
+          dir = join("apps", key, versionKey(resolved.version)),
+          destination = join(this.root, dir);
+        await noLinks(stage);
+        await mkdir(stage, { recursive: true });
+        try {
+          const prepared = await prepareNpm(
+            context,
+            stage,
+            parsed.name,
+            resolved.version,
+          );
+          const inputHash = await saveNpmSnapshot(this.root, stage);
+          upgradeState(state);
+          state.schemaVersion = Math.max(
+            state.schemaVersion,
+            3,
+          ) as State["schemaVersion"];
+          const installation: Install = {
+            npmBuild: { inputHash, currentHash: inputHash, approvals: {} },
+            id,
+            key,
+            name: parsed.name,
+            version: resolved.version,
+            request,
+            source: resolved.source,
+            dir,
+            bins: prepared.bins,
+            persist: [],
+            verified: true,
+            checksum: prepared.checksum,
+            manifestHash: prepared.checksum,
+            kind: "npm",
+            runtimeVersion: prepared.runtimeVersion,
+            enginesNode: prepared.enginesNode,
+            scripts: prepared.scripts,
+          };
+          await atomicJson(join(stage, ".piko-install.json"), installation);
+          await noLinks(destination);
+          if (await exists(destination))
+            fail(
+              "Untracked npm installation directory exists; inspect before retrying",
+            );
+          await this.store.publishInstall(installation, stage, operation);
+          state.installs[id] = installation;
+          if (prepared.scripts.length)
+            console.error(
+              `WARNING: ${prepared.scripts.length} package(s) have skipped lifecycle scripts. Review with piko scripts list npm:${parsed.name}@${resolved.version}. Script execution requires explicit content-bound approval and rebuild.`,
+            );
+          return installation;
+        } finally {
+          if (!(await exists(this.store.installPath)))
+            await removeTree(join(this.root, "staging", operation));
+        }
+      }
+      const candidates: {
+        source: Source;
+        versions: Record<string, string>;
+        latest: string;
+      }[] = [];
+      const sources = parsed.source
+        ? [state.sources[parsed.source] ?? fail("Unknown source")]
+        : Object.values(state.sources);
+      for (const source of sources) {
+        const index = await refresh(this.root, source),
+          entry = index.packages[parsed.name];
+        if (entry)
+          candidates.push({
+            source,
+            versions: entry.versions,
+            latest: entry.latest,
+          });
+      }
+      if (!candidates.length) fail("Package not found in configured sources");
+      if (candidates.length > 1)
+        fail("Ambiguous package; specify <source>/<package>");
+      const candidate = candidates[0]!,
+        source = candidate.source;
+      const version = chooseVersion(
+        Object.keys(candidate.versions),
+        request,
+        candidate.latest,
+      );
+      const manifest = await loadManifest(
+        this.root,
+        source,
+        candidate.versions[version]!,
+        parsed.name,
+        version,
+      );
+      const manifestHash = sha256(JSON.stringify(manifest)),
+        key = packageKey(source, parsed.name),
+        id = installId(key, version);
+      const prior = state.installs[id];
+      if (prior) {
+        if (prior.manifestHash !== manifestHash)
+          fail(
+            "Installed version has different manifest content; refusing to overwrite",
+          );
+        if (!prior.verified && !skipChecksum)
+          fail(
+            "Existing installation was not verified; explicit reinstall is required",
+          );
+        return prior;
+      }
+      const platform = manifest.platforms["windows-x64"]!;
+      if (!platform.sha256 && !skipChecksum)
+        fail(
+          "Checksum is required; use --skip-checksum only for an explicit single-install exception",
+        );
+      const bins: Record<string, Bin> = {};
+      for (const [name, value] of Object.entries(platform.bin)) {
+        const normalized = commandName(name);
+        if (Object.hasOwn(bins, normalized))
+          fail("Case-colliding command names");
+        bins[normalized] =
+          typeof value === "string" ? { path: value, kind: "native" } : value;
+      }
+      const persist = platform.persist ?? [];
+      const registered =
+        state.data?.[key]?.paths ??
+        Object.values(state.installs)
+          .filter((i) => i.key === key)
+          .flatMap((i) => i.persist);
+      for (const path of persist) {
+        const normalized = path.toLowerCase();
+        if (
+          registered.some(
+            (prior) =>
+              prior.toLowerCase() !== normalized &&
+              (prior.toLowerCase().startsWith(normalized + "/") ||
+                normalized.startsWith(prior.toLowerCase() + "/")),
+          )
+        )
+          fail("Persistent path overlaps a previously recorded directory");
+      }
+      for (let n = 0; n < persist.length; n++) {
+        const a = persist[n]!.toLowerCase();
+        if (a === ".piko-install.json")
+          fail("Persistence conflicts with installation metadata");
+        for (let m = 0; m < n; m++) {
+          const b = persist[m]!.toLowerCase();
+          if (a === b || a.startsWith(b + "/") || b.startsWith(a + "/"))
+            fail("Overlapping persistent directories");
+        }
+        for (const bin of Object.values(bins))
+          if (
+            bin.path.toLowerCase() === a ||
+            bin.path.toLowerCase().startsWith(a + "/")
+          )
+            fail(
+              "Executable entries cannot be stored in persistent directories",
+            );
+      }
+      const operation = crypto.randomUUID(),
+        stageRoot = join(this.root, "staging", operation),
+        stage = join(stageRoot, "app");
+      await noLinks(stageRoot);
+      await mkdir(stage, { recursive: true });
+      const dir = join("apps", key, versionKey(version)),
+        destination = join(this.root, dir);
+      try {
+        const bytes = await artifactBytes(
+            this.root,
+            platform.url,
+            platform.sha256,
+            skipChecksum,
+          ),
+          checksum = sha256(bytes);
+        const verified =
+          !!platform.sha256 && checksum === platform.sha256.toLowerCase();
+        if (!verified && !skipChecksum)
+          fail("SHA-256 mismatch; installation was not committed");
+        if (skipChecksum)
+          console.error(
+            `WARNING: checksum bypass authorized for ${source.alias}/${parsed.name}@${version} only`,
+          );
+        if (platform.format === "zip") {
+          const archive = join(stageRoot, "download.zip");
+          await writeFile(archive, bytes, { flag: "wx" });
+          await extractZip(archive, stage, platform.stripPrefix);
+        } else {
+          const target = inside(stage, join(stage, platform.file!));
+          if (platform.file!.toLowerCase() === ".piko-install.json")
+            fail("Reserved installation metadata path");
+          await mkdir(dirname(target), { recursive: true });
+          await writeFile(target, bytes, { flag: "wx" });
+        }
+        for (const bin of Object.values(bins)) {
+          const target = inside(stage, join(stage, bin.path));
+          await noLinks(target);
+          if (!(await lstat(target)).isFile())
+            fail("Executable entry is not a regular file");
+        }
+        await noLinks(destination);
+        if (await exists(destination))
+          fail(
+            "Untracked installation directory already exists; inspect it before retrying",
+          );
+        const installation: Install = {
+          id,
+          key,
+          name: parsed.name,
+          version,
+          request,
+          source,
+          dir,
+          bins,
+          persist,
+          verified,
+          checksum,
+          kind: "portable",
+          ...(platform.env ? { env: platform.env } : {}),
+          manifestHash,
+        };
+        await atomicJson(join(stage, ".piko-install.json"), installation);
+        await this.store.publishInstall(installation, stage, operation);
+        state.installs[id] = installation;
+        if (platform.env) {
+          upgradeState(state);
+          state.schemaVersion = 4;
+        }
+        if (persist.length) upgradeState(state);
+        return installation;
+      } finally {
+        if (!(await exists(this.store.installPath)))
+          await removeTree(stageRoot);
+      }
+    });
+  }
+  async update(spec: string): Promise<Install> {
+    const state = await this.store.read(),
+      match = this.installed(state, spec),
+      selection = state.defaults[match.key];
+    if (!selection) fail("Package has no default version to update");
+    const previous = state.installs[selection.id]!;
+    if (previous.kind === "npm") {
+      const context = await npmContext(this.root, state);
+      if (context.registry !== previous.source.url)
+        fail(
+          "npm registry changed; refusing to change the installed package source",
+        );
+      if (selection.request === previous.version) return previous;
+      const installed = await this.install(
+        `npm:${previous.name}@${selection.request}`,
+      );
+      await this.store.mutate(async (current) => {
+        const selected = current.defaults[match.key];
+        if (
+          !selected ||
+          selected.id !== selection.id ||
+          selected.request !== selection.request
+        )
+          fail(
+            "Default changed during update; new npm version is installed but not selected",
+          );
+        this.select(current, match.key, installed.id, selection.request);
+      });
+      return installed;
+    }
+    const active = Object.values(state.sources).find(
+      (s) => s.identity === previous.source.identity,
+    );
+    if (!active)
+      fail("Original source is not configured; restore it before updating");
+    if (selection.request === previous.version) return previous;
+    const installed = await this.install(
+      `${active.alias}/${previous.name}@${selection.request}`,
+    );
+    await this.store.mutate(async (current) => {
+      const selected = current.defaults[match.key];
+      if (
+        !selected ||
+        selected.id !== selection.id ||
+        selected.request !== selection.request
+      )
+        fail(
+          "Default selection changed while updating; new version remains installed but was not selected",
+        );
+      this.select(current, match.key, installed.id, selection.request);
+    });
+    return installed;
+  }
+  async info(spec: string) {
+    const parsed = parseSpec(spec),
+      state = await this.store.read();
+    const installed = Object.values(state.installs).filter(
+      (i) =>
+        i.name === parsed.name &&
+        (!parsed.source || i.source.alias === parsed.source),
+    );
+    const available: { source: Source; versions: string[]; latest: string }[] =
+      [];
+    await this.store.mutate(async (current) => {
+      if (parsed.source === "npm") {
+        const context = await npmContext(this.root, current);
+        const versions = JSON.parse(
+          await context.run(
+            [
+              "view",
+              parsed.name,
+              "versions",
+              "--json",
+              "--registry=" + context.registry,
+            ],
+            join(this.root, "apps", "piko"),
+          ),
+        );
+        const list = typeof versions === "string" ? [versions] : versions;
+        if (!Array.isArray(list) || !list.every((v) => typeof v === "string"))
+          fail("Invalid npm metadata");
+        const resolved = await resolveNpm(
+          context,
+          parsed.name,
+          "latest",
+          join(this.root, "apps", "piko"),
+        );
+        available.push({
+          source: resolved.source,
+          versions: list,
+          latest: resolved.version,
+        });
+      } else
+        for (const source of Object.values(current.sources).filter(
+          (s) => !parsed.source || s.alias === parsed.source,
+        )) {
+          const index = await refresh(this.root, source),
+            entry = index.packages[parsed.name];
+          if (entry)
+            available.push({
+              source,
+              versions: Object.keys(entry.versions),
+              latest: entry.latest,
+            });
+        }
+    });
+    if (!available.length && !installed.length) fail("Package not found");
+    return {
+      package: spec,
+      ambiguous:
+        new Set([
+          ...available.map((a) => a.source.identity),
+          ...installed.map((i) => i.source.identity),
+        ]).size > 1,
+      available,
+      installed: installed.map((i) => ({
+        ...i,
+        default: state.defaults[i.key]?.id === i.id,
+        selection: state.defaults[i.key],
+        path: join(this.root, i.dir),
+      })),
+    };
+  }
+  async updateAll(dryRun = false) {
+    const state = await this.store.read(),
+      results: {
+        package: string;
+        request: string;
+        status: string;
+        version?: string;
+        error?: string;
+      }[] = [];
+    for (const key of Object.keys(state.defaults).sort()) {
+      const selection = state.defaults[key]!,
+        i = state.installs[selection.id]!,
+        spec =
+          i.kind === "npm" ? `npm:${i.name}` : `${i.source.alias}/${i.name}`;
+      if (dryRun) {
+        results.push({
+          package: spec,
+          request: selection.request,
+          status: "planned",
+          version: i.version,
+        });
+        continue;
+      }
+      try {
+        const updated = await this.update(spec);
+        results.push({
+          package: spec,
+          request: selection.request,
+          status: updated.id === i.id ? "unchanged" : "updated",
+          version: updated.version,
+        });
+      } catch (error) {
+        results.push({
+          package: spec,
+          request: selection.request,
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return results;
+  }
+  async scriptInventory(
+    spec: string,
+  ): Promise<NonNullable<Install["scripts"]>> {
+    const state = await this.store.read(),
+      match = this.installed(state, spec);
+    const installation = match.request
+      ? match.installs.find((i) => i.version === match.request)
+      : match.installs.length === 1
+        ? match.installs[0]
+        : undefined;
+    if (!installation || installation.kind !== "npm")
+      fail("Select an exact installed npm package version");
+    return installation.scripts ?? [];
+  }
+  private exactNpm(state: State, spec: string): Install {
+    const match = this.installed(state, spec);
+    const install = match.installs.find((i) => i.version === match.request);
+    if (!install || install.kind !== "npm")
+      fail("An exact installed npm package version is required");
+    return install;
+  }
+  async inspectScripts(spec: string) {
+    return await scriptPlan(
+      this.root,
+      this.exactNpm(await this.store.read(), spec),
+    );
+  }
+  async approveScripts(
+    spec: string,
+    path: string,
+    binding: string,
+  ): Promise<void> {
+    await this.store.mutate(async (state) => {
+      const install = this.exactNpm(state, spec),
+        plan = await scriptPlan(this.root, install);
+      const script = plan.scripts.find((s) => s.path === path);
+      if (!script || script.binding !== binding)
+        fail(
+          "Script approval contents changed; inspect again and confirm the exact binding",
+        );
+
+      if (plan.graph.filter((g) => g.resolved === script.resolved).length !== 1)
+        fail(
+          "Duplicate resolved package cannot be approved at path granularity",
+        );
+      install.npmBuild!.approvals[path] = {
+        binding,
+        approvedAt: new Date().toISOString(),
+      };
+    });
+  }
+  async revokeScripts(spec: string, path: string): Promise<void> {
+    await this.store.mutate(async (state) => {
+      const install = this.exactNpm(state, spec);
+      if (!install.npmBuild?.approvals[path])
+        fail("No script approval exists at this exact path");
+      delete install.npmBuild.approvals[path];
+    });
+  }
+  async rebuildScripts(spec: string): Promise<void> {
+    await this.store.mutate(async (state) => {
+      const before = this.exactNpm(state, spec),
+        plan = await scriptPlan(this.root, before),
+        context = await npmContext(this.root, state);
+      if (context.registry !== before.source.url)
+        fail(
+          "npm registry changed; refusing to rebuild against a different source",
+        );
+      const operation = "npm-rebuild-" + crypto.randomUUID(),
+        control = join(this.root, "staging", operation),
+        stage = join(control, "app"),
+        live = join(this.root, before.dir),
+        backup = join(control, "old");
+      await noLinks(control);
+      await mkdir(control, { recursive: true });
+      let journaled = false;
+      try {
+        await cp(npmSnapshotPath(this.root, plan.inputHash), stage, {
+          recursive: true,
+          errorOnExist: true,
+          force: false,
+        });
+        if ((await npmTreeHash(stage)) !== plan.inputHash)
+          fail("npm snapshot changed while preparing rebuild");
+        await rebuildNpm(
+          context,
+          stage,
+          control,
+          plan,
+          before.npmBuild!.approvals,
+        );
+        const after = structuredClone(before);
+        after.npmBuild!.currentHash = await npmTreeHash(stage);
+        after.npmBuild!.lastRun = {
+          at: new Date().toISOString(),
+          node: await capture(context.node, ["--version"], {
+            env: context.env,
+          }),
+          npm: context.version,
+          paths: plan.scripts.filter((s) => s.approved).map((s) => s.path),
+        };
+        if (
+          (await npmTreeHash(npmSnapshotPath(this.root, plan.inputHash))) !==
+          plan.inputHash
+        )
+          fail("npm snapshot changed during rebuild; refusing replacement");
+        after.runtimeVersion = after.npmBuild!.lastRun.node;
+        for (const bin of Object.values(after.bins)) {
+          const path = join(stage, bin.path);
+          await noLinks(path);
+          if (!(await lstat(path)).isFile())
+            fail("Rebuild removed a CLI executable");
+        }
+        await atomicJson(join(stage, ".piko-install.json"), after);
+        if ((await npmTreeHash(live)) !== before.npmBuild!.currentHash)
+          fail(
+            "Original npm installation changed during rebuild; refusing replacement",
+          );
+        await atomicJson(this.store.rebuildPath, { operation, before, after });
+        journaled = true;
+        await rename(live, backup);
+        await rename(stage, live);
+        state.installs[after.id] = after;
+      } finally {
+        if (!journaled) await removeTree(control);
+      }
+    });
+  }
+  async cleanupData(
+    spec: string,
+    options: {
+      dryRun?: boolean;
+      confirmed?: boolean;
+      expectedPaths?: string[];
+    } = {},
+  ): Promise<{ paths: string[]; deleted: boolean }> {
+    const plan = (state: State) => {
+      upgradeState(state);
+      const parsed = parseSpec(spec);
+      if (parsed.request) fail("Data cleanup targets a package, not a version");
+      const matches = Object.entries(state.data!).filter(
+        ([, data]) =>
+          data.name === parsed.name &&
+          (!parsed.source || data.source.alias === parsed.source),
+      );
+      if (matches.length > 1)
+        fail("Ambiguous persistent package; specify <source>/<package>");
+      if (!matches.length) {
+        if (
+          Object.values(state.installs).some(
+            (i) =>
+              i.name === parsed.name &&
+              (!parsed.source || i.source.alias === parsed.source),
+          )
+        )
+          fail("Package still has installed versions");
+        fail(
+          "No recorded persistent data for this package; legacy untracked directories must be inspected manually",
+        );
+      }
+      const [key, data] = matches[0]!;
+      if (Object.values(state.installs).some((i) => i.key === key))
+        fail("Package still has installed versions referencing its data");
+      return {
+        key,
+        data,
+        paths: data.paths.map((path) =>
+          inside(
+            join(this.root, "persist", key),
+            join(this.root, "persist", key, path),
+          ),
+        ),
+      };
+    };
+    if (options.dryRun) {
+      const { paths } = plan(await this.store.read());
+      for (const path of paths) await noLinksTree(path);
+      return { paths, deleted: false };
+    }
+    return await this.store.mutate(async (state) => {
+      const { key, data, paths } = plan(state);
+      if (!options.confirmed)
+        fail(
+          "Explicit data deletion confirmation required; use --dry-run then --yes",
+        );
+      if (
+        options.expectedPaths &&
+        JSON.stringify(options.expectedPaths) !== JSON.stringify(paths)
+      )
+        fail("Cleanup targets changed after confirmation; preview again");
+      for (const path of paths) await noLinksTree(path);
+      const operation = "data-cleanup-" + crypto.randomUUID(),
+        stage = join(this.root, "staging", operation);
+      await noLinks(stage);
+      await mkdir(stage, { recursive: true });
+      await atomicJson(join(stage, ".piko-cleanup.json"), { key, data });
+      await atomicJson(this.store.dataRemovalPath, { key, data, operation });
+      for (let n = 0; n < paths.length; n++)
+        if (await exists(paths[n]!))
+          await rename(paths[n]!, join(stage, String(n)));
+      delete state.data![key];
+      return { paths, deleted: true };
+    });
+  }
+  async uninstall(spec: string, force = false): Promise<void> {
+    await this.store.mutate(async (state) => {
+      upgradeState(state);
+      const match = this.installed(state, spec);
+      if (!match.request) fail("Uninstall requires an exact installed version");
+      const installation = match.installs.find(
+        (i) => i.version === match.request,
+      );
+      if (!installation) fail("Exact installed version not found");
+      if (state.defaults[match.key]?.id === installation.id) {
+        if (!force)
+          fail(
+            "Cannot uninstall the default version; switch or unuse it first, or explicitly use --force",
+          );
+        delete state.defaults[match.key];
+        this.clearCommands(state, match.key);
+      }
+      const from = join(this.root, installation.dir),
+        trash = `uninstall-${crypto.randomUUID()}`,
+        to = join(this.root, "staging", trash);
+      await noLinks(from);
+      await noLinks(dirname(to));
+      await mkdir(dirname(to), { recursive: true });
+      // Only unlink declared mappings after verifying their exact managed target.
+      for (const path of installation.persist) {
+        const link = join(from, path),
+          expected = resolve(
+            join(this.root, "persist", installation.key, path),
+          );
+        if (!(await exists(link))) continue;
+        if (
+          !(await lstat(link)).isSymbolicLink() ||
+          resolve(await readlink(link)).toLowerCase() !== expected.toLowerCase()
+        )
+          fail("Persistent mapping drift; refusing removal");
+      }
+      await atomicJson(this.store.removalPath, { installation, trash });
+      await rename(from, to);
+      delete state.installs[installation.id];
+    });
+  }
+}
