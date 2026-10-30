@@ -15,6 +15,7 @@ import {
   networkUrl,
 } from "./util.ts";
 import { chooseVersion } from "./catalog.ts";
+import { validateNpmLock } from "./npm-lock.ts";
 import { sourceIdentity } from "./store.ts";
 import type { Source, State, Bin, Install } from "./types.ts";
 
@@ -33,10 +34,13 @@ export function npmEnvironment(node: string): NodeJS.ProcessEnv {
 export async function npmContext(
   root: string,
   state: State,
+  name?: string,
 ): Promise<{
   node: string;
   npm: string;
   registry: string;
+  defaultRegistry: string;
+  registries: Record<string, string>;
   version: string;
   env: NodeJS.ProcessEnv;
   run: (args: string[], cwd: string) => Promise<string>;
@@ -58,10 +62,29 @@ export async function npmContext(
     "--fetch-timeout=30000",
     "--cache=" + join(root, "cache", "npm"),
   ];
+  const registries: Record<string, string> = {};
+  if (process.env.PIKO_NPM_SCOPED_REGISTRIES) {
+    const configured = JSON.parse(process.env.PIKO_NPM_SCOPED_REGISTRIES);
+    if (!record(configured) || Object.keys(configured).length > 100)
+      fail("Invalid PIKO_NPM_SCOPED_REGISTRIES");
+    for (const [scope, url] of Object.entries(configured)) {
+      if (!/^@[a-z0-9][a-z0-9._-]*$/.test(scope) || typeof url !== "string")
+        fail("Invalid npm scope registry");
+      registries[scope] = networkUrl(url).href;
+    }
+  }
   const run = async (args: string[], cwd: string) => {
     const result = await capture(
       selected.exe,
-      [selected.npm, ...args, ...base, "--prefix=" + cwd],
+      [
+        selected.npm,
+        ...args,
+        ...base,
+        ...Object.entries(registries).map(
+          ([scope, url]) => "--" + scope + ":registry=" + url,
+        ),
+        "--prefix=" + cwd,
+      ],
       { cwd, env },
     );
     return result;
@@ -71,11 +94,32 @@ export async function npmContext(
     fail(
       `npm ${version} is not verified for dependency-source controls; use a managed Node with npm >=11.20.0`,
     );
-  const registry = networkUrl(
+  const defaultRegistry = networkUrl(
     process.env.PIKO_NPM_REGISTRY ??
       (await run(["config", "get", "registry"], control)).trim(),
   ).href;
-  return { node: selected.exe, npm: selected.npm, registry, version, env, run };
+  if (name?.startsWith("@")) {
+    const scope = name.split("/")[0]!;
+    const configured = await run(
+      ["config", "get", scope + ":registry"],
+      control,
+    );
+    if (!["undefined", "null", ""].includes(configured))
+      registries[scope] = networkUrl(configured).href;
+  }
+  const registry =
+    (name?.startsWith("@") && registries[name.split("/")[0]!]) ||
+    defaultRegistry;
+  return {
+    node: selected.exe,
+    npm: selected.npm,
+    registry,
+    defaultRegistry,
+    registries,
+    version,
+    env,
+    run,
+  };
 }
 export function npmSource(registry: string): Source {
   return {
@@ -92,19 +136,12 @@ export async function resolveNpm(
   cwd: string,
 ): Promise<{ version: string; source: Source }> {
   npmName(name);
-  if (name.startsWith("@")) {
-    const scoped = await context.run(
-      ["config", "get", name.split("/")[0] + ":registry"],
-      cwd,
-    );
-    if (
-      !["undefined", "null", ""].includes(scoped) &&
-      networkUrl(scoped).href !== context.registry
-    )
-      fail(
-        "A different scoped npm registry is configured; this preview requires one registry via PIKO_NPM_REGISTRY",
-      );
-  }
+  if (
+    name.startsWith("@") &&
+    context.registries[name.split("/")[0]!] &&
+    context.registry !== context.registries[name.split("/")[0]!]
+  )
+    fail("Resolve npm context for the requested package scope first");
   const value = JSON.parse(
     await context.run(
       ["view", name, "versions", "--json", "--registry=" + context.registry],
@@ -124,6 +161,7 @@ export async function prepareNpm(
   stage: string,
   name: string,
   version: string,
+  locked?: unknown,
 ): Promise<{
   bins: Record<string, Bin>;
   scripts: NonNullable<Install["scripts"]>;
@@ -140,10 +178,14 @@ export async function prepareNpm(
       dependencies: { [name]: version },
     }),
   );
+  if (locked !== undefined) {
+    validateNpmLock(locked, name, version);
+    await writeFile(join(stage, "package-lock.json"), JSON.stringify(locked));
+  }
   await context.run(
     [
-      "install",
-      "--registry=" + context.registry,
+      locked === undefined ? "install" : "ci",
+      "--registry=" + context.defaultRegistry,
       "--save-exact",
       "--engine-strict=true",
       "--bin-links=false",
@@ -158,6 +200,11 @@ export async function prepareNpm(
     await readFile(join(stage, "package-lock.json"), "utf8"),
   );
   if (!record(lock.packages)) fail("Missing resolved npm dependency graph");
+  if (
+    locked !== undefined &&
+    sha256(JSON.stringify(lock)) !== sha256(JSON.stringify(locked))
+  )
+    fail("npm ci changed the locked dependency graph; refusing commit");
   const scripts: NonNullable<Install["scripts"]> = [];
   for (const [path, entry] of Object.entries(lock.packages)) {
     if (!path) continue;

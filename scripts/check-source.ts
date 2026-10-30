@@ -1,11 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { normalizeManifest } from "../src/catalog.ts";
+import {
+  distributionDownloads,
+  normalizeIndex,
+  normalizeManifest,
+} from "../src/catalog.ts";
 import { component, noLinks, record, relativeFile } from "../src/util.ts";
 export async function checkSource(folder: string) {
   const root = resolve(folder);
   await noLinks(root);
-  const index = JSON.parse(await readFile(join(root, "index.json"), "utf8"));
+  const index = normalizeIndex(
+    JSON.parse(await readFile(join(root, "index.json"), "utf8")),
+  );
   if (index.schemaVersion !== 1 || !record(index.packages))
     throw new Error("Invalid source index");
   const checked = [];
@@ -27,7 +33,11 @@ export async function checkSource(folder: string) {
         name,
         version,
       );
-      if (!manifest.platforms["windows-x64"]?.sha256)
+      if (
+        distributionDownloads(manifest.platforms["windows-x64"]!).some(
+          (d) => !d.sha256,
+        )
+      )
         throw new Error("Catalog releases require checksums");
       checked.push({ name, version, path });
     }

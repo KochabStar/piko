@@ -18,6 +18,14 @@ import { packageKey, installId, validateState } from "../src/store.ts";
 import { makeSource, parseSpec } from "../src/catalog.ts";
 import { Packages } from "../src/packages.ts";
 import { npmContext } from "../src/npm.ts";
+import { checkNpmEngines, checkNpmRuntime } from "../src/npm-runtime.ts";
+import { verifyNpmPolicy } from "../src/npm-policy.ts";
+import {
+  exportInventory,
+  exportLockedInventory,
+  importInventory,
+  planInventory,
+} from "../src/inventory.ts";
 import { npmTreeHash, npmSnapshotPath } from "../src/scripts.ts";
 import { exists, capture, atomicJson } from "../src/util.ts";
 import type { Install } from "../src/types.ts";
@@ -41,9 +49,20 @@ const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   fetch(request) {
-    const path = decodeURIComponent(new URL(request.url).pathname).slice(1);
+    const path = decodeURIComponent(new URL(request.url).pathname)
+      .slice(1)
+      .replace(/^private\//, "");
     if (archives[path]) return new Response(new Uint8Array(archives[path]!));
-    if (metadata[path]) return Response.json(metadata[path]);
+    if (metadata[path]) {
+      const value = structuredClone(metadata[path]);
+      if (new URL(request.url).pathname.startsWith("/private/"))
+        for (const version of Object.values(value.versions ?? {}) as any[])
+          version.dist.tarball = version.dist.tarball.replace(
+            registry,
+            registry + "private/",
+          );
+      return Response.json(value);
+    }
     return new Response("not found", { status: 404 });
   },
 });
@@ -172,6 +191,68 @@ afterAll(async () => {
     retryDelay: 100,
   });
 });
+
+test("scoped registries retain separate provenance and locked export restores the exact graph", async () => {
+  const previous = process.env.PIKO_NPM_SCOPED_REGISTRIES;
+  process.env.PIKO_NPM_SCOPED_REGISTRIES = JSON.stringify({
+    "@piko-fixture": registry + "private/",
+  });
+  try {
+    const cli = await manager.install("npm:@piko-fixture/cli@1.0.0");
+    expect(cli.source.url).toBe(registry + "private/");
+    const locked = await exportLockedInventory(manager);
+    expect(locked.npmRegistries?.["@piko-fixture/cli"]).toBe(
+      registry + "private/",
+    );
+    expect(locked.npmLocks?.["npm:@piko-fixture/cli@1.0.0"]).toBeDefined();
+    // Restore just the CLI into a root with an explicitly selected managed Node.
+    const target = new Packages(join(root, "locked-restore"));
+    const state = await manager.store.read();
+    const ni = Object.values(state.installs).find((i) => i.name === "node")!;
+    await mkdir(join(target.root, ni.dir), { recursive: true });
+    await cp(join(root, ni.dir), join(target.root, ni.dir), {
+      recursive: true,
+    });
+    await target.store.mutate(async (s) => {
+      s.installs[ni.id] = ni;
+      s.defaults[ni.key] = state.defaults[ni.key]!;
+      s.commands.node = ni.key;
+    });
+    const inventory = {
+      ...locked,
+      sources: [],
+      packages: locked.packages.filter((p) => p.source === "npm"),
+      aliases: [],
+      integrations: [],
+    };
+    await importInventory(target, inventory, { confirmed: true });
+    const restored = Object.values((await target.store.read()).installs).find(
+      (i) => i.kind === "npm",
+    )!;
+    expect(restored.checksum).toBe(cli.checksum);
+    expect(restored.npmBuild?.approvals).toEqual({});
+    await manager.uninstall("npm:@piko-fixture/cli@1.0.0");
+  } finally {
+    if (previous === undefined) delete process.env.PIKO_NPM_SCOPED_REGISTRIES;
+    else process.env.PIKO_NPM_SCOPED_REGISTRIES = previous;
+  }
+}, 60000);
+
+test("npm compatibility checks nested engines and native ABI; script policy is tested rather than version-pinned", async () => {
+  const cli = await manager.install("npm:@piko-fixture/cli@1.0.0");
+  const context = await npmContext(root, await manager.store.read(), cli.name);
+  expect(cli.npmCompatibility?.nodeAbi).toMatch(/^\d+$/);
+  const changed = structuredClone(cli);
+  changed.npmCompatibility!.engines["node_modules/nested"] = "<1";
+  expect(() => checkNpmEngines(changed, "26.12.1")).toThrow("nested");
+  changed.npmCompatibility!.engines = {};
+  changed.npmCompatibility!.nodeAbi = "0";
+  changed.npmCompatibility!.nativeFiles = ["node_modules/addon.node"];
+  await expect(
+    checkNpmRuntime(root, changed, context.node, "26.12.1"),
+  ).rejects.toThrow("ABI");
+  await verifyNpmPolicy({ ...context, version: "11.21.0" }, root);
+}, 60000);
 
 test("npm specs retain scoped names and exact requests", () => {
   expect(parseSpec("npm:@piko-fixture/cli@1")).toEqual({
@@ -492,7 +573,7 @@ test("content-bound approval runs only the selected package and revocation rebui
   await manager.approveScripts(spec, top.path, top.binding);
   const legacy = structuredClone(await manager.store.read());
   legacy.schemaVersion = 2;
-  expect(() => validateState(legacy)).toThrow("metadata");
+  expect(() => validateState(legacy)).toThrow("schema 8");
   await manager.use("npm:@piko-fixture/cli@1.1.0");
   const selection = structuredClone((await manager.store.read()).defaults);
   const polluted = [
@@ -802,4 +883,89 @@ test("npm strict mode blocks unreviewed scripts and explicit denials keep depend
       ),
     ),
   ).toBe(false);
+}, 60000);
+
+test("npm P1 preview and portable inventory restore retain registry provenance and never restore script approvals", async () => {
+  const spec = "npm:@piko-fixture/cli";
+  await manager.use(spec + "@1.0.0");
+  await manager.store.mutate(async (state) => {
+    const i = Object.values(state.installs).find(
+      (i) =>
+        i.kind === "npm" &&
+        i.name === "@piko-fixture/cli" &&
+        i.version === "1.0.0",
+    )!;
+    state.defaults[i.key]!.request = "1";
+  });
+  const before = await manager.store.read();
+  const row = (await manager.outdated(spec))[0]!;
+  expect(row).toMatchObject({
+    current: "1.0.0",
+    candidate: "1.1.0",
+    request: "1",
+    status: "outdated",
+  });
+  expect(await manager.store.read()).toEqual(before);
+  const inventory = exportInventory(before);
+  inventory.sources = [];
+  inventory.packages = inventory.packages.filter(
+    (p) => p.source === "npm" && p.name === "@piko-fixture/cli",
+  );
+  inventory.packages[0]!.versions = ["1.0.0"];
+  inventory.npmRegistries = { "@piko-fixture/cli": registry };
+  inventory.aliases = [];
+  expect(JSON.stringify(inventory)).not.toContain("approvals");
+  const nodeInstall = Object.values(before.installs).find(
+    (i) => i.name === "node",
+  )!;
+  const target = new Packages(join(root, "inventory-target"));
+  await cp(join(root, nodeInstall.dir), join(target.root, nodeInstall.dir), {
+    recursive: true,
+  });
+  await target.store.mutate(async (state) => {
+    state.schemaVersion = 4;
+    state.aliases = {};
+    state.data = {};
+    state.installs[nodeInstall.id] = structuredClone(nodeInstall);
+    state.defaults[nodeInstall.key] = {
+      id: nodeInstall.id,
+      request: nodeInstall.version,
+      commands: ["node"],
+    };
+    state.commands.node = nodeInstall.key;
+  });
+  const plan = await planInventory(target, inventory);
+  expect(plan.conflicts).toEqual([]);
+  await importInventory(target, inventory, {
+    confirmed: true,
+    binding: plan.binding,
+  });
+  const restored = Object.values((await target.store.read()).installs).find(
+    (i) => i.kind === "npm",
+  )!;
+  expect(restored.version).toBe("1.0.0");
+  expect(restored.source.url).toBe(registry);
+  expect(restored.npmBuild?.approvals).toEqual({});
+  expect(
+    await exists(
+      join(
+        target.root,
+        restored.dir,
+        "node_modules/@piko-fixture/cli/SHOULD_NOT_EXIST",
+      ),
+    ),
+  ).toBe(false);
+  expect((await target.store.read()).defaults[nodeInstall.key]?.id).toBe(
+    nodeInstall.id,
+  );
+  const old = process.env.PIKO_NPM_REGISTRY;
+  process.env.PIKO_NPM_REGISTRY = "https://different-registry.invalid/";
+  try {
+    expect((await manager.outdated(spec))[0]?.reason).toContain(
+      "registry changed",
+    );
+  } finally {
+    if (old === undefined) delete process.env.PIKO_NPM_REGISTRY;
+    else process.env.PIKO_NPM_REGISTRY = old;
+  }
 }, 60000);

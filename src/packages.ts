@@ -1,3 +1,20 @@
+import { enrollStartMenu } from "./start-menu.ts";
+import {
+  carryDesktopIntegration,
+  planDesktopUpgrade,
+  stageDesktopChange,
+} from "./desktop.ts";
+import type { WindowsEffects } from "./windows-effects.ts";
+import { editProfile, profileBytes, stageProfileChange } from "./profiles.ts";
+import {
+  persistence,
+  renderTemplate,
+  checkPackagePersistentFiles,
+  checkPersistentFileMappings,
+  noLinksData,
+} from "./persistence.ts";
+import { selectedEnvironment } from "./environment.ts";
+import semver from "semver";
 import {
   cp,
   mkdir,
@@ -8,6 +25,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { artifactBytes } from "./cache.ts";
+import { chooseLayout, installDirectory, persistentFolder } from "./layout.ts";
 import { Store, packageKey, installId, upgradeState } from "./store.ts";
 import {
   makeSource,
@@ -15,8 +33,17 @@ import {
   loadManifest,
   parseSpec,
   chooseVersion,
+  normalizeIndex,
+  distributionDownloads,
 } from "./catalog.ts";
-import { extractZip } from "./artifacts.ts";
+import { ensureInstallerTool } from "./installer-tools.ts";
+import { ensureInnoUnpacker, ensureSevenZip } from "./helpers.ts";
+import { dependencyStatus } from "./dependencies.ts";
+import {
+  extractArchive,
+  extractionState,
+  writeArtifactFile,
+} from "./artifacts.ts";
 import {
   capture,
   commandName,
@@ -24,12 +51,12 @@ import {
   exists,
   fail,
   noLinks,
-  noLinksTree,
   removeTree,
   sha256,
-  versionKey,
   atomicJson,
   inside,
+  json,
+  publicEndpoint,
 } from "./util.ts";
 import {
   saveNpmSnapshot,
@@ -39,21 +66,58 @@ import {
   rebuildNpm,
 } from "./scripts.ts";
 import { npmContext, resolveNpm, prepareNpm } from "./npm.ts";
-import type { Bin, Install, Source, State } from "./types.ts";
+import { npmCompatibility } from "./npm-runtime.ts";
+import type { Bin, CatalogPackage, Install, Source, State } from "./types.ts";
 
 export class Packages {
   readonly store: Store;
-  constructor(readonly root: string) {
-    this.store = new Store(root);
+  constructor(
+    readonly root: string,
+    readonly effectsBackend?: WindowsEffects,
+  ) {
+    this.store = new Store(root, effectsBackend);
+  }
+  async runtimeSpec(spec: string, distribution?: string): Promise<string> {
+    if (!distribution) return spec;
+    distribution = component(distribution);
+    const parsed = parseSpec(spec);
+    if (parsed.source === "npm")
+      fail("Runtime distribution does not apply to npm");
+    const state = await this.store.read(),
+      matches: string[] = [];
+    for (const original of Object.values(state.sources).filter(
+      (s) => !parsed.source || s.alias === parsed.source,
+    )) {
+      const source = structuredClone(original),
+        index = await refresh(this.root, source);
+      for (const [name, entry] of Object.entries(index.packages))
+        if (
+          entry.runtime?.family === parsed.name &&
+          entry.runtime.distribution === distribution
+        )
+          matches.push(
+            `${source.alias}/${name}${parsed.request ? "@" + parsed.request : ""}`,
+          );
+    }
+    if (matches.length !== 1)
+      fail(
+        matches.length
+          ? "Ambiguous runtime distribution; specify a source"
+          : "Runtime distribution not found in configured sources",
+      );
+    return matches[0]!;
   }
   async addSource(
     alias: string,
     url: string,
     type: "http" | "git" = "http",
     ref?: string,
+    expectedRevision?: number,
   ): Promise<void> {
     const source = makeSource(alias, url, type, ref);
     await this.store.mutate(async (state) => {
+      if (expectedRevision !== undefined && state.revision !== expectedRevision)
+        fail("State changed during inventory restore; preview again");
       if (Object.hasOwn(state.sources, source.alias))
         fail("Source already exists; remove it explicitly before replacing it");
       await refresh(this.root, source);
@@ -111,16 +175,38 @@ export class Packages {
     if (keys.length > 1) fail("Ambiguous package; specify <source>/<package>");
     return { key: keys[0]!, installs: matches, request: p.request };
   }
-  private select(
+  private async select(
     state: State,
     key: string,
     id: string,
     request: string,
     noCommands = false,
-  ): void {
+  ): Promise<void> {
     upgradeState(state);
     const install = state.installs[id];
     if (!install || install.key !== key) fail("Missing installed target");
+    if (
+      Object.values(install.bins).some((b) => b.data) &&
+      state.bootstraps?.[id]?.status !== "completed"
+    )
+      fail(
+        "Run and approve this version's bootstrap before selecting generated commands",
+      );
+    await carryDesktopIntegration(
+      this.root,
+      state,
+      install,
+      this.effectsBackend,
+    );
+    if (
+      Object.values(state.admin ?? {}).some(
+        (r) =>
+          state.installs[r.id]?.key === key &&
+          r.action === "install" &&
+          r.id !== id,
+      )
+    )
+      fail("Remove system integration before switching versions");
     const prior = state.defaults[key];
     const enabled = noCommands
       ? []
@@ -147,20 +233,110 @@ export class Packages {
     state.defaults[key] = { id, request, commands: enabled };
     for (const command of enabled) state.commands[command] = key;
   }
+  async upgradeDesktop(spec: string, binding: string): Promise<void> {
+    await this.store.mutate(
+      async (state) => {
+        const plan = await planDesktopUpgrade(
+          this.root,
+          state,
+          spec,
+          this.effectsBackend,
+        );
+        if (!binding || binding !== plan.binding)
+          fail(
+            "Desktop upgrade changed; preview again and pass --yes --binding",
+          );
+        await stageDesktopChange(
+          this.root,
+          state,
+          plan.install.key,
+          plan.operations,
+          plan.receipt,
+          this.effectsBackend,
+        );
+        state.desktop![plan.install.key] = plan.receipt!;
+        await this.select(
+          state,
+          plan.install.key,
+          plan.install.id,
+          plan.install.version,
+        );
+      },
+      { effectsBackend: this.effectsBackend },
+    );
+  }
   async use(
     spec: string,
-    options: { noCommands?: boolean } = {},
+    options: { noCommands?: boolean; expectedRevision?: number } = {},
   ): Promise<void> {
     await this.store.mutate(async (state) => {
+      if (
+        options.expectedRevision !== undefined &&
+        state.revision !== options.expectedRevision
+      )
+        fail("State changed during dependency installation; preview again");
       const match = this.installed(state, spec);
       if (!match.request && match.installs.length !== 1)
         fail("Multiple versions are installed; specify a version");
       const request = match.request ?? match.installs[0]!.version;
+      let aliases: Record<string, string> | undefined;
+      if (
+        request !== "latest" &&
+        !match.installs.some((i) => i.version === request) &&
+        !/^\d+(?:\.\d+)?$/.test(request)
+      ) {
+        const original = match.installs[0]!.source;
+        const source = Object.values(state.sources).find(
+          (s) => s.identity === original.identity,
+        );
+        if (!source)
+          fail("Restore the original source before resolving a version alias");
+        aliases = (await refresh(this.root, source)).packages[
+          match.installs[0]!.name
+        ]?.aliases;
+      }
+      let latest: string | undefined;
+      if (request === "latest") {
+        const source = match.installs[0]!.source;
+        const indexFile = join(
+          this.root,
+          "sources",
+          source.identity,
+          "index.json",
+        );
+        // Use the validated cached source designation, not semver coercion:
+        // vendors also publish four-part versions and build identifiers.
+        // Selection stays offline and never installs a missing newer version.
+        if (await exists(indexFile)) {
+          await noLinks(indexFile);
+          latest = normalizeIndex(await json(indexFile)).packages[
+            match.installs[0]!.name
+          ]?.latest;
+        }
+      }
       const version = chooseVersion(
         match.installs.map((i) => i.version),
         request,
+        latest,
+        aliases,
       );
-      this.select(
+      await checkPersistentFileMappings(
+        this.root,
+        state.installs[match.installs.find((i) => i.version === version)!.id]!,
+      );
+      for (const bin of Object.values(
+        match.installs.find((i) => i.version === version)!.bins,
+      ))
+        if (bin.data)
+          await (
+            await import("./execution.ts")
+          ).persistentExecutable(
+            this.root,
+            state,
+            match.installs.find((i) => i.version === version)!,
+            bin.path,
+          );
+      await this.select(
         state,
         match.key,
         match.installs.find((i) => i.version === version)!.id,
@@ -185,6 +361,7 @@ export class Packages {
     const install = state.installs[selection.id]!;
     if (
       match.request &&
+      match.request !== selection.request &&
       chooseVersion([install.version], match.request) !== install.version
     )
       fail("Command operations require the selected default version");
@@ -222,10 +399,13 @@ export class Packages {
     name: string,
     spec: string,
     provided: string,
+    expectedRevision?: number,
   ): Promise<void> {
     name = commandName(name);
     provided = commandName(provided);
     await this.store.mutate(async (state) => {
+      if (expectedRevision !== undefined && state.revision !== expectedRevision)
+        fail("State changed during inventory restore; preview again");
       upgradeState(state);
       if (state.commands[name] || state.aliases![name])
         fail(
@@ -263,17 +443,35 @@ export class Packages {
   async unuse(spec: string): Promise<void> {
     await this.store.mutate(async (state) => {
       const { key } = this.installed(state, spec);
+      await (
+        await import("./data-profiles.ts")
+      ).assertNoDataProfile(this.root, key);
+      if (
+        state.desktop?.[key] ||
+        Object.values(state.admin ?? {}).some(
+          (r) => state.installs[r.id]?.key === key && r.action === "install",
+        )
+      )
+        fail("Revoke desktop/system integration before unuse");
       delete state.defaults[key];
       this.clearCommands(state, key);
     });
   }
-  async install(spec: string, skipChecksum = false): Promise<Install> {
+  async install(
+    spec: string,
+    skipChecksum = false,
+    expectedRevision?: number,
+    expectedManifestHash?: string,
+    npmLock?: unknown,
+  ): Promise<Install> {
     return await this.store.mutate(async (state) => {
+      if (expectedRevision !== undefined && state.revision !== expectedRevision)
+        fail("State changed during inventory restore; preview again");
       const parsed = parseSpec(spec),
         request = parsed.request ?? "latest";
       if (parsed.source === "npm") {
         if (skipChecksum) fail("--skip-checksum does not bypass npm integrity");
-        const context = await npmContext(this.root, state),
+        const context = await npmContext(this.root, state, parsed.name),
           resolved = await resolveNpm(
             context,
             parsed.name,
@@ -283,10 +481,26 @@ export class Packages {
         const key = packageKey(resolved.source, parsed.name),
           id = installId(key, resolved.version),
           prior = state.installs[id];
-        if (prior) return prior;
+        if (prior) {
+          if (
+            npmLock !== undefined &&
+            prior.checksum !== sha256(JSON.stringify(npmLock))
+          )
+            fail(
+              "Existing npm installation has a different locked graph; uninstall/reconcile explicitly",
+            );
+          return prior;
+        }
+        const layout = chooseLayout(state, resolved.source, parsed.name);
         const operation = crypto.randomUUID(),
           stage = join(this.root, "staging", operation, "app"),
-          dir = join("apps", key, versionKey(resolved.version)),
+          dir = installDirectory(
+            resolved.source,
+            parsed.name,
+            resolved.version,
+            key,
+            layout,
+          ),
           destination = join(this.root, dir);
         await noLinks(stage);
         await mkdir(stage, { recursive: true });
@@ -296,6 +510,7 @@ export class Packages {
             stage,
             parsed.name,
             resolved.version,
+            npmLock,
           );
           const inputHash = await saveNpmSnapshot(this.root, stage);
           upgradeState(state);
@@ -304,6 +519,7 @@ export class Packages {
             3,
           ) as State["schemaVersion"];
           const installation: Install = {
+            ...(layout ? { layout } : {}),
             npmBuild: { inputHash, currentHash: inputHash, approvals: {} },
             id,
             key,
@@ -313,6 +529,7 @@ export class Packages {
             source: resolved.source,
             dir,
             bins: prepared.bins,
+            npmCompatibility: await npmCompatibility(stage, context.node),
             persist: [],
             verified: true,
             checksum: prepared.checksum,
@@ -340,23 +557,14 @@ export class Packages {
             await removeTree(join(this.root, "staging", operation));
         }
       }
-      const candidates: {
-        source: Source;
-        versions: Record<string, string>;
-        latest: string;
-      }[] = [];
+      const candidates: { source: Source; entry: CatalogPackage }[] = [];
       const sources = parsed.source
         ? [state.sources[parsed.source] ?? fail("Unknown source")]
         : Object.values(state.sources);
       for (const source of sources) {
         const index = await refresh(this.root, source),
           entry = index.packages[parsed.name];
-        if (entry)
-          candidates.push({
-            source,
-            versions: entry.versions,
-            latest: entry.latest,
-          });
+        if (entry) candidates.push({ source, entry });
       }
       if (!candidates.length) fail("Package not found in configured sources");
       if (candidates.length > 1)
@@ -364,22 +572,43 @@ export class Packages {
       const candidate = candidates[0]!,
         source = candidate.source;
       const version = chooseVersion(
-        Object.keys(candidate.versions),
+        Object.keys(candidate.entry.versions),
         request,
-        candidate.latest,
+        candidate.entry.latest,
+        candidate.entry.aliases,
       );
       const manifest = await loadManifest(
         this.root,
         source,
-        candidate.versions[version]!,
+        candidate.entry.versions[version]!,
         parsed.name,
         version,
       );
+      const dependencyChecks = await dependencyStatus(
+        this.root,
+        state,
+        source,
+        manifest.platforms["windows-x64"]!.depends,
+      );
+      const unmet = dependencyChecks.filter((d) => !d.satisfied);
+      if (unmet.length)
+        fail(
+          "Unmet dependencies (no dependency or default was changed):\n" +
+            unmet
+              .map(
+                (d) =>
+                  `${d.package}: ${d.issues.join("; ")}\n  ${d.advice.join("\n  ")}`,
+              )
+              .join("\n"),
+        );
       const manifestHash = sha256(JSON.stringify(manifest)),
         key = packageKey(source, parsed.name),
         id = installId(key, version);
+      if (expectedManifestHash && manifestHash !== expectedManifestHash)
+        fail("Manifest changed since inventory preview; preview again");
       const prior = state.installs[id];
       if (prior) {
+        await checkPackagePersistentFiles(this.root, state, key);
         if (prior.manifestHash !== manifestHash)
           fail(
             "Installed version has different manifest content; refusing to overwrite",
@@ -388,10 +617,12 @@ export class Packages {
           fail(
             "Existing installation was not verified; explicit reinstall is required",
           );
+        await enrollStartMenu(this.root, state, prior, this.effectsBackend);
         return prior;
       }
       const platform = manifest.platforms["windows-x64"]!;
-      if (!platform.sha256 && !skipChecksum)
+      const downloads = distributionDownloads(platform);
+      if (downloads.some((d) => !d.sha256) && !skipChecksum)
         fail(
           "Checksum is required; use --skip-checksum only for an explicit single-install exception",
         );
@@ -403,7 +634,41 @@ export class Packages {
         bins[normalized] =
           typeof value === "string" ? { path: value, kind: "native" } : value;
       }
-      const persist = platform.persist ?? [];
+      const { paths: persist, files: persistFiles } = persistence(
+        platform.persist,
+      );
+      await checkPackagePersistentFiles(this.root, state, key);
+      for (const previous of Object.values(state.installs).filter(
+        (i) => i.key === key,
+      ))
+        for (const path of persist) {
+          const priorPath = previous.persist.find(
+            (p) => p.toLowerCase() === path.toLowerCase(),
+          );
+          if (
+            priorPath &&
+            (priorPath !== path ||
+              previous.persistFiles?.[priorPath]?.mode !==
+                persistFiles[path]?.mode)
+          )
+            fail(
+              "Persistent path spelling/type/mode changed; explicit migration required",
+            );
+        }
+      for (const path of persist) {
+        const data = state.data?.[key];
+        const priorPath = data?.paths.find(
+          (p) => p.toLowerCase() === path.toLowerCase(),
+        );
+        if (
+          priorPath &&
+          (priorPath !== path ||
+            data?.files?.[priorPath]?.mode !== persistFiles[path]?.mode)
+        )
+          fail(
+            "Recorded persistent data type/mode changed; explicit migration required",
+          );
+      }
       const registered =
         state.data?.[key]?.paths ??
         Object.values(state.installs)
@@ -432,8 +697,9 @@ export class Packages {
         }
         for (const bin of Object.values(bins))
           if (
-            bin.path.toLowerCase() === a ||
-            bin.path.toLowerCase().startsWith(a + "/")
+            !bin.data &&
+            (bin.path.toLowerCase() === a ||
+              bin.path.toLowerCase().startsWith(a + "/"))
           )
             fail(
               "Executable entries cannot be stored in persistent directories",
@@ -444,36 +710,139 @@ export class Packages {
         stage = join(stageRoot, "app");
       await noLinks(stageRoot);
       await mkdir(stage, { recursive: true });
-      const dir = join("apps", key, versionKey(version)),
+      const layout = chooseLayout(state, source, parsed.name);
+      const dir = installDirectory(source, parsed.name, version, key, layout),
         destination = join(this.root, dir);
       try {
-        const bytes = await artifactBytes(
-            this.root,
-            platform.url,
-            platform.sha256,
-            skipChecksum,
-          ),
-          checksum = sha256(bytes);
-        const verified =
-          !!platform.sha256 && checksum === platform.sha256.toLowerCase();
-        if (!verified && !skipChecksum)
-          fail("SHA-256 mismatch; installation was not committed");
+        let sevenZip: string | undefined,
+          inno: string | undefined,
+          lessMsi: string | undefined;
+        if (
+          downloads.some(
+            (d) =>
+              d.format === "msi" || d.format === "nsis" || d.format === "pe",
+          )
+        )
+          sevenZip = await ensureInstallerTool(this.root, state, "full7zip");
+        if (downloads.some((d) => d.format === "msi"))
+          lessMsi = await ensureInstallerTool(this.root, state, "lessmsi");
+        if (
+          !sevenZip &&
+          downloads.some(
+            (d) =>
+              ["7z", "tar", "tar.gz", "tar.xz"].includes(d.format) ||
+              d.nested?.some((s) => s.format === "7z"),
+          )
+        )
+          sevenZip = await ensureSevenZip(this.root, state);
+        if (downloads.some((d) => d.format === "inno"))
+          inno = await ensureInnoUnpacker(this.root, state);
+        const extraction = extractionState(platform.maxExpandedBytes),
+          checksums: string[] = [];
+        let verified = true;
         if (skipChecksum)
           console.error(
             `WARNING: checksum bypass authorized for ${source.alias}/${parsed.name}@${version} only`,
           );
-        if (platform.format === "zip") {
-          const archive = join(stageRoot, "download.zip");
-          await writeFile(archive, bytes, { flag: "wx" });
-          await extractZip(archive, stage, platform.stripPrefix);
-        } else {
-          const target = inside(stage, join(stage, platform.file!));
-          if (platform.file!.toLowerCase() === ".piko-install.json")
-            fail("Reserved installation metadata path");
-          await mkdir(dirname(target), { recursive: true });
-          await writeFile(target, bytes, { flag: "wx" });
+        for (const [n, download] of downloads.entries()) {
+          const bytes = await artifactBytes(
+              this.root,
+              download.url,
+              download.sha256,
+              skipChecksum,
+              state,
+              download.maxBytes,
+            ),
+            checksum = sha256(bytes);
+          checksums.push(checksum);
+          const matches =
+            !!download.sha256 && checksum === download.sha256.toLowerCase();
+          verified &&= matches;
+          if (!matches && !skipChecksum)
+            fail("SHA-256 mismatch; installation was not committed");
+          if (download.format === "file") {
+            await writeArtifactFile(
+              stage,
+              [download.into, download.file!].filter(Boolean).join("/"),
+              bytes,
+              extraction,
+            );
+          } else {
+            const archive = join(stageRoot, `download-${n}.${download.format}`);
+            await writeFile(archive, bytes, { flag: "wx" });
+            const cabinets: Record<string, string> = {};
+            for (const [cabinetName, cabinet] of Object.entries(
+              download.cabinets ?? {},
+            )) {
+              const cabBytes = await artifactBytes(
+                this.root,
+                cabinet.url,
+                cabinet.sha256,
+                false,
+                state,
+                cabinet.maxBytes,
+              );
+              checksums.push(sha256(cabBytes));
+              const path = join(
+                stageRoot,
+                "cabinet-" + crypto.randomUUID() + ".cab",
+              );
+              await writeFile(path, cabBytes, { flag: "wx" });
+              cabinets[cabinetName] = path;
+            }
+            await extractArchive(
+              archive,
+              download.format,
+              stage,
+              download.stripPrefix,
+              extraction,
+              download.into,
+              sevenZip,
+              inno,
+              {
+                files: download.files,
+                nested: download.nested,
+                lessMsi,
+                cabinets,
+              },
+            );
+          }
         }
+        const checksum =
+          checksums.length === 1
+            ? checksums[0]!
+            : sha256(JSON.stringify(checksums));
+        for (const [path, content] of Object.entries(
+          platform.configFiles ?? {},
+        ))
+          await writeArtifactFile(
+            stage,
+            path,
+            Buffer.from(content, "utf8"),
+            extraction,
+          );
+        for (const [path, template] of Object.entries(
+          platform.configTemplates ?? {},
+        ))
+          await writeArtifactFile(
+            stage,
+            path,
+            Buffer.from(
+              renderTemplate(
+                template.text,
+                destination,
+                join(
+                  this.root,
+                  "persist",
+                  persistentFolder({ name: parsed.name, source, layout }, key),
+                ),
+              ),
+              "utf8",
+            ),
+            extraction,
+          );
         for (const bin of Object.values(bins)) {
+          if (bin.data) continue;
           const target = inside(stage, join(stage, bin.path));
           await noLinks(target);
           if (!(await lstat(target)).isFile())
@@ -485,6 +854,7 @@ export class Packages {
             "Untracked installation directory already exists; inspect it before retrying",
           );
         const installation: Install = {
+          ...(layout ? { layout } : {}),
           id,
           key,
           name: parsed.name,
@@ -494,18 +864,37 @@ export class Packages {
           dir,
           bins,
           persist,
+          ...(Object.keys(persistFiles).length ? { persistFiles } : {}),
           verified,
           checksum,
           kind: "portable",
+          ...(platform.desktop ? { desktop: platform.desktop } : {}),
+          ...(platform.bootstrap ? { bootstrap: platform.bootstrap } : {}),
+          ...(platform.admin ? { admin: platform.admin } : {}),
           ...(platform.env ? { env: platform.env } : {}),
+          ...(platform.shell ? { shell: platform.shell } : {}),
+          // Keep legacy receipts unchanged; new installs retain declared dependencies.
+          ...(platform.shell || platform.depends?.length
+            ? { depends: platform.depends ?? [] }
+            : {}),
           manifestHash,
         };
         await atomicJson(join(stage, ".piko-install.json"), installation);
         await this.store.publishInstall(installation, stage, operation);
         state.installs[id] = installation;
-        if (platform.env) {
+        if (
+          platform.env ||
+          platform.shell ||
+          Object.keys(persistFiles).length ||
+          Object.values(bins).some((b) => b.kind === "powershell")
+        ) {
           upgradeState(state);
-          state.schemaVersion = 4;
+          state.schemaVersion =
+            platform.shell ||
+            Object.keys(persistFiles).length ||
+            Object.values(bins).some((b) => b.kind === "powershell")
+              ? 5
+              : (Math.max(state.schemaVersion, 4) as State["schemaVersion"]);
         }
         if (persist.length) upgradeState(state);
         return installation;
@@ -522,7 +911,7 @@ export class Packages {
     if (!selection) fail("Package has no default version to update");
     const previous = state.installs[selection.id]!;
     if (previous.kind === "npm") {
-      const context = await npmContext(this.root, state);
+      const context = await npmContext(this.root, state, previous.name);
       if (context.registry !== previous.source.url)
         fail(
           "npm registry changed; refusing to change the installed package source",
@@ -541,7 +930,7 @@ export class Packages {
           fail(
             "Default changed during update; new npm version is installed but not selected",
           );
-        this.select(current, match.key, installed.id, selection.request);
+        await this.select(current, match.key, installed.id, selection.request);
       });
       return installed;
     }
@@ -564,7 +953,7 @@ export class Packages {
         fail(
           "Default selection changed while updating; new version remains installed but was not selected",
         );
-      this.select(current, match.key, installed.id, selection.request);
+      await this.select(current, match.key, installed.id, selection.request);
     });
     return installed;
   }
@@ -576,11 +965,18 @@ export class Packages {
         i.name === parsed.name &&
         (!parsed.source || i.source.alias === parsed.source),
     );
-    const available: { source: Source; versions: string[]; latest: string }[] =
-      [];
+    const available: {
+      source: Source;
+      versions: string[];
+      latest: string;
+      version?: string;
+      dependencies?: Awaited<ReturnType<typeof dependencyStatus>>;
+      aliases?: Record<string, string>;
+      runtime?: CatalogPackage["runtime"];
+    }[] = [];
     await this.store.mutate(async (current) => {
       if (parsed.source === "npm") {
-        const context = await npmContext(this.root, current);
+        const context = await npmContext(this.root, current, parsed.name);
         const versions = JSON.parse(
           await context.run(
             [
@@ -613,12 +1009,35 @@ export class Packages {
         )) {
           const index = await refresh(this.root, source),
             entry = index.packages[parsed.name];
-          if (entry)
+          if (entry) {
+            const version = chooseVersion(
+              Object.keys(entry.versions),
+              parsed.request ?? "latest",
+              entry.latest,
+              entry.aliases,
+            );
+            const manifest = await loadManifest(
+              this.root,
+              source,
+              entry.versions[version]!,
+              parsed.name,
+              version,
+            );
             available.push({
               source,
               versions: Object.keys(entry.versions),
               latest: entry.latest,
+              aliases: entry.aliases,
+              runtime: entry.runtime,
+              version,
+              dependencies: await dependencyStatus(
+                this.root,
+                current,
+                source,
+                manifest.platforms["windows-x64"]!.depends,
+              ),
             });
+          }
         }
     });
     if (!available.length && !installed.length) fail("Package not found");
@@ -638,7 +1057,168 @@ export class Packages {
       })),
     };
   }
+  async outdated(spec?: string) {
+    const state = await this.store.read();
+    const filter = spec ? this.installed(state, spec) : undefined;
+    const selected = Object.entries(state.defaults).filter(
+      ([key]) => !filter || key === filter.key,
+    );
+    const results: {
+      package: string;
+      current: string;
+      request: string;
+      source: string;
+      candidate: string | null;
+      latest?: string;
+      status: string;
+      reason?: string;
+    }[] = [];
+    const indexes = new Map<
+      string,
+      { source: Source; index: Awaited<ReturnType<typeof refresh>> }
+    >();
+    for (const [key, selection] of selected.sort(([a], [b]) =>
+      a.localeCompare(b),
+    )) {
+      const i = state.installs[selection.id]!;
+      const row: (typeof results)[number] = {
+        package:
+          i.kind === "npm" ? `npm:${i.name}` : `${i.source.alias}/${i.name}`,
+        current: i.version,
+        request: selection.request,
+        source: publicEndpoint(i.source.url),
+        candidate: null,
+        status: "failed",
+      };
+      try {
+        if (i.kind === "npm") {
+          const context = await npmContext(this.root, state, i.name);
+          if (context.registry !== i.source.url)
+            fail("npm registry changed; restore the original registry");
+          row.candidate = (
+            await resolveNpm(
+              context,
+              i.name,
+              selection.request,
+              join(this.root, "apps/piko"),
+            )
+          ).version;
+          row.latest = (
+            await resolveNpm(
+              context,
+              i.name,
+              "latest",
+              join(this.root, "apps/piko"),
+            )
+          ).version;
+        } else {
+          const original = Object.values(state.sources).find(
+            (s) => s.identity === i.source.identity,
+          );
+          if (!original)
+            fail(
+              "Original source is not configured; restore it before updating",
+            );
+          let cached = indexes.get(original.identity);
+          if (!cached) {
+            const source = structuredClone(original);
+            cached = { source, index: await refresh(this.root, source) };
+            indexes.set(source.identity, cached);
+          }
+          const { source, index } = cached;
+          const entry = index.packages[i.name];
+          if (!entry)
+            fail("Package is no longer listed by its original source");
+          row.latest = entry.latest;
+          row.candidate = chooseVersion(
+            Object.keys(entry.versions),
+            selection.request,
+            entry.latest,
+            entry.aliases,
+          );
+          const manifest = await loadManifest(
+            this.root,
+            source,
+            entry.versions[row.candidate]!,
+            i.name,
+            row.candidate,
+          );
+          const platform = manifest.platforms["windows-x64"]!;
+          if (
+            row.candidate !== i.version &&
+            (state.admin?.[i.id]?.action === "install" ||
+              (state.desktop?.[key] &&
+                JSON.stringify(state.desktop[key]!.declaration) !==
+                  JSON.stringify(platform.desktop)))
+          )
+            fail(
+              "Revoke pinned desktop/system integration before updating this version; preview/reapply afterwards",
+            );
+          if (row.candidate !== i.version && platform.bootstrap)
+            fail(
+              "New bootstrap version needs explicit install and execution approval before selection",
+            );
+          if (distributionDownloads(platform).some((d) => !d.sha256))
+            fail("Candidate lacks required SHA-256");
+          const unmet = (
+            await dependencyStatus(this.root, state, source, platform.depends)
+          ).filter((d) => !d.satisfied);
+          if (unmet.length)
+            fail(
+              "Unmet dependencies: " +
+                unmet
+                  .map((d) => `${d.package}: ${d.issues.join("; ")}`)
+                  .join("; "),
+            );
+          const provided = Object.keys(platform.bin).map(commandName);
+          if (new Set(provided).size !== provided.length)
+            fail("Candidate has case-colliding commands");
+          const enabled = selection.commands ?? Object.keys(i.bins);
+          if (
+            [
+              ...enabled,
+              ...Object.values(state.aliases ?? {})
+                .filter((a) => a.key === key)
+                .map((a) => a.command),
+            ].some((c) => !provided.includes(c))
+          )
+            fail("Candidate removes an enabled or aliased command");
+          const probe = structuredClone(state);
+          probe.installs[i.id] = {
+            ...i,
+            version: row.candidate,
+            env: platform.env,
+          };
+          selectedEnvironment(this.root, probe);
+        }
+        row.status =
+          row.candidate === i.version
+            ? selection.request === i.version
+              ? "pinned"
+              : "current"
+            : semver.valid(row.candidate) &&
+                semver.valid(i.version) &&
+                semver.lt(row.candidate, i.version)
+              ? "downgrade"
+              : "outdated";
+        if (row.status === "pinned")
+          row.reason = "Exact version request; update keeps this version";
+        if (row.status === "downgrade")
+          row.reason =
+            "Source/request now resolves to an older version; nothing was changed";
+      } catch (error) {
+        row.status = "blocked";
+        row.reason = error instanceof Error ? error.message : String(error);
+      }
+      results.push(row);
+    }
+    if (filter && !selected.length)
+      fail("Package has no default version to check");
+    return results;
+  }
   async updateAll(dryRun = false) {
+    if (dryRun)
+      return (await this.outdated()).map((r) => ({ ...r, version: r.current }));
     const state = await this.store.read(),
       results: {
         package: string;
@@ -652,15 +1232,6 @@ export class Packages {
         i = state.installs[selection.id]!,
         spec =
           i.kind === "npm" ? `npm:${i.name}` : `${i.source.alias}/${i.name}`;
-      if (dryRun) {
-        results.push({
-          package: spec,
-          request: selection.request,
-          status: "planned",
-          version: i.version,
-        });
-        continue;
-      }
       try {
         const updated = await this.update(spec);
         results.push({
@@ -743,7 +1314,7 @@ export class Packages {
     await this.store.mutate(async (state) => {
       const before = this.exactNpm(state, spec),
         plan = await scriptPlan(this.root, before),
-        context = await npmContext(this.root, state);
+        context = await npmContext(this.root, state, before.name);
       if (context.registry !== before.source.url)
         fail(
           "npm registry changed; refusing to rebuild against a different source",
@@ -787,6 +1358,7 @@ export class Packages {
         )
           fail("npm snapshot changed during rebuild; refusing replacement");
         after.runtimeVersion = after.npmBuild!.lastRun.node;
+        after.npmCompatibility = await npmCompatibility(stage, context.node);
         for (const bin of Object.values(after.bins)) {
           const path = join(stage, bin.path);
           await noLinks(path);
@@ -848,19 +1420,25 @@ export class Packages {
         data,
         paths: data.paths.map((path) =>
           inside(
-            join(this.root, "persist", key),
-            join(this.root, "persist", key, path),
+            join(this.root, "persist", persistentFolder(data, key)),
+            join(this.root, "persist", persistentFolder(data, key), path),
           ),
         ),
       };
     };
     if (options.dryRun) {
-      const { paths } = plan(await this.store.read());
-      for (const path of paths) await noLinksTree(path);
+      const { paths, key } = plan(await this.store.read());
+      await (
+        await import("./data-profiles.ts")
+      ).assertNoDataProfile(this.root, key);
+      for (const path of paths) await noLinksData(path);
       return { paths, deleted: false };
     }
     return await this.store.mutate(async (state) => {
       const { key, data, paths } = plan(state);
+      await (
+        await import("./data-profiles.ts")
+      ).assertNoDataProfile(this.root, key);
       if (!options.confirmed)
         fail(
           "Explicit data deletion confirmation required; use --dry-run then --yes",
@@ -870,7 +1448,7 @@ export class Packages {
         JSON.stringify(options.expectedPaths) !== JSON.stringify(paths)
       )
         fail("Cleanup targets changed after confirmation; preview again");
-      for (const path of paths) await noLinksTree(path);
+      for (const path of paths) await noLinksData(path);
       const operation = "data-cleanup-" + crypto.randomUUID(),
         stage = join(this.root, "staging", operation);
       await noLinks(stage);
@@ -884,7 +1462,137 @@ export class Packages {
       return { paths, deleted: true };
     });
   }
-  async uninstall(spec: string, force = false): Promise<void> {
+  async restoreSelection(
+    spec: string,
+    version: string,
+    request: string,
+    commands: string[],
+    expectedRevision: number,
+  ): Promise<void> {
+    await this.store.mutate(async (state) => {
+      if (state.revision !== expectedRevision)
+        fail("State changed during inventory restore; preview again");
+      const match = this.installed(state, spec),
+        target = match.installs.find((i) => i.version === version);
+      if (!target) fail("Inventory selected version is not installed");
+      for (const bin of Object.values(target.bins))
+        if (bin.data)
+          await (
+            await import("./execution.ts")
+          ).persistentExecutable(this.root, state, target, bin.path);
+      if (
+        state.defaults[match.key] &&
+        state.defaults[match.key]!.id !== target.id
+      )
+        fail(
+          "Inventory would replace an existing default; resolve explicitly first",
+        );
+      state.defaults[match.key] = {
+        id: target.id,
+        request,
+        commands: commands.map(commandName),
+      };
+      await this.select(state, match.key, target.id, request);
+    });
+  }
+  async versionCleanupPlan(spec?: string, keep = 1) {
+    if (!Number.isSafeInteger(keep) || keep < 0 || keep > 10000)
+      fail("--keep must be an integer from 0 to 10000");
+    const state = await this.store.read();
+    if (spec && parseSpec(spec).request)
+      fail("Version cleanup targets a package, not a version");
+    const installs = spec
+      ? this.installed(state, spec).installs
+      : Object.values(state.installs);
+    const entries: {
+      installation: Install;
+      package: string;
+      version: string;
+      path: string;
+      action: string;
+    }[] = [];
+    for (const key of [...new Set(installs.map((i) => i.key))].sort()) {
+      const group = installs
+        .filter((i) => i.key === key)
+        .sort((a, b) =>
+          semver.valid(a.version) && semver.valid(b.version)
+            ? semver.rcompare(a.version, b.version)
+            : b.version.localeCompare(a.version, undefined, { numeric: true }),
+        );
+      let retained = 0;
+      for (const i of group) {
+        const action =
+          state.defaults[key]?.id === i.id
+            ? "protect-default"
+            : retained++ < keep
+              ? "keep"
+              : "remove";
+        const path = join(this.root, i.dir);
+        if (action === "remove") {
+          await noLinks(path);
+          await noLinks(join(path, ".piko-install.json"));
+          if (
+            JSON.stringify(await json(join(path, ".piko-install.json"))) !==
+            JSON.stringify(i)
+          )
+            fail("Installation receipt drift; inspect before version cleanup");
+        }
+        entries.push({
+          installation: i,
+          package:
+            i.kind === "npm" ? `npm:${i.name}` : `${i.source.alias}/${i.name}`,
+          version: i.version,
+          path,
+          action,
+        });
+      }
+    }
+    return { keep, entries, binding: sha256(JSON.stringify(entries)) };
+  }
+  async cleanupVersions(
+    spec?: string,
+    keep = 1,
+    options: { confirmed?: boolean; binding?: string } = {},
+  ) {
+    const plan = await this.versionCleanupPlan(spec, keep);
+    if (!options.confirmed)
+      fail("Version cleanup requires explicit confirmation after --dry-run");
+    if (options.binding && options.binding !== plan.binding)
+      fail("Version cleanup plan changed; preview again");
+    const results: {
+      package: string;
+      version: string;
+      status: string;
+      error?: string;
+    }[] = [];
+    for (const item of plan.entries.filter((e) => e.action === "remove")) {
+      try {
+        await this.uninstall(
+          `${item.package}@${item.version}`,
+          false,
+          item.installation,
+        );
+        results.push({
+          package: item.package,
+          version: item.version,
+          status: "removed",
+        });
+      } catch (error) {
+        results.push({
+          package: item.package,
+          version: item.version,
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return results;
+  }
+  async uninstall(
+    spec: string,
+    force = false,
+    expected?: Install,
+  ): Promise<void> {
     await this.store.mutate(async (state) => {
       upgradeState(state);
       const match = this.installed(state, spec);
@@ -893,6 +1601,22 @@ export class Packages {
         (i) => i.version === match.request,
       );
       if (!installation) fail("Exact installed version not found");
+      await (
+        await import("./data-profiles.ts")
+      ).assertNoDataProfile(this.root, installation.key);
+      if (state.bootstraps?.[installation.id]?.status === "running")
+        fail(
+          "Bootstrap may be interrupted or running; explicitly retry/inspect it before uninstall",
+        );
+      if (
+        state.desktop?.[installation.key]?.id === installation.id ||
+        state.admin?.[installation.id]?.action === "install"
+      )
+        fail(
+          "Revoke desktop/system integration before uninstalling this version",
+        );
+      if (expected && JSON.stringify(expected) !== JSON.stringify(installation))
+        fail("Installation changed since cleanup preview");
       if (state.defaults[match.key]?.id === installation.id) {
         if (!force)
           fail(
@@ -905,13 +1629,28 @@ export class Packages {
         trash = `uninstall-${crypto.randomUUID()}`,
         to = join(this.root, "staging", trash);
       await noLinks(from);
+      if (expected) {
+        await noLinks(join(from, ".piko-install.json"));
+        if (
+          JSON.stringify(await json(join(from, ".piko-install.json"))) !==
+          JSON.stringify(expected)
+        )
+          fail("Installation receipt changed since cleanup preview");
+      }
       await noLinks(dirname(to));
       await mkdir(dirname(to), { recursive: true });
       // Only unlink declared mappings after verifying their exact managed target.
+      await checkPersistentFileMappings(this.root, installation);
       for (const path of installation.persist) {
+        if (installation.persistFiles?.[path]) continue;
         const link = join(from, path),
           expected = resolve(
-            join(this.root, "persist", installation.key, path),
+            join(
+              this.root,
+              "persist",
+              persistentFolder(installation, installation.key),
+              path,
+            ),
           );
         if (!(await exists(link))) continue;
         if (
@@ -920,8 +1659,41 @@ export class Packages {
         )
           fail("Persistent mapping drift; refusing removal");
       }
+      if (
+        !Object.values(state.installs).some(
+          (i) => i.key === installation.key && i.id !== installation.id,
+        )
+      ) {
+        for (const [profileId, profile] of Object.entries(
+          state.profiles ?? {},
+        )) {
+          if (!profile.approvals[installation.key]) continue;
+          const next = structuredClone(profile);
+          delete next.approvals[installation.key];
+          const desired = Object.keys(next.approvals).length ? next : null,
+            bytes = await profileBytes(profile.path),
+            after = editProfile(
+              this.root,
+              bytes,
+              profile.block,
+              desired?.block,
+            );
+          await stageProfileChange(
+            this.root,
+            state,
+            profile.path,
+            bytes,
+            after,
+            desired,
+          );
+          if (desired) state.profiles![profileId] = desired;
+          else delete state.profiles![profileId];
+        }
+      }
       await atomicJson(this.store.removalPath, { installation, trash });
       await rename(from, to);
+      delete state.bootstraps?.[installation.id];
+      delete state.admin?.[installation.id];
       delete state.installs[installation.id];
     });
   }

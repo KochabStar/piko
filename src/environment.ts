@@ -1,3 +1,4 @@
+import { persistentFolder } from "./layout.ts";
 import { join } from "node:path";
 import { fail, record } from "./util.ts";
 import type { State, Install } from "./types.ts";
@@ -57,7 +58,7 @@ export function selectedEnvironment(
             token === "root"
               ? join(root, i.dir)
               : token === "persist"
-                ? join(root, "persist", i.key)
+                ? join(root, "persist", persistentFolder(i, i.key))
                 : i.version,
         ),
         name = key.toUpperCase();

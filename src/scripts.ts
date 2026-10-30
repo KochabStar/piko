@@ -195,11 +195,7 @@ export async function rebuildNpm(
   plan: Awaited<ReturnType<typeof scriptPlan>>,
   approvals: Record<string, ScriptApproval>,
 ): Promise<void> {
-  // ponytail: enable execution only on the npm version covered by the policy tests.
-  if (context.version !== "11.20.0")
-    fail(
-      "Script execution is verified only with npm 11.20.0; other versions are refused",
-    );
+  await (await import("./npm-policy.ts")).verifyNpmPolicy(context, control);
   const approved = plan.scripts.filter(
     (s) => approvals[s.path]?.binding === s.binding,
   );

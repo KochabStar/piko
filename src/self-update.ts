@@ -12,12 +12,13 @@ import {
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { downloadArtifact } from "./downloader.ts";
 import { Store } from "./store.ts";
 import { commandNames } from "./commands.ts";
+import { inspectShim, writeNativeShim } from "./shims.ts";
 import {
   atomicJson,
   capture,
-  download,
   exists,
   fail,
   json,
@@ -56,13 +57,44 @@ export async function prepareSelfUpdate(
       await mkdir(dir, { recursive: true });
       try {
         if (/^https:\/\//i.test(from))
-          await writeFile(candidate, await download(from));
+          await writeFile(candidate, await downloadArtifact(root, from, state));
         else {
           await noLinks(resolve(from));
           await copyFile(resolve(from), candidate);
         }
         if ((await executableHash(candidate)) !== checksum.toLowerCase())
           fail("Self-update checksum mismatch");
+        const profiles = join(root, "apps/piko/data-profiles.json");
+        if (await exists(profiles)) {
+          await noLinks(profiles);
+          const receipt = await json(profiles);
+          if (Object.keys(receipt.profiles ?? {}).length) {
+            const features = JSON.parse(
+              await capture(candidate, ["self", "check"], {
+                cwd: dir,
+                env: { ...process.env, PIKO_HOME: root },
+              }),
+            );
+            if (features.dataProfiles !== 1)
+              fail(
+                "Candidate cannot preserve active data-profile integrations",
+              );
+          }
+        }
+        const stateFile = join(root, "apps/piko/state.json");
+        if (await exists(stateFile)) {
+          const current = await json(stateFile);
+          if (Object.keys(current.startMenu ?? {}).length) {
+            const features = JSON.parse(
+              await capture(candidate, ["self", "check"], {
+                cwd: dir,
+                env: { ...process.env, PIKO_HOME: root },
+              }),
+            );
+            if (features.startMenu !== 1)
+              fail("Candidate cannot preserve Start Menu ownership");
+          }
+        }
         const env = { ...process.env, PIKO_HOME: root };
         let probe: { protocol: number; version: string };
         try {
@@ -91,16 +123,7 @@ export async function prepareSelfUpdate(
         if (probe.protocol !== 1 || typeof probe.version !== "string")
           fail("Candidate does not support the Piko upgrade protocol");
         const names = [...new Set(["piko", ...commandNames(state)])].sort();
-        const original = await stat(target);
-        for (const name of names) {
-          const path = join(root, "shims", name + ".exe");
-          await noLinks(path);
-          if (await exists(path)) {
-            const info = await stat(path);
-            if (info.ino !== original.ino || info.dev !== original.dev)
-              fail("External shim blocks self-update");
-          }
-        }
+        for (const name of names) await inspectShim(root, name, [target]);
         await copyFile(target, join(dir, "old.exe"));
         const oldHash = await executableHash(target);
         await atomicJson(journal(root), {
@@ -128,20 +151,42 @@ async function links(
   allowed: string[],
   target: string,
 ) {
+  let native = false;
+  try {
+    const probe = JSON.parse(
+      await capture(target, ["self", "check"], {
+        env: { ...process.env, PIKO_HOME: root },
+      }),
+    );
+    native = probe.shimProtocol === 1;
+  } catch {
+    /* Old rollback versions can lack self check. */
+  }
+  // Preflight the whole set before changing any existing shim.
+  for (const name of names) await inspectShim(root, name, allowed);
+  if (native) {
+    for (const name of names) await writeNativeShim(root, name, allowed);
+    return;
+  }
   const valid = [];
   for (const file of allowed)
     if (await exists(file)) valid.push(await stat(file));
   for (const name of names) {
-    if (!/^[a-z0-9][a-z0-9._-]{0,79}$/.test(name))
+    if (!/^[a-z0-9][a-z0-9._+-]{0,79}$/.test(name))
       fail("Invalid upgrade shim name");
     const file = join(root, "shims", name + ".exe");
     await noLinks(file);
     if (await exists(file)) {
       const current = await stat(file);
-      if (!valid.some((i) => i.ino === current.ino && i.dev === current.dev))
+      if (
+        !valid.some((i) => i.ino === current.ino && i.dev === current.dev) &&
+        (await inspectShim(root, name, allowed)).kind !== "native"
+      )
         fail("Unrecognized shim during upgrade; preserving journal");
       await unlink(file);
     }
+    const metadata = join(root, "shims", name + ".shim");
+    if (await exists(metadata)) await unlink(metadata);
     await link(target, file);
   }
 }

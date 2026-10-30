@@ -3,10 +3,12 @@
 param(
     [string]$Executable,
     [switch]$IncludePi,
+    [switch]$IntegrationsOnly,
     [switch]$Launch
 )
 
 $ErrorActionPreference = 'Stop'
+if ($IntegrationsOnly -and $IncludePi) { throw '-IntegrationsOnly cannot be combined with -IncludePi.' }
 $repo = Split-Path $PSScriptRoot -Parent
 if (-not $Executable) { $Executable = Join-Path $repo 'dist\piko.exe' }
 $exe = (Resolve-Path -LiteralPath $Executable).Path
@@ -49,7 +51,9 @@ $config = [ordered]@{
     executableSha256 = $hash
     pikoVersion = (Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version
     includePi = [bool]$IncludePi
+    integrationOnly = [bool]$IntegrationsOnly
     maintenanceStage = ([version](Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version -ge [version]'0.4.0')
+    integrationStage = ([version](Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version -ge [version]'0.4.0')
     scriptStage = ([version](Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version -ge [version]'0.3.0')
     nextStage = ([version](Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json).version -ge [version]'0.2.0')
     preparedAt = (Get-Date).ToUniversalTime().ToString('o')
@@ -77,6 +81,69 @@ if ($config.nextStage) {
         $index.packages | Add-Member -NotePropertyName $fixture -NotePropertyValue ([pscustomobject]@{latest='1.0.0';versions=[pscustomobject]@{'1.0.0'=($fixture + '.json')}})
     }
     [IO.File]::WriteAllText($indexFile, ($index | ConvertTo-Json -Depth 12), $jsonEncoding)
+}
+
+if ($config.integrationStage) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'sandbox-integrations.ps1') -Destination (Join-Path $inputDir 'integrations.ps1')
+    $fixtureSource = Join-Path $inputDir 'source'
+    $indexFile = Join-Path $fixtureSource 'index.json'
+    $index = Get-Content -LiteralPath $indexFile -Raw | ConvertFrom-Json
+    $jsonEncoding = New-Object Text.UTF8Encoding($false)
+    function Get-FixtureHash([byte[]]$Bytes) {
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
+        finally { $algorithm.Dispose() }
+    }
+    # Private test payload only: never publish a Windows font in a package source.
+    $font = Join-Path $env:WINDIR 'Fonts\segoeui.ttf'
+    if (-not (Test-Path -LiteralPath $font -PathType Leaf)) { throw 'Segoe UI is required for the private Sandbox font fixture.' }
+    $fontBytes = [IO.File]::ReadAllBytes($font)
+    [IO.File]::WriteAllBytes((Join-Path $fixtureSource 'integration-font.ttf'), $fontBytes)
+    $commandBytes = [IO.File]::ReadAllBytes((Join-Path $env:WINDIR 'System32\cmd.exe'))
+    [IO.File]::WriteAllBytes((Join-Path $fixtureSource 'integration-command.exe'), $commandBytes)
+    $versions = [ordered]@{}
+    foreach ($version in @('1.0.0', '2.0.0')) {
+        $platform = [ordered]@{
+            downloads = @(
+                [ordered]@{url='http://localhost:18765/integration-command.exe';sha256=(Get-FixtureHash $commandBytes);format='file';file='fixture.exe'},
+                [ordered]@{url='http://localhost:18765/integration-font.ttf';sha256=(Get-FixtureHash $fontBytes);format='file';file='fixture.ttf'}
+            )
+            bin = [ordered]@{'piko-integration'='fixture.exe'}
+            shell = [ordered]@{powershell="function global:PikoSandboxIntegration { 'shell-$version' }"}
+            desktop = [ordered]@{
+                environment = [ordered]@{SANDBOX_INTEGRATION_HOME='{root}'}
+                path = @('.')
+                shortcuts = @([ordered]@{name='Piko Sandbox Integration';path='fixture.exe';args=@('--version')})
+                fonts = @('fixture.ttf')
+                menus = @([ordered]@{id='sandbox-check';label='Piko Sandbox Check';target='file';path='fixture.exe'})
+                associations = @([ordered]@{extension='.piko-check';label='Piko Sandbox Fixture';path='fixture.exe'})
+            }
+        }
+        $name = 'sandbox-integration-' + $version + '.json'
+        $manifest = [ordered]@{schemaVersion=1;name='sandbox-integration';version=$version;platforms=[ordered]@{'windows-x64'=$platform}}
+        [IO.File]::WriteAllText((Join-Path $fixtureSource $name), ($manifest | ConvertTo-Json -Depth 16), $jsonEncoding)
+        $versions[$version] = $name
+    }
+    $index.packages | Add-Member -NotePropertyName 'sandbox-integration' -NotePropertyValue ([pscustomobject]@{latest='2.0.0';versions=$versions})
+    $bootstrap = @'
+param([string]$Output,[string]$Marker)
+$ErrorActionPreference='Stop'
+[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Output))|Out-Null
+[IO.File]::Copy((Join-Path $env:WINDIR 'System32\cmd.exe'),$Output,$true)
+[IO.File]::WriteAllText($Marker,'sandbox-bootstrap-ok')
+'@
+    [IO.File]::WriteAllText((Join-Path $fixtureSource 'integration-bootstrap.ps1'), $bootstrap, $jsonEncoding)
+    $bootstrapHash = Get-FixtureHash ([IO.File]::ReadAllBytes((Join-Path $fixtureSource 'integration-bootstrap.ps1')))
+    $action = [ordered]@{kind='powershell';path='bootstrap.ps1';args=@('{persist}/data/tool.exe','{persist}/data/result.txt');outputs=@('data/tool.exe','data/result.txt')}
+    $adminAction = [ordered]@{kind='powershell';path='bootstrap.ps1';args=@('{persist}/data/admin.exe','{persist}/data/admin.txt')}
+    $manifest = [ordered]@{schemaVersion=1;name='sandbox-bootstrap';version='1.0.0';platforms=[ordered]@{'windows-x64'=[ordered]@{
+        url='http://localhost:18765/integration-bootstrap.ps1';sha256=$bootstrapHash;format='file';file='bootstrap.ps1'
+        persist=@('data');bin=[ordered]@{'piko-bootstrapped'=[ordered]@{path='data/tool.exe';kind='native';data=$true}}
+        bootstrap=$action;admin=[ordered]@{install=$adminAction;remove=$adminAction}
+    }}}
+    [IO.File]::WriteAllText((Join-Path $fixtureSource 'sandbox-bootstrap.json'), ($manifest | ConvertTo-Json -Depth 16), $jsonEncoding)
+    $index.packages | Add-Member -NotePropertyName 'sandbox-bootstrap' -NotePropertyValue ([pscustomobject]@{latest='1.0.0';versions=[ordered]@{'1.0.0'='sandbox-bootstrap.json'}})
+    [IO.File]::WriteAllText($indexFile, ($index | ConvertTo-Json -Depth 16), $jsonEncoding)
 }
 
 if ($config.maintenanceStage) {
@@ -123,6 +190,7 @@ Write-Host "Prepared: $wsbPath"
 Write-Host "Results:  $outputDir"
 Write-Host "EXE SHA256: $hash"
 Write-Host 'Network is enabled for downloads. Only the dedicated results folder is writable from Sandbox.'
+if ($IntegrationsOnly) { Write-Host 'Integration-only mode uses checksummed private fixtures over loopback; upstream Node/npm downloads are skipped.' }
 Write-Host 'No host PATH changes, feature enablement, elevation or restart is performed.'
 if ($Launch) {
     $sandbox = Join-Path $env:WINDIR 'System32\WindowsSandbox.exe'

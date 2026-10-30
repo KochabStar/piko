@@ -4,9 +4,10 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ('piko-sandbox-script-tests-' + [guid]::NewGuid().ToString('N'))
 $session = $null
+$integrationSession = $null
 New-Item -ItemType Directory -Path $temporary | Out-Null
 try {
-    foreach ($relative in @('tests\ctrl-c.test.ps1', 'scripts\install.ps1', 'scripts\prepare-sandbox.ps1', 'scripts\sandbox-run.ps1', 'scripts\sandbox-network.ps1', 'scripts\sandbox-rerun.ps1', 'scripts\sandbox-bun-network.ps1', 'scripts\sandbox-report.ps1')) {
+    foreach ($relative in @('tests\ctrl-c.test.ps1', 'scripts\install.ps1', 'scripts\prepare-sandbox.ps1', 'scripts\sandbox-run.ps1', 'scripts\sandbox-integrations.ps1', 'scripts\sandbox-network.ps1', 'scripts\sandbox-rerun.ps1', 'scripts\sandbox-bun-network.ps1', 'scripts\sandbox-report.ps1')) {
         $tokens = $null; $errors = $null
         $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo $relative), [ref]$tokens, [ref]$errors)
         if ($errors.Count) { throw ($errors | Out-String) }
@@ -24,6 +25,14 @@ try {
     if ($xml.Configuration.Networking -ne 'Enable') { throw 'Network is required for the documented smoke test.' }
     if (@(Get-ChildItem -LiteralPath $session.Results).Count -ne 0) { throw 'Preparation wrote unexpected results.' }
     $config = Get-Content -LiteralPath (Join-Path $session.Input 'config.json') -Raw | ConvertFrom-Json
+    if ($config.integrationOnly) { throw 'Default preparation unexpectedly skipped base acceptance.' }
+    $integrationSession = & (Join-Path $repo 'scripts\prepare-sandbox.ps1') -Executable $dummy -IntegrationsOnly
+    $integrationConfig = [IO.File]::ReadAllText((Join-Path $integrationSession.Input 'config.json')) | ConvertFrom-Json
+    if (-not $integrationConfig.integrationOnly -or -not $integrationConfig.integrationStage) { throw 'Integration-only mode was not serialized.' }
+    $conflictRejected = $false
+    try { $null = & (Join-Path $repo 'scripts\prepare-sandbox.ps1') -Executable $dummy -IncludePi -IntegrationsOnly }
+    catch { $conflictRejected = $_.Exception.Message -like '*cannot be combined*' }
+    if (-not $conflictRejected) { throw 'Integration-only mode silently ignored an incompatible option.' }
     if (-not $config.includePi -or $config.schemaVersion -ne 1) { throw 'Options were not serialized correctly.' }
     if ($config.executableSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Missing binary fingerprint.' }
     $metadata = Get-Content -LiteralPath (Join-Path $repo 'package.json') -Raw | ConvertFrom-Json
@@ -39,6 +48,15 @@ try {
     }
     if (-not $config.maintenanceStage -or -not (Test-Path -LiteralPath (Join-Path $session.Input 'ctrl-c.test.ps1'))) { throw 'Maintenance stage or Ctrl+C fixture missing.' }
     if (-not $config.scriptStage) { throw 'Missing script approval stage flag.' }
+    if (-not $config.integrationStage -or -not (Test-Path -LiteralPath (Join-Path $session.Input 'integrations.ps1'))) { throw 'Missing user integration acceptance stage.' }
+    foreach ($name in @('sandbox-integration', 'sandbox-bootstrap')) {
+        if (-not $fixtureIndex.packages.PSObject.Properties[$name]) { throw "Missing integration fixture: $name" }
+    }
+    $integrationManifest = [IO.File]::ReadAllText((Join-Path $session.Input 'source\sandbox-integration-1.0.0.json')) | ConvertFrom-Json
+    if ($integrationManifest.platforms.'windows-x64'.downloads.Count -ne 2 -or $integrationManifest.platforms.'windows-x64'.desktop.fonts[0] -ne 'fixture.ttf') { throw 'Font or multi-download fixture missing.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $session.Input 'source\integration-font.ttf'))) { throw 'Private font payload was not packaged.' }
+    $bootstrapManifest = [IO.File]::ReadAllText((Join-Path $session.Input 'source\sandbox-bootstrap.json')) | ConvertFrom-Json
+    if (-not $bootstrapManifest.platforms.'windows-x64'.bin.'piko-bootstrapped'.data -or $bootstrapManifest.platforms.'windows-x64'.bootstrap.outputs.Count -ne 2) { throw 'Generated command bootstrap fixture missing.' }
     $registry = [IO.File]::ReadAllText((Join-Path $session.Input 'source\registry\metadata.json')) | ConvertFrom-Json
     if (-not $registry.PSObject.Properties['@piko-fixture/scripts'] -or -not (Test-Path -LiteralPath (Join-Path $session.Input 'source\registry\archives\scripts-1.0.0.tgz'))) { throw 'Script fixture registry was not packaged.' }
     if (-not (Test-Path -LiteralPath (Join-Path $session.Input 'source\index.json'))) { throw 'Source fixtures were not copied.' }
@@ -51,7 +69,7 @@ try {
     catch { $guarded = $_.Exception.Message -like 'Safety guard:*' }
     if (-not $guarded) { throw 'Sandbox runner must refuse host execution before modifying any paths.' }
 
-    foreach ($helper in @('sandbox-network.ps1', 'sandbox-rerun.ps1', 'sandbox-bun-network.ps1')) {
+    foreach ($helper in @('sandbox-integrations.ps1', 'sandbox-network.ps1', 'sandbox-rerun.ps1', 'sandbox-bun-network.ps1')) {
         $guarded = $false
         try { & (Join-Path $repo ('scripts\' + $helper)) }
         catch { $guarded = $_.Exception.Message -like 'Safety guard:*' }
@@ -63,6 +81,32 @@ try {
     $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'scripts\sandbox-run.ps1'), [ref]$tokens, [ref]$errors)
     $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Quote-Argument' }, $true)
     . ([scriptblock]::Create($function.Extent.Text))
+    $stateReader = $ast.Find({ param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq 'Read-State' }, $true)
+    . ([scriptblock]::Create($stateReader.Extent.Text))
+    $savedHome = $env:PIKO_HOME
+    try {
+        $env:PIKO_HOME = Join-Path $temporary 'state-fixture'
+        $stateDirectory = Join-Path $env:PIKO_HOME 'apps\piko'
+        New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
+        $unicodePath = "Profile '" + [char]0x4e2d + [char]0x6587 + '.ps1'
+        [IO.File]::WriteAllText((Join-Path $stateDirectory 'state.json'), ('{"profiles":{"fixture":{"path":"' + $unicodePath + '","block":"managed"}}}'), (New-Object Text.UTF8Encoding($false)))
+        if ((Read-State).profiles.fixture.path -cne $unicodePath) { throw 'State reader corrupted BOM-less UTF-8 Profile paths.' }
+    } finally { if ($null -eq $savedHome) { Remove-Item Env:PIKO_HOME -ErrorAction SilentlyContinue } else { $env:PIKO_HOME = $savedHome } }
+    Write-Output 'PASS: actual state reader preserves BOM-less UTF-8 paths and quotes.'
+    # A fixture installed from the local registry must stop being a default
+    # before its registry override ends, or update --all correctly blocks it.
+    $fixtureCleanup = $ast.Find({ param($item)
+        $item -is [Management.Automation.Language.CommandAst] -and
+        $item.GetCommandName() -eq 'Invoke-Check' -and
+        $item.Extent.Text -match "@\('unuse', 'npm:@piko-fixture/scripts'\)"
+    }, $true)
+    if (-not $fixtureCleanup) { throw 'Local-registry script fixture must be unselected before restoring PIKO_NPM_REGISTRY.' }
+    $scriptStage = $fixtureCleanup.Parent
+    while ($scriptStage -and $scriptStage -isnot [Management.Automation.Language.TryStatementAst]) { $scriptStage = $scriptStage.Parent }
+    if (-not $scriptStage -or -not $scriptStage.Finally -or $scriptStage.Finally.Extent.Text -notmatch 'PIKO_NPM_REGISTRY') { throw 'Fixture cleanup must run inside the registry-scoped try/finally.' }
+    $approvalCheck = $ast.Find({ param($item) $item -is [Management.Automation.Language.CommandAst] -and $item.Extent.Text -like "Invoke-Check 'New version requires fresh approval'*" }, $true)
+    if (-not $approvalCheck -or $fixtureCleanup.Extent.StartOffset -le $approvalCheck.Extent.EndOffset -or $fixtureCleanup.Extent.EndOffset -ge $scriptStage.Finally.Extent.StartOffset) { throw 'Fixture cleanup must follow script approval checks and precede registry restoration.' }
+    Write-Output 'PASS: local-registry fixture is unselected after script checks and before registry restoration.'
     $node = Get-Command node.exe -ErrorAction SilentlyContinue
     if ($node) {
         $probe = Join-Path $temporary 'argv.cjs'
@@ -123,6 +167,17 @@ try {
             catch { if ($fixtureServer.State -eq 'Failed') { break }; Start-Sleep -Milliseconds 100 }
         }
         if ($served) {
+            foreach ($payload in @('integration-font.ttf', 'integration-command.exe', 'integration-bootstrap.ps1')) {
+                $response = Invoke-WebRequest -Uri ('http://localhost:' + $port + '/' + $payload) -UseBasicParsing -TimeoutSec 3
+                $expectedBytes = [IO.File]::ReadAllBytes((Join-Path $session.Input ('source\' + $payload)))
+                if ([Convert]::ToBase64String($response.RawContentStream.ToArray()) -cne [Convert]::ToBase64String($expectedBytes)) { throw "Fixture server changed payload bytes: $payload" }
+            }
+            [IO.File]::WriteAllText((Join-Path $session.Input 'source\unlisted.ps1'), 'must not be served')
+            $blocked = $false
+            try { $null = Invoke-WebRequest -Uri ('http://localhost:' + $port + '/unlisted.ps1') -UseBasicParsing -TimeoutSec 3 }
+            catch { $blocked = [int]$_.Exception.Response.StatusCode -eq 404 }
+            if (-not $blocked) { throw 'Fixture server exposed an unlisted script.' }
+            Write-Output 'PASS: exact integration payloads roundtrip unchanged; unlisted scripts remain inaccessible.'
             $timer = [Diagnostics.Stopwatch]::StartNew(); Stop-Job $fixtureServer; $timer.Stop()
             if ($timer.ElapsedMilliseconds -gt 5000) { throw 'Idle HTTP fixture server shutdown blocked final report publication.' }
             Write-Output 'PASS: idle fixture server cancels promptly before final report publication.'
@@ -132,5 +187,6 @@ try {
     Write-Output 'PASS: PowerShell syntax, WSB permissions/options, fixture packaging, and host-execution safety guard. Sandbox was not launched.'
 } finally {
     if ($session) { Remove-Item -LiteralPath $session.Session -Recurse -Force }
+    if ($integrationSession) { Remove-Item -LiteralPath $integrationSession.Session -Recurse -Force }
     Remove-Item -LiteralPath $temporary -Recurse -Force
 }

@@ -1,4 +1,29 @@
 import {
+  appFolder,
+  installDirectory,
+  persistentFolder,
+  validateLayoutOwners,
+} from "./layout.ts";
+import {
+  planStartMenu,
+  validateStartMenu,
+  checkStartMenu,
+  writeStartMenu,
+  recoverStartMenu,
+} from "./start-menu.ts";
+import { recoverDesktop, validateDesktopReceipt } from "./desktop.ts";
+import { validateDependencies } from "./catalog.ts";
+import { protectDependencies } from "./dependencies.ts";
+import {
+  validateAdmin,
+  validateBootstrap,
+  validateDesktop,
+} from "./integration-declarations.ts";
+import type { WindowsEffects } from "./windows-effects.ts";
+import { noLinksData, validatePersistentFile } from "./persistence.ts";
+import { validateShell } from "./shell-declarations.ts";
+import { profileKey, recoverProfile } from "./profiles.ts";
+import {
   mkdir,
   rm,
   writeFile,
@@ -7,8 +32,9 @@ import {
   lstat,
   readlink,
   unlink,
+  link,
 } from "node:fs/promises";
-import { join, resolve, relative, sep, dirname } from "node:path";
+import { isAbsolute, join, resolve, relative, sep, dirname } from "node:path";
 import {
   atomicJson,
   component,
@@ -22,7 +48,6 @@ import {
   record,
   relativeFile,
   sha256,
-  versionKey,
   removeTree,
 } from "./util.ts";
 import { selectedEnvironment, validateEnv } from "./environment.ts";
@@ -55,13 +80,13 @@ export function installId(key: string, version: string): string {
   return sha256(JSON.stringify([key, version]));
 }
 export function validateState(state: any): asserts state is State {
-  if (![1, 2, 3, 4].includes(state?.schemaVersion))
+  if (![1, 2, 3, 4, 5, 6, 7, 8].includes(state?.schemaVersion))
     fail(
       "Unsupported state schema; do not use an older Piko on this installation",
     );
   if (
     !record(state) ||
-    ![1, 2, 3, 4].includes(state.schemaVersion) ||
+    ![1, 2, 3, 4, 5, 6, 7, 8].includes(state.schemaVersion) ||
     !Number.isSafeInteger(state.revision) ||
     state.revision < 0
   )
@@ -108,6 +133,7 @@ export function validateState(state: any): asserts state is State {
     if ((s as Source).alias !== alias || (s as Source).type === "npm")
       fail("Source alias mismatch or invalid source type");
   }
+  validateLayoutOwners(state as State);
   for (const [id, value] of Object.entries(state.installs)) {
     const i = value as Install;
     if (!record(i)) fail("Invalid installation");
@@ -121,7 +147,13 @@ export function validateState(state: any): asserts state is State {
       id !== installId(i.key, i.version)
     )
       fail("Invalid installed identity");
-    const expected = join("apps", i.key, versionKey(i.version));
+    const expected = installDirectory(
+      i.source,
+      i.name,
+      i.version,
+      i.key,
+      i.layout,
+    );
     if (
       i.dir !== expected ||
       !record(i.bins) ||
@@ -135,8 +167,10 @@ export function validateState(state: any): asserts state is State {
       fail("Invalid installation receipt in state");
     for (const [name, b] of Object.entries(i.bins)) {
       commandName(name);
-      if (!record(b) || !["native", "node"].includes(b.kind))
+      if (!record(b) || !["native", "node", "powershell"].includes(b.kind))
         fail("Invalid bin");
+      if (b.kind === "powershell" && state.schemaVersion < 5)
+        fail("PowerShell entries require schema 5");
       relativeFile(b.path);
     }
     if (i.env !== undefined) {
@@ -144,7 +178,82 @@ export function validateState(state: any): asserts state is State {
         fail("Environment metadata requires schema 4");
       validateEnv(i.env);
     }
+    if (
+      i.desktop !== undefined ||
+      i.bootstrap !== undefined ||
+      i.admin !== undefined ||
+      Object.values(i.bins).some((b) => b.data)
+    ) {
+      if (state.schemaVersion < 6 || i.kind !== "portable")
+        fail("External integration metadata requires portable schema 6");
+      if (i.desktop !== undefined) validateDesktop(i.desktop);
+      if (i.bootstrap !== undefined) validateBootstrap(i.bootstrap);
+      if (i.admin !== undefined) validateAdmin(i.admin);
+      for (const bin of Object.values(i.bins))
+        if (
+          bin.data &&
+          (bin.kind !== "native" || !i.bootstrap?.outputs.includes(bin.path))
+        )
+          fail("Invalid persistent executable metadata");
+    }
+    if (i.bootstrap) {
+      for (const path of i.bootstrap.outputs)
+        if (
+          !i.persist.some(
+            (p) => !i.persistFiles?.[p] && path.startsWith(p + "/"),
+          )
+        )
+          fail("Bootstrap output outside persistent directory");
+    }
+    if (i.shell !== undefined) {
+      if (state.schemaVersion < 5 || i.kind !== "portable")
+        fail("Shell metadata requires portable schema 5");
+      validateShell(i.shell);
+      if (i.shell.bash && state.schemaVersion < 7)
+        fail("Bash initialization requires schema 7");
+      if (i.depends === undefined) fail("Missing stored Shell dependencies");
+    }
+    if (i.depends !== undefined) {
+      if (i.kind !== "portable" || state.schemaVersion < (i.shell ? 5 : 7))
+        fail("Stored dependencies require portable schema 7 or Shell schema 5");
+      validateDependencies(i.depends, i.name);
+    }
+    if (i.persistFiles !== undefined) {
+      if (state.schemaVersion < 5 || !record(i.persistFiles))
+        fail("File persistence requires schema 5");
+      for (const [path, file] of Object.entries(i.persistFiles)) {
+        if (!i.persist.includes(path)) fail("Untracked persistent file");
+        validatePersistentFile(file);
+      }
+    }
     for (const p of i.persist) relativeFile(p);
+    if (i.npmCompatibility !== undefined) {
+      const c = i.npmCompatibility;
+      if (
+        state.schemaVersion < 7 ||
+        i.kind !== "npm" ||
+        !record(c) ||
+        typeof c.nodeAbi !== "string" ||
+        !/^\d+$/.test(c.nodeAbi) ||
+        !record(c.engines) ||
+        !Array.isArray(c.nativeFiles) ||
+        c.nativeFiles.length > 100000
+      )
+        fail("Invalid npm compatibility metadata; requires schema 7");
+      for (const [path, range] of Object.entries(c.engines)) {
+        relativeFile(path);
+        if (!path.startsWith("node_modules/") || typeof range !== "string")
+          fail("Invalid npm engine constraint");
+      }
+      for (const path of c.nativeFiles) {
+        relativeFile(path);
+        if (
+          !path.startsWith("node_modules/") ||
+          !path.toLowerCase().endsWith(".node")
+        )
+          fail("Invalid native module path");
+      }
+    }
     if (i.npmBuild !== undefined) {
       const b = i.npmBuild;
       if (
@@ -177,6 +286,72 @@ export function validateState(state: any): asserts state is State {
           !b.lastRun.paths.every((p) => typeof p === "string"))
       )
         fail("Invalid npm build result");
+    }
+  }
+  validateStartMenu(state as State);
+  if (
+    state.desktop !== undefined ||
+    state.bootstraps !== undefined ||
+    state.admin !== undefined
+  ) {
+    if (state.schemaVersion < 6) fail("External integrations require schema 6");
+    if (state.desktop !== undefined) {
+      if (!record(state.desktop)) fail("Invalid desktop section");
+      for (const [key, receipt] of Object.entries(state.desktop)) {
+        validateDesktopReceipt(receipt);
+        if (
+          !state.installs[receipt.id] ||
+          state.installs[receipt.id].key !== key
+        )
+          fail("Desktop ownership references missing installation");
+      }
+    }
+    for (const kind of ["bootstraps", "admin"] as const) {
+      if (state[kind] === undefined) continue;
+      if (!record(state[kind])) fail("Invalid execution receipts");
+      for (const [id, receipt] of Object.entries(state[kind])) {
+        if (
+          !state.installs[id] ||
+          !record(receipt) ||
+          (kind === "admin" &&
+            (receipt.id !== id ||
+              !["install", "remove"].includes(receipt.action) ||
+              !state.installs[id].admin)) ||
+          (kind === "bootstraps" && !state.installs[id].bootstrap) ||
+          !/^[a-f0-9]{64}$/.test(receipt.binding) ||
+          typeof receipt.at !== "string" ||
+          !["running", "failed", "completed"].includes(receipt.status)
+        )
+          fail("Invalid execution approval receipt");
+      }
+    }
+  }
+  if (state.profiles !== undefined) {
+    if (state.schemaVersion < 5 || !record(state.profiles))
+      fail("Profiles require schema 5");
+    for (const [key, profile] of Object.entries(state.profiles)) {
+      if (
+        !record(profile) ||
+        typeof profile.path !== "string" ||
+        !profile.path ||
+        !isAbsolute(profile.path) ||
+        key !== profileKey(profile.path) ||
+        (profile.shell !== undefined &&
+          (state.schemaVersion < 7 ||
+            !["powershell", "bash"].includes(profile.shell))) ||
+        !record(profile.approvals) ||
+        typeof profile.block !== "string" ||
+        profile.block.length > 16384
+      )
+        fail("Invalid Profile ownership");
+      for (const [owner, approval] of Object.entries(profile.approvals))
+        if (
+          !/^[a-z0-9._-]+--[a-f0-9]{16}$/.test(owner) ||
+          !record(approval) ||
+          typeof approval.binding !== "string" ||
+          !/^[a-f0-9]{64}$/.test(approval.binding)
+        )
+          fail("Invalid Shell approval");
     }
   }
   for (const [key, selection] of Object.entries(state.defaults)) {
@@ -241,6 +416,15 @@ export function validateState(state: any): asserts state is State {
       !data.paths.length
     )
       fail("Invalid persistent-data identity");
+    if (data.files !== undefined) {
+      if (state.schemaVersion < 5 || !record(data.files))
+        fail("Persistent file ownership requires schema 5");
+      for (const [path, file] of Object.entries(data.files)) {
+        if (!data.paths.includes(path))
+          fail("Unknown persistent file ownership path");
+        validatePersistentFile(file);
+      }
+    }
     const paths: string[] = [];
     for (const path of data.paths) {
       relativeFile(path);
@@ -270,6 +454,10 @@ export function upgradeState(state: State): void {
     state.data![i.key] = {
       name: i.name,
       source: i.source,
+      ...(i.layout ? { layout: i.layout } : {}),
+      ...(prior?.files || i.persistFiles
+        ? { files: { ...prior?.files, ...i.persistFiles } }
+        : {}),
       paths: [
         ...new Map(
           [...(prior?.paths ?? []), ...i.persist].map((path) => [
@@ -288,7 +476,10 @@ export class Store {
   readonly removalPath: string;
   readonly rebuildPath: string;
   readonly dataRemovalPath: string;
-  constructor(readonly root: string) {
+  constructor(
+    readonly root: string,
+    readonly effectsBackend?: WindowsEffects,
+  ) {
     this.root = resolve(root);
     this.statePath = join(root, "apps", "piko", "state.json");
     this.installPath = join(root, "operations", "install.json");
@@ -298,6 +489,12 @@ export class Store {
     this.dataRemovalPath = join(root, "operations", "data-removal.json");
   }
   async read(): Promise<State> {
+    if (await exists(join(this.root, "operations", "persist.json")))
+      fail("Data-profile operation pending; run piko persist --recover");
+    if (await exists(join(this.root, "operations", "layout.json")))
+      fail(
+        "Directory migration is pending; run piko maintenance layout --recover before other operations",
+      );
     await noLinks(this.statePath);
     if (!(await exists(this.statePath))) return emptyState();
     const s = await json(this.statePath);
@@ -329,7 +526,16 @@ export class Store {
         ),
     );
     for (const path of created)
-      if (await exists(join(this.root, "persist", installation.key, path)))
+      if (
+        await exists(
+          join(
+            this.root,
+            "persist",
+            persistentFolder(installation, installation.key),
+            path,
+          ),
+        )
+      )
         fail(
           "Untracked persistent directory exists; inspect before installation",
         );
@@ -350,7 +556,7 @@ export class Store {
     const i = entry.installation as Install,
       check = emptyState();
     upgradeState(check);
-    check.schemaVersion = 4;
+    check.schemaVersion = 8;
     check.installs[i.id] = i;
     validateState(check);
     if (
@@ -385,8 +591,36 @@ export class Store {
       fail("Staged installation receipt mismatch");
     for (const path of i.persist) {
       const source = join(stage, path),
-        shared = join(this.root, "persist", i.key, path);
+        shared = join(this.root, "persist", persistentFolder(i, i.key), path);
       await noLinks(shared);
+      const file = i.persistFiles?.[path];
+      if (file) {
+        await noLinks(source);
+        await mkdir(dirname(shared), { recursive: true });
+        if (!(await exists(shared))) {
+          if (file.mode === "hardlink" && (await exists(source))) {
+            if (!(await lstat(source)).isFile())
+              fail("Persistent file source is not a file");
+            await rename(source, shared);
+          } else await writeFile(shared, file.initial, { flag: "wx" });
+        }
+        const targetInfo = await lstat(shared);
+        if (!targetInfo.isFile()) fail("Persistent file target is not a file");
+        if (file.mode === "seed") continue;
+        if (await exists(source)) {
+          const sourceInfo = await lstat(source);
+          if (!sourceInfo.isFile()) fail("Persistent file source type changed");
+          if (
+            sourceInfo.ino === targetInfo.ino &&
+            sourceInfo.dev === targetInfo.dev
+          )
+            continue;
+          await unlink(source);
+        }
+        await mkdir(dirname(source), { recursive: true });
+        await link(shared, source);
+        continue;
+      }
       if ((await exists(source)) && (await lstat(source)).isSymbolicLink()) {
         if (
           resolve(await readlink(source)).toLowerCase() !==
@@ -413,6 +647,7 @@ export class Store {
       ).symlink(resolve(shared), source, "junction");
     }
     for (const bin of Object.values(i.bins)) {
+      if (bin.data) continue;
       const file = join(stage, bin.path);
       await noLinks(file);
       if (!(await lstat(file)).isFile()) fail("Installed executable missing");
@@ -434,9 +669,21 @@ export class Store {
       after.installs[i.id] = i;
       if (i.npmBuild || i.env) {
         upgradeState(after);
-        after.schemaVersion = i.env
-          ? 4
-          : (Math.max(after.schemaVersion, 3) as State["schemaVersion"]);
+        after.schemaVersion = Math.max(
+          after.schemaVersion,
+          i.env ? 4 : 3,
+        ) as State["schemaVersion"];
+      }
+      if (
+        i.shell ||
+        i.persistFiles ||
+        Object.values(i.bins).some((b) => b.kind === "powershell")
+      ) {
+        upgradeState(after);
+        after.schemaVersion = Math.max(
+          after.schemaVersion,
+          5,
+        ) as State["schemaVersion"];
       }
       if (i.persist.length) upgradeState(after);
       await this.commit(before, after);
@@ -462,7 +709,7 @@ export class Store {
     )
       fail("Invalid data cleanup journal");
     const check = emptyState();
-    check.schemaVersion = 4;
+    check.schemaVersion = 8;
     check.aliases = {};
     check.data = { [entry.key]: entry.data as PersistentData };
     validateState(check);
@@ -504,7 +751,12 @@ export class Store {
       if (!allowedNames.has(file))
         fail("Unrecognized file in data cleanup staging directory");
     for (let n = 0; n < entry.data.paths.length; n++) {
-      const from = join(this.root, "persist", entry.key, entry.data.paths[n]),
+      const from = join(
+          this.root,
+          "persist",
+          persistentFolder(entry.data as PersistentData, entry.key),
+          entry.data.paths[n],
+        ),
         to = join(stage, String(n));
       await noLinks(from);
       await noLinks(to);
@@ -513,7 +765,7 @@ export class Store {
           fail(
             "Both persistent data and cleanup trash exist; inspect manually",
           );
-        await noLinksTree(to);
+        await noLinksData(to);
         await mkdir(dirname(from), { recursive: true });
         await rename(to, from);
       }
@@ -536,7 +788,7 @@ export class Store {
       if (!record(i)) fail("Missing npm rebuild identity");
       const check = emptyState();
       upgradeState(check);
-      check.schemaVersion = i.env ? 4 : 3;
+      check.schemaVersion = 8;
       check.installs[i.id] = i as Install;
       validateState(check);
       if (i.kind !== "npm" || !i.npmBuild)
@@ -613,7 +865,7 @@ export class Store {
       fail("Invalid uninstall recovery record");
     const check = emptyState();
     upgradeState(check);
-    check.schemaVersion = 4;
+    check.schemaVersion = 8;
     check.installs[i.id] = i as Install;
     validateState(check);
     const from = join(this.root, i.dir),
@@ -645,7 +897,14 @@ export class Store {
             if (
               !i.persist.includes(rel) ||
               resolve(await readlink(path)).toLowerCase() !==
-                resolve(join(this.root, "persist", i.key, rel)).toLowerCase()
+                resolve(
+                  join(
+                    this.root,
+                    "persist",
+                    persistentFolder(i as Install, i.key),
+                    rel,
+                  ),
+                ).toLowerCase()
             )
               fail("Unknown link found in uninstall trash");
             await unlink(path);
@@ -657,7 +916,7 @@ export class Store {
     }
     await rm(this.removalPath);
   }
-  async recover(): Promise<void> {
+  async recover(backend = this.effectsBackend): Promise<void> {
     if (!(await exists(this.journalPath))) return;
     await noLinks(this.journalPath);
     const j = await json(this.journalPath);
@@ -674,6 +933,15 @@ export class Store {
     const chosen = state.revision === j.after.revision ? j.after : j.before;
     if (JSON.stringify(state) !== JSON.stringify(chosen))
       fail("Recovery state mismatch");
+    if (j.startMenu !== undefined)
+      await recoverStartMenu(
+        this.root,
+        j.before,
+        j.after,
+        chosen,
+        j.startMenu,
+        backend,
+      );
     await this.syncCurrents(chosen, j.before, j.after);
     for (const name of new Set([
       ...commandNames(j.before),
@@ -703,13 +971,22 @@ export class Store {
         install = selection && target.installs[selection.id];
       await setCurrent(
         this.root,
-        key,
+        appFolder(
+          install ??
+            Object.values({ ...before.installs, ...after.installs }).find(
+              (i) => i.key === key,
+            )!,
+        ),
         install ? join(this.root, install.dir) : undefined,
         allowed,
       );
     }
   }
-  async commit(before: State, after: State): Promise<void> {
+  async commit(
+    before: State,
+    after: State,
+    backend = this.effectsBackend,
+  ): Promise<void> {
     after.revision = before.revision + 1;
     const recordedSources = [
       ...Object.values(after.sources),
@@ -723,16 +1000,74 @@ export class Store {
       upgradeState(after);
       after.schemaVersion = 4;
     }
+    if (
+      Object.values(after.installs).some(
+        (i) =>
+          i.shell ||
+          i.persistFiles ||
+          Object.values(i.bins).some((b) => b.kind === "powershell"),
+      ) ||
+      after.profiles
+    ) {
+      upgradeState(after);
+      after.schemaVersion = Math.max(
+        after.schemaVersion,
+        5,
+      ) as State["schemaVersion"];
+    }
+    if (
+      Object.values(after.installs).some(
+        (i) =>
+          i.desktop ||
+          i.bootstrap ||
+          i.admin ||
+          Object.values(i.bins).some((b) => b.data),
+      ) ||
+      after.desktop ||
+      after.bootstraps ||
+      after.admin
+    ) {
+      upgradeState(after);
+      after.schemaVersion = 6;
+    }
+    // Never downgrade a previously committed schema, including after removal
+    // of the last installation that originally required it.
+    if (
+      Object.values(after.installs).some(
+        (i) =>
+          i.npmCompatibility ||
+          i.shell?.bash ||
+          (i.depends !== undefined && !i.shell),
+      ) ||
+      Object.values(after.profiles ?? {}).some((p) => p.shell === "bash")
+    ) {
+      upgradeState(after);
+      after.schemaVersion = 7;
+    }
+    if (
+      Object.values(after.installs).some((i) => i.layout) ||
+      Object.values(after.data ?? {}).some((i) => i.layout)
+    ) {
+      upgradeState(after);
+      after.schemaVersion = 8;
+    }
+    after.schemaVersion = Math.max(
+      before.schemaVersion,
+      after.schemaVersion,
+    ) as State["schemaVersion"];
     selectedEnvironment(this.root, after);
+    const startMenu = await planStartMenu(this.root, before, after, backend);
     validateState(after);
+    await checkStartMenu(startMenu, backend);
     if (await exists(this.journalPath)) fail("Unrecovered selection operation");
     for (const name of commandNames(after)) await ensureShim(this.root, name);
-    await atomicJson(this.journalPath, { before, after });
+    await atomicJson(this.journalPath, { before, after, startMenu });
     try {
+      await writeStartMenu(this.root, startMenu, backend);
       await this.syncCurrents(after, before, after);
       await atomicJson(this.statePath, after);
     } catch (e) {
-      await this.recover();
+      await this.recover(backend);
       throw e;
     }
     for (const name of commandNames(before))
@@ -742,7 +1077,7 @@ export class Store {
   }
   async mutate<T>(
     fn: (state: State) => Promise<T>,
-    options: { skipUnchanged?: boolean } = {},
+    options: { skipUnchanged?: boolean; effectsBackend?: WindowsEffects } = {},
   ): Promise<T> {
     await noLinks(join(this.root, "operations", "self-update.json"));
     if (await exists(join(this.root, "operations", "self-update.json")))
@@ -770,26 +1105,45 @@ export class Store {
       await this.recoverRebuild();
       await this.recoverDataRemoval();
       await this.recoverRemoval();
-      await this.recover();
+      await this.recover(options.effectsBackend);
       await this.recoverInstallation();
+      await recoverProfile(this.root, await this.read());
+      await recoverDesktop(
+        this.root,
+        await this.read(),
+        options.effectsBackend,
+      );
       const before = await this.read(),
         state = structuredClone(before);
       try {
         const result = await fn(state);
+        await protectDependencies(this.root, before, state);
         if (
           !options.skipUnchanged ||
           JSON.stringify(before) !== JSON.stringify(state)
         )
-          await this.commit(before, state);
+          await this.commit(before, state, options.effectsBackend);
         await this.recoverInstallation();
         await this.recoverRebuild();
         await this.recoverRemoval();
         await this.recoverDataRemoval();
+        await recoverProfile(this.root, await this.read());
+        await recoverDesktop(
+          this.root,
+          await this.read(),
+          options.effectsBackend,
+        );
         return result;
       } catch (error) {
         await this.recoverRebuild();
         await this.recoverRemoval();
         await this.recoverDataRemoval();
+        await recoverProfile(this.root, await this.read());
+        await recoverDesktop(
+          this.root,
+          await this.read(),
+          options.effectsBackend,
+        );
         throw error;
       }
     } finally {

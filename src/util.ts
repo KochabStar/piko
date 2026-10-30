@@ -40,7 +40,10 @@ export function npmName(value: string): string {
   return value;
 }
 export function commandName(value: string): string {
-  const name = component(value);
+  // Command names such as clang++ are valid Windows filenames; package/source
+  // component names retain their stricter grammar.
+  component(value.replaceAll("+", "-"));
+  const name = value.toLowerCase();
   if (name === "piko" || /\.(exe|cmd|bat|ps1)$/i.test(name))
     fail(`Reserved command: ${value}`);
   return name;
@@ -166,17 +169,23 @@ export function publicEndpoint(value: string | URL): string {
   url.hash = "";
   return url.href;
 }
-export async function download(
+export async function downloadResponse(
   value: string,
-  limit = 512 * 1024 * 1024,
-): Promise<Uint8Array> {
+  options: {
+    method?: "GET" | "HEAD";
+    headers?: Headers;
+    signal?: AbortSignal;
+  } = {},
+): Promise<Response> {
   let url = networkUrl(value);
   for (let redirects = 0; redirects < 6; redirects++) {
     let response: Response;
     try {
       response = await fetch(url, {
         redirect: "manual",
-        signal: AbortSignal.timeout(120000),
+        method: options.method,
+        headers: options.headers,
+        signal: options.signal ?? AbortSignal.timeout(120000),
       });
     } catch (error) {
       const code =
@@ -203,28 +212,35 @@ export async function download(
     }
     if (!response.ok)
       fail(`Download failed: HTTP ${response.status} (${publicEndpoint(url)})`);
-    if (Number(response.headers.get("content-length") ?? 0) > limit) {
-      await response.body?.cancel();
-      fail("Download exceeds size limit");
-    }
-    const reader = response.body?.getReader();
-    if (!reader) fail("Empty response body");
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.length;
-        if (total > limit) fail("Download exceeds size limit");
-        chunks.push(value);
-      }
-    } finally {
-      await reader.cancel();
-    }
-    return Buffer.concat(chunks, total);
+    return response;
   }
   fail("Too many redirects");
+}
+export async function download(
+  value: string,
+  limit = 512 * 1024 * 1024,
+): Promise<Uint8Array> {
+  const response = await downloadResponse(value);
+  if (Number(response.headers.get("content-length") ?? 0) > limit) {
+    await response.body?.cancel();
+    fail("Download exceeds size limit");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) fail("Empty response body");
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > limit) fail("Download exceeds size limit");
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return Buffer.concat(chunks, total);
 }
 export async function capture(
   executable: string,

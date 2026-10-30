@@ -1,3 +1,4 @@
+import { persistentFolder } from "../src/layout.ts";
 import { afterAll, test, expect } from "bun:test";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -100,9 +101,27 @@ test("compiled cleanup CLI previews and requires --data plus explicit non-intera
   await run(["setup"]);
   await run(["source", "add", "main", `http://127.0.0.1:${server.port}/`]);
   await run(["install", "main/saved@1.0.0"]);
+  const stateBeforeDoctor = await readFile(
+    join(home, "apps/piko/state.json"),
+    "utf8",
+  );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const diagnostics = JSON.parse((await run(["doctor"])).out);
+    expect(diagnostics.installs).toBe(1);
+    expect(diagnostics.orphans).toEqual([]);
+    expect(diagnostics.revision).toBe(JSON.parse(stateBeforeDoctor).revision);
+    expect(await readFile(join(home, "apps/piko/state.json"), "utf8")).toBe(
+      stateBeforeDoctor,
+    );
+  }
   const state = await new Store(home).read(),
     installation = Object.values(state.installs)[0]!,
-    data = join(home, "persist", installation.key, "settings");
+    data = join(
+      home,
+      "persist",
+      persistentFolder(installation, installation.key),
+      "settings",
+    );
   await writeFile(join(data, "keep.txt"), "user-settings");
   expect(
     (await run(["cleanup", "main/saved", "--data", "--yes"], 1)).err,
@@ -129,16 +148,35 @@ test("compiled cleanup CLI previews and requires --data plus explicit non-intera
     "--yes",
   );
   expect(await readFile(join(data, "keep.txt"), "utf8")).toBe("user-settings");
-  await mkdir(join(home, "persist", installation.key, "not-recorded"));
+  await mkdir(
+    join(
+      home,
+      "persist",
+      persistentFolder(installation, installation.key),
+      "not-recorded",
+    ),
+  );
   await writeFile(
-    join(home, "persist", installation.key, "not-recorded", "keep"),
+    join(
+      home,
+      "persist",
+      persistentFolder(installation, installation.key),
+      "not-recorded",
+      "keep",
+    ),
     "untouched",
   );
   await run(["cleanup", "main/saved", "--data", "--yes"]);
   expect(await exists(data)).toBe(false);
   expect(
     await readFile(
-      join(home, "persist", installation.key, "not-recorded", "keep"),
+      join(
+        home,
+        "persist",
+        persistentFolder(installation, installation.key),
+        "not-recorded",
+        "keep",
+      ),
       "utf8",
     ),
   ).toBe("untouched");

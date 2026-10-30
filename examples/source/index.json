@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "packages": {
     "node": {
+      "runtime": { "family": "node", "distribution": "official" },
       "latest": "26.12.1",
       "versions": { "26.12.1": "packages/node/26.12.1.json" }
     },

@@ -1,5 +1,7 @@
+import { buildShim } from "./build-shim.ts";
 import { buildSandboxRegistry } from "./sandbox-registry.ts";
 import { mkdir } from "node:fs/promises";
+await buildShim();
 await mkdir("dist", { recursive: true });
 const result = await Bun.build({
   entrypoints: ["src/cli.ts"],

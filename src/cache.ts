@@ -8,7 +8,6 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  download,
   exists,
   fail,
   noLinks,
@@ -16,27 +15,39 @@ import {
   removeTree,
   sha256,
 } from "./util.ts";
+import { downloadArtifact } from "./downloader.ts";
 import type { State } from "./types.ts";
 export async function artifactBytes(
   root: string,
   url: string,
   checksum?: string,
   bypass = false,
+  state?: State,
+  limit = 512 * 1024 * 1024,
 ): Promise<Uint8Array> {
-  if (!checksum || bypass) return await download(url);
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 2 * 1024 * 1024 * 1024
+  )
+    fail("Invalid artifact size limit");
+  if (!checksum || bypass)
+    return await downloadArtifact(root, url, state, limit);
   if (!/^[a-f0-9]{64}$/i.test(checksum)) fail("Invalid cache checksum");
   const hash = checksum.toLowerCase(),
     dir = join(root, "cache", "artifacts"),
     file = join(dir, hash);
   await noLinks(file);
   if (await exists(file)) {
-    if (!(await lstat(file)).isFile()) fail("Invalid cached artifact");
+    const info = await lstat(file);
+    if (!info.isFile()) fail("Invalid cached artifact");
+    if (info.size > limit) fail("Cached artifact exceeds size limit");
     const bytes = await readFile(file);
     if (sha256(bytes) !== hash)
       fail("Cached artifact checksum mismatch; inspect cache before retrying");
     return bytes;
   }
-  const bytes = await download(url);
+  const bytes = await downloadArtifact(root, url, state, limit);
   if (sha256(bytes) !== hash)
     fail("SHA-256 mismatch; installation was not committed");
   await mkdir(dir, { recursive: true });

@@ -103,7 +103,7 @@ function Invoke-Check {
     return ($result.stdout + "`n" + $result.stderr).Trim()
 }
 function Read-State {
-    return Get-Content -LiteralPath (Join-Path $env:PIKO_HOME 'apps\piko\state.json') -Raw | ConvertFrom-Json
+    return [IO.File]::ReadAllText((Join-Path $env:PIKO_HOME 'apps\piko\state.json')) | ConvertFrom-Json
 }
 function Find-Install([string]$Name) {
     $state = Read-State
@@ -122,6 +122,8 @@ try {
     }
     $config = Get-Content -LiteralPath (Join-Path $inputDir 'config.json') -Raw | ConvertFrom-Json
     Assert-Check ($config.schemaVersion -eq 1) 'Unsupported sandbox config.'
+    $integrationOnly = $config.PSObject.Properties['integrationOnly'] -and $config.integrationOnly
+    $report['integrationOnly'] = [bool]$integrationOnly
     $exe = Join-Path $inputDir 'piko.exe'
     $stream = [IO.File]::OpenRead($exe)
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -181,11 +183,11 @@ try {
                         $context.Response.ContentType = 'application/json'
                         $context.Response.ContentLength64 = $bytes.Length
                         $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
-                    } elseif (-not $file.StartsWith($base, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($file) -notin @('.json', '.tgz') -or -not [IO.File]::Exists($file)) {
+                    } elseif (-not $file.StartsWith($base, [StringComparison]::OrdinalIgnoreCase) -or ([IO.Path]::GetExtension($file) -notin @('.json', '.tgz') -and $relative -notin @('integration-font.ttf', 'integration-command.exe', 'integration-bootstrap.ps1')) -or -not [IO.File]::Exists($file)) {
                         $context.Response.StatusCode = 404
                     } else {
                         $bytes = [IO.File]::ReadAllBytes($file)
-                        $context.Response.ContentType = 'application/json'
+                        $context.Response.ContentType = if ([IO.Path]::GetExtension($file) -eq '.json') { 'application/json' } else { 'application/octet-stream' }
                         $context.Response.ContentLength64 = $bytes.Length
                         $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
                     }
@@ -206,6 +208,7 @@ try {
     }
     Assert-Check $ready 'Local fixture server did not become ready.'
     $null = Invoke-Check 'Add example source' $installedExe @('source', 'add', 'main', 'http://localhost:18765/')
+    if (-not $integrationOnly) {
     foreach ($spec in @('main/ripgrep@15.2.0', 'main/node@26.12.1')) {
         $null = Invoke-Check "Install $spec" $installedExe @('install', $spec)
         $name = if ($spec -like '*ripgrep*') { 'ripgrep' } else { 'node' }
@@ -311,11 +314,19 @@ try {
             finally { [IO.File]::WriteAllBytes($cli, $original) }
             $null = Invoke-Check 'Install new version without carrying approvals' $installedExe @('install', 'npm:@piko-fixture/scripts@1.1.0')
             $null = Invoke-Check 'New version requires fresh approval' $installedExe @('scripts', 'rebuild', 'npm:@piko-fixture/scripts@1.1.0') -ExpectedExit 1
+            # Batch previews use the restored public registry after this stage.
+            # Retain fixture versions and snapshots, but release its default.
+            $null = Invoke-Check 'Unselect local-registry fixture after script tests' $installedExe @('unuse', 'npm:@piko-fixture/scripts')
+            Assert-Check (-not (Read-State).defaults.PSObject.Properties[$fixture.key]) 'Local-registry fixture is still selected.'
         } finally {
             if ($null -eq $oldRegistry) { Remove-Item Env:PIKO_NPM_REGISTRY -ErrorAction SilentlyContinue } else { $env:PIKO_NPM_REGISTRY = $oldRegistry }
         }
     }
-    if ($config.PSObject.Properties['maintenanceStage'] -and $config.maintenanceStage) {
+    }
+    if ($config.PSObject.Properties['integrationStage'] -and $config.integrationStage) {
+        . (Join-Path $inputDir 'integrations.ps1')
+    }
+    if (-not $integrationOnly -and $config.PSObject.Properties['maintenanceStage'] -and $config.maintenanceStage) {
         $null = Invoke-Check 'Package information includes refreshed source versions' $installedExe @('info', 'main/node')
         $null = Invoke-Check 'Preview batch updates without mutations' $installedExe @('update', '--all', '--dry-run')
         $null = Invoke-Check 'List checksummed artifact and protected npm snapshot caches' $installedExe @('cache', 'list')

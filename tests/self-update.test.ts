@@ -20,6 +20,7 @@ import {
   selfUpdateStatus,
 } from "../src/self-update.ts";
 import { Packages } from "../src/packages.ts";
+import { shimConfiguration } from "../src/shims.ts";
 import { capture, exists } from "../src/util.ts";
 const work = await mkdtemp(join(tmpdir(), "piko-self-tests-"));
 afterAll(async () => {
@@ -42,7 +43,7 @@ const exe = resolve("dist/piko.exe");
 const run = (root: string, file: string, args: string[]) =>
   capture(file, args, { cwd: work, env: { ...process.env, PIKO_HOME: root } });
 
-test("self update rebinds hardlink shims, preserves state, supports rollback and rejects unknown targets", async () => {
+test("self update preserves lightweight shims and state, supports rollback and rejects unknown targets", async () => {
   const root = join(work, "installation");
   await run(root, exe, ["setup"]);
   const manager = new Packages(root),
@@ -79,7 +80,11 @@ test("self update rebinds hardlink shims, preserves state, supports rollback and
     stat(target),
     stat(join(root, "shims/piko.exe")),
   ]);
-  expect(shim.ino).toBe(installed.ino);
+  expect(shim.ino).not.toBe(installed.ino);
+  expect(shim.size).toBeLessThan(65536);
+  expect(await readFile(join(root, "shims/piko.shim"), "utf8")).toBe(
+    shimConfiguration("piko"),
+  );
   expect((await selfUpdateStatus(root)).last.phase).toBe("committed");
   expect(
     (await run(root, join(root, "shims/piko.exe"), ["--version"])).trim(),

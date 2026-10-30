@@ -1,3 +1,4 @@
+import { persistentFolder, appFolder } from "../src/layout.ts";
 import { afterAll, describe, expect, test } from "bun:test";
 import {
   mkdir,
@@ -187,12 +188,14 @@ describe("portable package lifecycle", () => {
     const p = await manager("lifecycle");
     const a = await p.install("main/tool@1.0.0"),
       b = await p.install("main/tool@2.0.0");
-    expect(await exists(join(p.root, "apps", a.key, "current"))).toBe(false);
+    expect(await exists(join(p.root, "apps", appFolder(a), "current"))).toBe(
+      false,
+    );
     expect((await p.store.read()).defaults).toEqual({});
     expect(await exists(join(p.root, "apps", "piko", "state.json"))).toBe(true);
     expect(await exists(join(p.root, "state.json"))).toBe(false);
     await p.use("main/tool@1.0.0");
-    const current = join(p.root, "apps", a.key, "current");
+    const current = join(p.root, "apps", appFolder(a), "current");
     expect((await lstat(current)).isSymbolicLink()).toBe(true);
     expect(resolve(await readlink(current)).toLowerCase()).toBe(
       resolve(join(p.root, a.dir)).toLowerCase(),
@@ -269,7 +272,7 @@ describe("portable package lifecycle", () => {
   test("corrupt state and external current directory are never overwritten", async () => {
     const p = await manager("corrupt");
     const i = await p.install("tool@1.0.0");
-    const current = join(p.root, "apps", i.key, "current");
+    const current = join(p.root, "apps", appFolder(i), "current");
     await mkdir(current);
     await writeFile(join(current, "keep"), "external");
     await expect(p.use("tool@1.0.0")).rejects.toThrow("not a managed junction");
@@ -326,7 +329,14 @@ describe("portable package lifecycle", () => {
     manifests["tool-1.json"] = m;
     try {
       const i = await p.install("tool@1.0.0"),
-        data = join(p.root, "persist", i.key, "data", "settings", "keep.txt");
+        data = join(
+          p.root,
+          "persist",
+          persistentFolder(i, i.key),
+          "data",
+          "settings",
+          "keep.txt",
+        );
       await writeFile(data, "retained");
       await p.use("tool@1.0.0");
       await p.uninstall("tool@1.0.0", true);
@@ -358,7 +368,7 @@ describe("portable package lifecycle", () => {
     after.revision++;
     after.defaults[a.key] = { id: b.id, request: b.version };
     await atomicJson(p.store.journalPath, { before, after });
-    const current = join(p.root, "apps", a.key, "current");
+    const current = join(p.root, "apps", appFolder(a), "current");
     await rm(current);
     await symlink(resolve(join(p.root, b.dir)), current, "junction");
     await p.store.mutate(async () => {});

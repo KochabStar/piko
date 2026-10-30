@@ -1,3 +1,4 @@
+import { persistentFolder } from "./layout.ts";
 import { mkdir, readdir, rename, lstat, readlink } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { emptyState, upgradeState, validateState } from "./store.ts";
@@ -33,7 +34,7 @@ export async function orphanPlan(root: string, state: State) {
         const install = await json(file),
           check = emptyState();
         upgradeState(check);
-        check.schemaVersion = 4;
+        check.schemaVersion = 8;
         check.installs[install.id] = install;
         validateState(check);
         if (install.dir !== rel) fail("Receipt path mismatch");
@@ -47,7 +48,12 @@ export async function orphanPlan(root: string, state: State) {
                 !install.persist.includes(linkPath) ||
                 resolve(await readlink(full)).toLowerCase() !==
                   resolve(
-                    join(root, "persist", install.key, linkPath),
+                    join(
+                      root,
+                      "persist",
+                      persistentFolder(install, install.key),
+                      linkPath,
+                    ),
                   ).toLowerCase()
               )
                 fail("Unknown orphan link");

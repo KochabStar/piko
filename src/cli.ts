@@ -9,7 +9,14 @@ import { VERSION } from "./version.ts";
 import { createInterface } from "node:readline/promises";
 import { resolveCommand, commandNames } from "./commands.ts";
 import { basename, dirname, join, resolve } from "node:path";
-import { copyFile, mkdir, stat, rm } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  stat,
+  rm,
+  readFile,
+  writeFile,
+} from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { parseSpec } from "./catalog.ts";
 import { Store } from "./store.ts";
@@ -21,8 +28,9 @@ import {
   ensureShim,
   addUserPath,
   pathDiagnostics,
+  powershellExecutable,
 } from "./windows.ts";
-import { noLinks, fail, exists, json } from "./util.ts";
+import { noLinks, fail, exists, json, capture } from "./util.ts";
 
 const help = `Piko ${VERSION} — Windows package manager (preview)
 
@@ -31,16 +39,38 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko setup [--path]                 Install this executable; --path updates user PATH
   piko source add <alias> <url> [--type http|git] [--ref <ref>]
   piko source list | refresh [alias] | remove <alias> [--force]
-  piko info <package>                 Available and installed versions, provenance and commands
+  piko info <package>                 Versions, provenance and candidate dependency checks
   piko search <query>
   piko install <source/package>[@version] [--skip-checksum]   (alias: i)
+  piko install <spec> --with-deps --dry-run | --yes --binding <hash>
   piko use <package>[@version] [--no-commands] | unuse <package>
   piko command list | claim <command> <package> | release <command>
   piko command alias <name> <package> <provided-command> | unalias <name>
   piko cleanup <package> --data [--dry-run | --yes]
+  piko persist <package> --fresh --dry-run | --yes --binding <hash>
+  piko persist <package> --remove --dry-run | --yes --binding <hash>
+  piko persist --recover
+  piko integrate <package> --shell powershell|pwsh [--profile <path>] --dry-run
+  piko integrate <package> --shell powershell|pwsh --approve-shell --binding <hash>
+  piko unintegrate <package> --shell powershell|pwsh [--dry-run | --yes] [--binding <hash>]
+  piko shell init --shell powershell|bash --profile <path>
+  piko shell env --shell powershell|pwsh|cmd|bash|json
+  piko integrate <package> --desktop [--dry-run | --yes --binding <hash>]
+  piko unintegrate <package> --desktop [--dry-run | --yes --binding <hash>]
+  piko bootstrap <package> [--dry-run | --approve-exec --binding <hash>]
+  piko system <package> [--remove] [--dry-run | --approve-admin --binding <hash>]
+  piko system <package>@<installed-version> --upgrade --dry-run | --approve-admin --binding <hash>
+  piko rust list
+  piko rust install|use|update|remove <toolchain> --dry-run | --approve-exec --binding <hash>
   piko list
+  piko outdated [package] | status [package]
   piko update <package> | update --all [--dry-run]
+  piko cleanup [package] --versions [--keep N] [--dry-run | --yes]
+  piko export [file.json] [--lock]
+  piko import <file.json> [--dry-run | --yes] [--binding <hash>]
+  Runtime selection: install/use/info <source>/<family>@<request> --distribution <vendor>
   piko maintenance orphans | quarantine [--dry-run | --yes]
+  piko maintenance layout --dry-run | --yes --binding <hash> | --recover
   piko cache list | clean [--dry-run | --yes]
   piko uninstall <package>@<exact-version> [--force]
   piko which <command>
@@ -53,6 +83,7 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
 
 PIKO_HOME overrides the user installation root.
 Install does not select a default. current is a junction, not a copy.
+Portable dependencies are checked before install; install/select them explicitly.
 Install and update never execute lifecycle scripts. Explicit approvals and rebuild are required.
 Approved scripts run with user permissions; this is NOT a security sandbox.
 `;
@@ -60,27 +91,42 @@ async function main(): Promise<number> {
   if (process.platform !== "win32") fail("This release only supports Windows");
   const root = home(),
     store = new Store(root);
-  const launched = basename(process.execPath)
-    .replace(/\.exe$/i, "")
-    .toLowerCase();
+  const rawArgs = process.argv.slice(2);
+  const nativeDispatch = rawArgs[0] === "__shim";
+  const launched = nativeDispatch
+    ? rawArgs[1]
+    : basename(process.execPath)
+        .replace(/\.exe$/i, "")
+        .toLowerCase();
   if (
-    basename(dirname(process.execPath)).toLowerCase() === "shims" &&
-    launched !== "piko"
+    nativeDispatch ||
+    (basename(dirname(process.execPath)).toLowerCase() === "shims" &&
+      launched !== "piko")
   ) {
     if (
+      typeof launched !== "string" ||
+      !/^[a-z0-9][a-z0-9._+-]{0,79}$/.test(launched) ||
+      launched === "piko"
+    )
+      fail("Invalid native shim command");
+    if (
+      (await exists(join(root, "operations", "persist.json"))) ||
+      (await exists(join(root, "operations", "layout.json"))) ||
       (await exists(join(root, "operations", "self-update.json"))) ||
       (await exists(store.installPath)) ||
       (await exists(store.journalPath)) ||
       (await exists(store.removalPath)) ||
       (await exists(store.dataRemovalPath)) ||
-      (await exists(store.rebuildPath))
+      (await exists(store.rebuildPath)) ||
+      (await exists(join(root, "operations", "profile.json"))) ||
+      (await exists(join(root, "operations", "desktop.json")))
     )
       fail("Interrupted state change; run piko doctor before launching tools");
     return await dispatch(
       root,
       await store.read(),
       launched,
-      process.argv.slice(2),
+      nativeDispatch ? rawArgs.slice(2) : rawArgs,
     );
   }
   const { positionals: args, values } = parseArgs({
@@ -91,12 +137,27 @@ async function main(): Promise<number> {
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
       force: { type: "boolean" },
+      recover: { type: "boolean" },
       path: { type: "boolean" },
       type: { type: "string" },
       ref: { type: "string" },
       "skip-checksum": { type: "boolean" },
       "no-commands": { type: "boolean" },
+      "with-deps": { type: "boolean" },
+      lock: { type: "boolean" },
       data: { type: "boolean" },
+      fresh: { type: "boolean" },
+      versions: { type: "boolean" },
+      keep: { type: "string" },
+      desktop: { type: "boolean" },
+      "approve-exec": { type: "boolean" },
+      "approve-admin": { type: "boolean" },
+      remove: { type: "boolean" },
+      upgrade: { type: "boolean" },
+      shell: { type: "string" },
+      profile: { type: "string" },
+      "approve-shell": { type: "boolean" },
+      distribution: { type: "string" },
       "dry-run": { type: "boolean" },
       "package-path": { type: "string" },
       binding: { type: "string" },
@@ -123,7 +184,15 @@ async function main(): Promise<number> {
       switch (required(1)) {
         case "check":
           await packages.store.read();
-          console.log(JSON.stringify({ protocol: 1, version: VERSION }));
+          console.log(
+            JSON.stringify({
+              protocol: 1,
+              version: VERSION,
+              shimProtocol: 1,
+              dataProfiles: 1,
+              startMenu: 1,
+            }),
+          );
           break;
         case "status":
           console.log(JSON.stringify(await selfUpdateStatus(root), null, 2));
@@ -248,10 +317,260 @@ async function main(): Promise<number> {
       }
       break;
     }
-    case "info":
-      console.log(JSON.stringify(await packages.info(required(1)), null, 2));
+    case "shell": {
+      if (args[1] === "env") {
+        console.log(
+          (await import("./shell-environment.ts")).shellEnvironment(
+            root,
+            await store.read(),
+            values.shell ?? "json",
+          ),
+        );
+        break;
+      }
+      if (
+        required(1) !== "init" ||
+        !["powershell", "pwsh", "bash"].includes(values.shell ?? "") ||
+        !values.profile
+      )
+        fail("Use shell init --shell powershell --profile <absolute-path>");
+      const { shellInit } = await import("./shell.ts");
+      console.log(
+        await shellInit(
+          store,
+          resolve(values.profile),
+          values.shell === "bash" ? "bash" : "powershell",
+        ),
+      );
       break;
+    }
+    case "rust": {
+      const { inspectRust, runRust } = await import("./rust.ts");
+      const action = required(1);
+      if (values["dry-run"])
+        console.log(
+          JSON.stringify(await inspectRust(store, action, args[2]), null, 2),
+        );
+      else {
+        if (action !== "list" && !values["approve-exec"])
+          fail("Rust changes need --approve-exec and preview --binding");
+        console.log(
+          JSON.stringify(
+            await runRust(store, action, args[2], values.binding),
+            null,
+            2,
+          ),
+        );
+      }
+      break;
+    }
+    case "bootstrap":
+    case "system": {
+      if (values.upgrade) {
+        if (args[0] !== "system" || values.remove || values.desktop)
+          fail("Use system <installed-exact-version> --upgrade");
+        const { inspectSystemUpgrade, applySystemUpgrade } =
+          await import("./integration-upgrade.ts");
+        const plan = await inspectSystemUpgrade(packages, required(1));
+        console.log(JSON.stringify(plan, null, 2));
+        if (!values["dry-run"]) {
+          if (!values["approve-admin"])
+            fail(
+              "System upgrade needs --approve-admin and the combined --binding",
+            );
+          console.log(
+            JSON.stringify(
+              await applySystemUpgrade(
+                packages,
+                required(1),
+                values.binding ?? "",
+              ),
+              null,
+              2,
+            ),
+          );
+        }
+        break;
+      }
+      if (args[0] === "system" && values.desktop)
+        fail(
+          "System integration and user desktop integration are separate approvals",
+        );
+      const { inspectExecution, runExecution } = await import("./execution.ts");
+      const admin = args[0] === "system",
+        spec = required(1),
+        remove = !!values.remove;
+      if (remove && !admin) fail("--remove is only for system integration");
+      const plan = await inspectExecution(store, spec, admin, remove);
+      console.log(JSON.stringify(plan, null, 2));
+      if (values["dry-run"]) break;
+      if (admin ? !values["approve-admin"] : !values["approve-exec"])
+        fail(
+          admin
+            ? "System integration requires --approve-admin and preview --binding"
+            : "Bootstrap requires --approve-exec and preview --binding; --yes is insufficient",
+        );
+      console.log(
+        JSON.stringify(
+          await runExecution(store, spec, {
+            confirmed: true,
+            binding: values.binding,
+            admin,
+            remove,
+          }),
+          null,
+          2,
+        ),
+      );
+      break;
+    }
+    case "integrate":
+    case "unintegrate": {
+      if (values.desktop) {
+        if (values.shell || values.profile)
+          fail("Choose --desktop or --shell, not both");
+        const { inspectDesktop, applyDesktop } = await import("./desktop.ts");
+        const remove = args[0] === "unintegrate",
+          spec = required(1);
+        if (values.upgrade) {
+          if (remove) fail("Use integrate --desktop --upgrade");
+          const { inspectDesktopUpgrade } = await import("./desktop.ts");
+          console.log(
+            JSON.stringify(await inspectDesktopUpgrade(store, spec), null, 2),
+          );
+          if (!values["dry-run"]) {
+            if (!values.yes)
+              fail("Desktop upgrade needs --yes and preview --binding");
+            await packages.upgradeDesktop(spec, values.binding ?? "");
+          }
+          break;
+        }
+        const plan = await inspectDesktop(store, spec, remove);
+        console.log(JSON.stringify(plan, null, 2));
+        if (values["dry-run"]) break;
+        console.log(
+          JSON.stringify(
+            await applyDesktop(store, spec, {
+              confirmed: !!values.yes,
+              binding: values.binding,
+              remove,
+            }),
+            null,
+            2,
+          ),
+        );
+        break;
+      }
+      const shell = values.shell;
+      if (shell !== "powershell" && shell !== "pwsh" && shell !== "bash")
+        fail(
+          "Specify --shell powershell (5.1), pwsh (7), or bash with --profile",
+        );
+      if (shell === "bash" && !values.profile)
+        fail("Bash integration requires an explicit --profile path");
+      const { inspectIntegration, integrate } = await import("./shell.ts");
+      const profile = values.profile
+        ? resolve(values.profile)
+        : await capture(
+            powershellExecutable(shell === "pwsh" ? "pwsh" : "powershell"),
+            [
+              "-NoLogo",
+              "-NoProfile",
+              "-NonInteractive",
+              "-Command",
+              "$PROFILE.CurrentUserAllHosts",
+            ],
+          );
+      const remove = args[0] === "unintegrate",
+        spec = required(1);
+      const plan = await inspectIntegration(
+        store,
+        spec,
+        profile,
+        remove,
+        shell === "bash" ? "bash" : "powershell",
+      );
+      console.log(JSON.stringify(plan, null, 2));
+      if (values["dry-run"]) break;
+      if (remove ? !values.yes : !values["approve-shell"])
+        fail(
+          remove
+            ? "Removal requires --yes and preview --binding"
+            : "Shell code execution requires --approve-shell and preview --binding; --yes alone is insufficient",
+        );
+      console.log(
+        JSON.stringify(
+          await integrate(store, spec, profile, {
+            confirmed: true,
+            binding: values.binding,
+            remove,
+            shell: shell === "bash" ? "bash" : "powershell",
+          }),
+          null,
+          2,
+        ),
+      );
+      break;
+    }
+    case "info":
+      console.log(
+        JSON.stringify(
+          await packages.info(
+            await packages.runtimeSpec(required(1), values.distribution),
+          ),
+          null,
+          2,
+        ),
+      );
+      break;
+    case "persist": {
+      const { planPersist, applyPersist, recoverPersist } =
+        await import("./data-profiles.ts");
+      if (values.recover) {
+        console.log(JSON.stringify(await recoverPersist(store), null, 2));
+        break;
+      }
+      if (!!values.fresh === !!values.remove)
+        fail("Choose --fresh (new data, old data archived) or --remove");
+      const spec = required(1),
+        plan = await planPersist(store, spec, !!values.remove);
+      if (values["dry-run"]) {
+        console.log(JSON.stringify(plan, null, 2));
+        break;
+      }
+      if (!values.yes || !values.binding)
+        fail("Profile redirection needs --dry-run then --yes --binding");
+      console.log(
+        JSON.stringify(
+          await applyPersist(store, spec, values.binding, !!values.remove),
+          null,
+          2,
+        ),
+      );
+      break;
+    }
     case "maintenance": {
+      if (args[1] === "layout") {
+        const { planLayout, migrateLayout, recoverLayout } =
+          await import("./layout-migration.ts");
+        if (values.recover) {
+          console.log(JSON.stringify(await recoverLayout(root), null, 2));
+          break;
+        }
+        const plan = await planLayout(root);
+        if (values["dry-run"]) {
+          console.log(JSON.stringify(plan, null, 2));
+          break;
+        }
+        if (!values.yes || !values.binding)
+          fail(
+            "Directory migration requires --dry-run then --yes --binding <hash>",
+          );
+        console.log(
+          JSON.stringify(await migrateLayout(root, values.binding), null, 2),
+        );
+        break;
+      }
       if (!["orphans", "quarantine"].includes(required(1)))
         fail(
           "Use maintenance orphans or maintenance quarantine --dry-run/--yes",
@@ -293,14 +612,45 @@ async function main(): Promise<number> {
       break;
     case "i":
     case "install": {
-      const i = await packages.install(required(1), values["skip-checksum"]);
+      if (values["with-deps"]) {
+        if (values["skip-checksum"])
+          fail("Dependency plans require verified manifests and downloads");
+        const { planDependencies, installWithDependencies } =
+          await import("./dependency-install.ts");
+        const spec = await packages.runtimeSpec(
+          required(1),
+          values.distribution,
+        );
+        console.log(
+          JSON.stringify(
+            values["dry-run"] || !values.yes
+              ? await planDependencies(packages, spec)
+              : await installWithDependencies(
+                  packages,
+                  spec,
+                  values.binding ?? "",
+                ),
+            null,
+            2,
+          ),
+        );
+        break;
+      }
+      if (values["dry-run"]) fail("Install preview requires --with-deps");
+      const i = await packages.install(
+        await packages.runtimeSpec(required(1), values.distribution),
+        values["skip-checksum"],
+      );
       console.log(
         `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Select explicitly with piko use.`,
       );
       break;
     }
     case "use":
-      await packages.use(required(1), { noCommands: values["no-commands"] });
+      await packages.use(
+        await packages.runtimeSpec(required(1), values.distribution),
+        { noCommands: values["no-commands"] },
+      );
       for (const issue of await pathDiagnostics(
         root,
         await packages.store.read(),
@@ -338,15 +688,77 @@ async function main(): Promise<number> {
       );
       break;
     }
+    case "outdated":
+    case "status": {
+      const result = await packages.outdated(
+        args[1]
+          ? await packages.runtimeSpec(args[1], values.distribution)
+          : undefined,
+      );
+      console.log(JSON.stringify(result, null, 2));
+      if (result.some((r) => r.status === "blocked")) return 1;
+      break;
+    }
+    case "export": {
+      const { exportInventory, exportLockedInventory } =
+        await import("./inventory.ts");
+      const inventory = values.lock
+        ? await exportLockedInventory(packages)
+        : exportInventory(await packages.store.read());
+      const content = JSON.stringify(inventory, null, 2) + "\n";
+      if (args[1]) {
+        const path = resolve(args[1]);
+        await noLinks(path);
+        await writeFile(path, content, { flag: "wx" });
+        console.log(`Inventory exported: ${path}`);
+      } else console.log(content.trimEnd());
+      break;
+    }
+    case "import": {
+      const { planInventory, importInventory } = await import("./inventory.ts");
+      const path = resolve(required(1));
+      await noLinks(path);
+      const info = await stat(path);
+      if (!info.isFile() || info.size > 8 * 1024 * 1024)
+        fail("Inventory must be a JSON file of at most 8 MiB");
+      const value = JSON.parse(await readFile(path, "utf8")),
+        plan = await planInventory(packages, value);
+      if (values["dry-run"] || !values.yes) {
+        console.log(JSON.stringify(plan, null, 2));
+        if (!values["dry-run"])
+          fail("Inventory restore requires --yes after reviewing --dry-run");
+        if (plan.conflicts.length) return 1;
+        break;
+      }
+      console.log(
+        JSON.stringify(
+          await importInventory(packages, value, {
+            confirmed: true,
+            binding: values.binding ?? plan.binding,
+          }),
+          null,
+          2,
+        ),
+      );
+      break;
+    }
     case "update": {
       if (values.all) {
         if (args[1]) fail("Use update --all without a package");
         const result = await packages.updateAll(!!values["dry-run"]);
         console.log(JSON.stringify(result, null, 2));
-        if (result.some((r) => r.status === "failed")) return 1;
+        if (result.some((r) => ["failed", "blocked"].includes(r.status)))
+          return 1;
         break;
       }
-      const i = await packages.update(required(1));
+      const spec = await packages.runtimeSpec(required(1), values.distribution);
+      if (values["dry-run"]) {
+        const result = await packages.outdated(spec);
+        console.log(JSON.stringify(result, null, 2));
+        if (result.some((r) => r.status === "blocked")) return 1;
+        break;
+      }
+      const i = await packages.update(spec);
       console.log(`Default: ${i.name}@${i.version}`);
       break;
     }
@@ -403,6 +815,37 @@ async function main(): Promise<number> {
       break;
     }
     case "cleanup": {
+      if (values.versions) {
+        if (values.data) fail("Choose --versions or --data, not both");
+        if (values.keep !== undefined && !/^\d+$/.test(values.keep))
+          fail("--keep must be a nonnegative integer");
+        const keep = values.keep === undefined ? 1 : Number(values.keep);
+        const plan = await packages.versionCleanupPlan(args[1], keep);
+        console.log(
+          JSON.stringify(
+            {
+              keep: plan.keep,
+              binding: plan.binding,
+              entries: plan.entries.map(
+                ({ installation: _installation, ...entry }) => entry,
+              ),
+            },
+            null,
+            2,
+          ),
+        );
+        if (values["dry-run"]) break;
+        if (!values.yes)
+          fail("Version cleanup requires --yes after reviewing --dry-run");
+        const result = await packages.cleanupVersions(args[1], keep, {
+          confirmed: true,
+          binding: values.binding ?? plan.binding,
+        });
+        console.log(JSON.stringify(result, null, 2));
+        if (result.some((r) => r.status === "failed")) return 1;
+        break;
+      }
+      if (values.keep !== undefined) fail("--keep requires --versions");
       if (!values.data)
         fail(
           "Explicit --data is required; this operation permanently deletes recorded persistent directories",
@@ -451,7 +894,18 @@ async function main(): Promise<number> {
         await packages.store.read(),
         required(1).toLowerCase(),
       );
-      console.log(join(root, install.dir, bin.path));
+      console.log(
+        bin.data
+          ? await (
+              await import("./execution.ts")
+            ).persistentExecutable(
+              root,
+              await packages.store.read(),
+              install,
+              bin.path,
+            )
+          : join(root, install.dir, bin.path),
+      );
       break;
     }
     case "recover": {
@@ -563,8 +1017,9 @@ async function main(): Promise<number> {
       break;
     }
     case "doctor": {
-      await packages.store.mutate(async () => {});
+      await packages.store.mutate(async () => {}, { skipUnchanged: true });
       const s = await packages.store.read();
+      const { shellDiagnostics } = await import("./shell.ts");
       console.log(
         JSON.stringify(
           {
@@ -577,6 +1032,15 @@ async function main(): Promise<number> {
             orphans: await orphanPlan(root, s),
             pathDiagnostics: await pathDiagnostics(root, s),
             installs: Object.keys(s.installs).length,
+            shellIntegrations: await shellDiagnostics(store),
+            dataProfiles: await (
+              await import("./data-profiles.ts")
+            ).dataProfileStatus(store),
+            desktopIntegrations: s.desktop ?? {},
+            executions: {
+              bootstraps: s.bootstraps ?? {},
+              system: s.admin ?? {},
+            },
             limits: [
               "npm install/update scripts disabled; rebuild requires content-bound approval and npm 11.20.0",
               "Approved scripts are not sandboxed; external effects cannot be rolled back",

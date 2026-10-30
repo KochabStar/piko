@@ -1,3 +1,4 @@
+import { persistentFolder, appFolder } from "../src/layout.ts";
 import { afterAll, expect, test } from "bun:test";
 import {
   mkdtemp,
@@ -125,7 +126,9 @@ test("aliases target real package commands, follow default versions and reject i
   await expect(p.removeAlias("tool")).rejects.toThrow("alias");
   await p.unuse("first");
   expect((await p.store.read()).aliases?.["first-tool"]).toBeUndefined();
-  expect(await exists(join(p.root, "apps", first.key, "current"))).toBe(false);
+  expect(await exists(join(p.root, "apps", appFolder(first), "current"))).toBe(
+    false,
+  );
 });
 
 test("invalid alias state is rejected and schema 1 remains readable before upgrade", async () => {
@@ -134,6 +137,10 @@ test("invalid alias state is rejected and schema 1 remains readable before upgra
   await p.use("first@1.0.0");
   const state = await p.store.read();
   state.schemaVersion = 1;
+  for (const install of Object.values(state.installs)) {
+    delete install.layout;
+    install.dir = join("apps", install.key, install.version);
+  }
   delete state.aliases;
   delete state.data;
   for (const selection of Object.values(state.defaults))
@@ -154,14 +161,19 @@ test("invalid alias state is rejected and schema 1 remains readable before upgra
 test("cleanup previews exact owned directories and requires confirmation after all versions are removed", async () => {
   const p = await manager("cleanup"),
     i = await p.install("stored@1.0.0"),
-    data = join(p.root, "persist", i.key, "settings");
+    data = join(p.root, "persist", persistentFolder(i, i.key), "settings");
   await writeFile(join(data, "keep.txt"), "user-data");
   await expect(p.cleanupData("stored", { confirmed: true })).rejects.toThrow(
     "installed",
   );
   await p.uninstall("stored@1.0.0");
   expect(await readFile(join(data, "keep.txt"), "utf8")).toBe("user-data");
-  const outside = join(p.root, "persist", i.key, "untracked.txt");
+  const outside = join(
+    p.root,
+    "persist",
+    persistentFolder(i, i.key),
+    "untracked.txt",
+  );
   await writeFile(outside, "not-owned");
   const preview = await p.cleanupData("main/stored", { dryRun: true });
   expect(preview.paths).toEqual([data]);
@@ -180,7 +192,12 @@ test("cleanup refuses linked data, changed confirmation targets and ambiguous pa
   const p = await manager("cleanup-guards"),
     i = await p.install("stored@1.0.0");
   await p.uninstall("stored@1.0.0");
-  const target = join(p.root, "persist", i.key, "settings"),
+  const target = join(
+      p.root,
+      "persist",
+      persistentFolder(i, i.key),
+      "settings",
+    ),
     external = join(root, "outside-data");
   await mkdir(external);
   await writeFile(join(external, "keep"), "external");
@@ -197,10 +214,8 @@ test("cleanup refuses linked data, changed confirmation targets and ambiguous pa
     }),
   ).rejects.toThrow("changed");
   await p.addSource("second", `http://127.0.0.1:${server.port}/second/`);
-  await p.install("second/stored@1.0.0");
-  await p.uninstall("second/stored@1.0.0");
-  await expect(p.cleanupData("stored", { dryRun: true })).rejects.toThrow(
-    "Ambiguous",
+  await expect(p.install("second/stored@1.0.0")).rejects.toThrow(
+    "another source",
   );
   expect((await p.cleanupData("main/stored", { dryRun: true })).paths).toEqual([
     target,
@@ -213,7 +228,7 @@ test("cleanup journal restores moved data before state commit and deletes only c
   await p.uninstall("stored@1.0.0");
   const state = await p.store.read(),
     proof = state.data![i.key]!,
-    data = join(p.root, "persist", i.key, "settings");
+    data = join(p.root, "persist", persistentFolder(i, i.key), "settings");
   await writeFile(join(data, "keep"), "recoverable");
   const operation = "data-cleanup-" + crypto.randomUUID(),
     stage = join(p.root, "staging", operation);
@@ -268,7 +283,7 @@ test("alias changes recover with default state without writing through current",
   expect((await p.store.read()).aliases?.["new-alias"]).toBeUndefined();
   expect(
     resolve(
-      await readlink(join(p.root, "apps", i.key, "current")),
+      await readlink(join(p.root, "apps", appFolder(i), "current")),
     ).toLowerCase(),
   ).toBe(resolve(join(p.root, i.dir)).toLowerCase());
 });

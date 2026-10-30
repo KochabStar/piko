@@ -1,4 +1,5 @@
 import { selectedEnvironment } from "./environment.ts";
+import { writeNativeShim, removeManagedShim } from "./shims.ts";
 import { commandNames } from "./commands.ts";
 import semver from "semver";
 import {
@@ -7,7 +8,6 @@ import {
   readlink,
   symlink,
   unlink,
-  link,
   stat,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve, isAbsolute } from "node:path";
@@ -54,33 +54,13 @@ export async function setCurrent(
   }
 }
 export async function ensureShim(root: string, name: string): Promise<void> {
-  const original = join(root, "apps", "piko", "piko.exe"),
-    dir = join(root, "shims"),
-    destination = join(dir, `${name}.exe`);
-  if (!(await exists(original))) return; // Source-mode use does not manufacture non-executable shims.
+  const original = join(root, "apps", "piko", "piko.exe");
+  if (!(await exists(original))) return;
   await noLinks(original);
-  await noLinks(dir);
-  await noLinks(destination);
-  await mkdir(dir, { recursive: true });
-  if (await exists(destination)) {
-    const [a, b] = await Promise.all([stat(original), stat(destination)]);
-    if (a.ino !== b.ino || a.dev !== b.dev)
-      fail(`Refusing to overwrite external shim: ${destination}`);
-    return;
-  }
-  await link(original, destination);
+  await writeNativeShim(root, name, [original]);
 }
 export async function removeShim(root: string, name: string): Promise<void> {
-  const original = join(root, "apps", "piko", "piko.exe"),
-    destination = join(root, "shims", `${name}.exe`);
-  if (!(await exists(destination))) return;
-  await noLinks(destination);
-  if (!(await exists(original)))
-    fail("Cannot verify ownership of existing shim");
-  const [a, b] = await Promise.all([stat(original), stat(destination)]);
-  if (a.ino !== b.ino || a.dev !== b.dev)
-    fail("Refusing to remove external command entry");
-  await unlink(destination);
+  await removeManagedShim(root, name, [join(root, "apps", "piko", "piko.exe")]);
 }
 export function selectedNode(
   root: string,
@@ -102,6 +82,21 @@ export function selectedNode(
     version: choice.version,
   };
 }
+export function powershellExecutable(
+  shell: "powershell" | "pwsh" = "powershell",
+): string {
+  if (shell === "pwsh")
+    return (
+      Bun.which("pwsh.exe") ?? fail("PowerShell 7 is not installed or on PATH")
+    );
+  return join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+}
 export async function dispatch(
   root: string,
   state: State,
@@ -109,11 +104,23 @@ export async function dispatch(
   args: string[],
 ): Promise<number> {
   const { install, bin } = resolveCommand(state, command);
-  const target = join(root, install.dir, bin.path);
+  if (install.depends?.length)
+    await (
+      await import("./dependencies.ts")
+    ).checkRuntimeDependencies(root, state, install);
+  const target = bin.data
+    ? await (
+        await import("./execution.ts")
+      ).persistentExecutable(root, state, install, bin.path)
+    : join(root, install.dir, bin.path);
   await noLinks(target);
   if (bin.kind === "node") {
     const node = selectedNode(root, state);
     await noLinks(node.exe);
+    if (install.kind === "npm")
+      await (
+        await import("./npm-runtime.ts")
+      ).checkNpmRuntime(root, install, node.exe, node.version);
     if (
       install.enginesNode &&
       (!semver.valid(node.version) ||
@@ -126,7 +133,17 @@ export async function dispatch(
   const cmd =
     bin.kind === "node"
       ? [selectedNode(root, state).exe, target, ...args]
-      : [target, ...args];
+      : bin.kind === "powershell"
+        ? [
+            powershellExecutable(),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            target,
+            ...args,
+          ]
+        : [target, ...args];
   const env = { ...process.env };
   for (const [key, value] of Object.entries(selectedEnvironment(root, state))) {
     for (const existing of Object.keys(env))

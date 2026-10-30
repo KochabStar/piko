@@ -1,3 +1,4 @@
+import { persistentFolder } from "../src/layout.ts";
 import { afterAll, expect, test } from "bun:test";
 import {
   mkdir,
@@ -406,10 +407,16 @@ test("Git source installs pinned committed manifests, refreshes, handles deletio
     await p.addSource("git", url + "git.git", "git", "main");
     const i = await p.install("git/tool@1.0.0");
     expect(i.source.commit).toMatch(/^[a-f0-9]{40}$/);
-    const saved = join(root, "persist", i.key, "settings", "kept.txt");
+    const saved = join(
+      root,
+      "persist",
+      persistentFolder(i, i.key),
+      "settings",
+      "kept.txt",
+    );
     await writeFile(saved, "user-data");
     const gitState = await p.store.read();
-    expect(gitState.schemaVersion).toBe(4);
+    expect(gitState.schemaVersion).toBe(8);
     const legacy = structuredClone(gitState);
     legacy.schemaVersion = 3;
     expect(() => validateState(legacy)).toThrow("requires schema 4");
@@ -442,7 +449,8 @@ test("Git source installs pinned committed manifests, refreshes, handles deletio
     expect((await p.info("git/tool")).available[0]?.versions).toHaveLength(2);
     expect((await p.update("git/tool")).version).toBe("1.1.0");
     const dry = await p.updateAll(true);
-    expect(dry[0]?.status).toBe("planned");
+    expect(dry[0]?.status).toBe("current");
+    expect("candidate" in dry[0]! && dry[0].candidate).toBe("1.1.0");
     expect((await p.updateAll())[0]?.status).toBe("unchanged");
     await expect(p.removeSource("git")).rejects.toThrow("referenced");
     await p.removeSource("git", true);
