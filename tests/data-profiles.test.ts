@@ -20,6 +20,7 @@ import {
   recoverPersist,
   persistJournal,
 } from "../src/data-profiles.ts";
+import { resetPackages } from "../src/reset.ts";
 import { atomicJson, exists, sha256 } from "../src/util.ts";
 
 const work = await mkdtemp(join(tmpdir(), "piko-data-profiles-"));
@@ -100,6 +101,37 @@ async function fixture(name = "dingtalk") {
   };
   return { p, install, context, folders };
 }
+
+test("reset restores missing approved data registry values but never overwrites a changed value", async () => {
+  const { p, context } = await fixture("wecom");
+  const plan = await planPersist(p.store, "main/wecom", false, context);
+  await applyPersist(p.store, "main/wecom", plan.binding, false, context);
+  const setting = plan.settings[0]!;
+  await context.registry.write(setting.key, setting.name, setting.after, null);
+  const preview = await resetPackages(p, "main/wecom", {
+    dryRun: true,
+    context,
+  });
+  expect(preview.settings).toHaveLength(1);
+  expect(await context.registry.read(setting.key, setting.name)).toBeNull();
+  await resetPackages(p, "main/wecom", { context });
+  expect(await context.registry.read(setting.key, setting.name)).toEqual(
+    setting.after,
+  );
+  const foreign = { type: "String" as const, value: "E:\\new-user-choice" };
+  await context.registry.write(
+    setting.key,
+    setting.name,
+    setting.after,
+    foreign,
+  );
+  await expect(resetPackages(p, "main/wecom", { context })).rejects.toThrow(
+    "will not overwrite",
+  );
+  expect(await context.registry.read(setting.key, setting.name)).toEqual(
+    foreign,
+  );
+});
 
 test("data-path registry settings are bound, restored and reject external drift", async () => {
   const { p, context } = await fixture("wecom");

@@ -1,5 +1,13 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { nativeRequest } from "../src/windows-effects.ts";
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+  unlink,
+  readlink,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { sha256 } from "../src/util.ts";
@@ -17,6 +25,8 @@ const bootstrap = Buffer.from(
     "$null=[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Output))\n" +
     "[IO.File]::WriteAllText($Output,'native-bootstrap-ok')\n",
 );
+const shortcutName = "Piko Native Reset Test " + crypto.randomUUID();
+let shortcutPath: string | undefined;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -49,6 +59,14 @@ const server = Bun.serve({
           format: "file",
           file: isBootstrap ? "bootstrap.ps1" : "runtime.exe",
           bin: name === "runtime" ? { "fixture-runtime": "runtime.exe" } : {},
+          ...(name === "runtime"
+            ? {
+                persist: ["data"],
+                desktop: {
+                  shortcuts: [{ name: shortcutName, path: "runtime.exe" }],
+                },
+              }
+            : {}),
           ...(name === "shell-addon"
             ? {
                 depends: [
@@ -78,6 +96,7 @@ const server = Bun.serve({
 });
 afterAll(async () => {
   server.stop(true);
+  if (shortcutPath) await rm(shortcutPath, { force: true });
   await rm(folder, {
     recursive: true,
     force: true,
@@ -109,6 +128,11 @@ const cli = (args: string[], expected = 0) => run(exe, args, expected);
 
 test("fresh root installs a batch through public CLI then verifies bootstrap, dependency and approved shell together", async () => {
   await cli(["setup"]);
+  shortcutPath = join(
+    (await nativeRequest({ op: "folders" })).startMenu,
+    "Piko Apps",
+    shortcutName + ".lnk",
+  );
   await cli(["source", "add", "main", `http://127.0.0.1:${server.port}/`]);
   // Install/select first, then assess all behavior together. No private state
   // writes, migration helper or copied host package data is required.
@@ -177,4 +201,51 @@ test("fresh root installs a batch through public CLI then verifies bootstrap, de
     expect(output.err).toBe("");
   }
   expect(await readFile(profile, "utf8")).toContain("# existing user settings");
+  // Exercise public reset with real shims, .lnk and persistent junctions.
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  const runtime = Object.values(state.installs).find(
+    (i: any) => i.name === "runtime",
+  ) as any;
+  const mapping = join(home, runtime.dir, "data");
+  const shared = join(home, "persist/runtime/data");
+  await writeFile(join(shared, "keep.txt"), "native-data-kept");
+  await rm(shortcutPath!);
+  await unlink(join(home, "apps/runtime/current"));
+  await unlink(mapping);
+  await rm(join(home, "shims/fixture-runtime.exe"));
+  await rm(join(home, "shims/fixture-runtime.shim"));
+  const beforeReset = await readFile(statePath, "utf8");
+  const preview = JSON.parse(
+    (await cli(["reset", "main/runtime", "--dry-run"])).out,
+  );
+  expect(preview.status).toBe("preview");
+  expect(preview.shims).toContain("fixture-runtime");
+  expect(preview.data).toHaveLength(1);
+  expect(preview.current).toHaveLength(1);
+  expect(preview.shortcuts).toHaveLength(1);
+  expect(await readFile(statePath, "utf8")).toBe(beforeReset);
+  const repaired = JSON.parse((await cli(["reset", "--all"])).out);
+  expect(repaired.status).toBe("completed");
+  expect(await readFile(join(mapping, "keep.txt"), "utf8")).toBe(
+    "native-data-kept",
+  );
+  expect(await readlink(mapping)).toBe(shared);
+  expect((await readFile(shortcutPath!)).readUInt32LE(0)).toBe(0x4c);
+  expect(
+    (
+      await run(join(home, "shims/fixture-runtime.exe"), [
+        "/d",
+        "/c",
+        "echo reset-command-ok",
+      ])
+    ).out.trim(),
+  ).toBe("reset-command-ok");
+  const afterReset = JSON.parse(await readFile(statePath, "utf8"));
+  expect(afterReset.defaults).toEqual(state.defaults);
+  expect(afterReset.commands).toEqual(state.commands);
+  const stableReset = await readFile(statePath, "utf8");
+  await cli(["reset", "--all"]);
+  expect(await readFile(statePath, "utf8")).toBe(stableReset);
+  await cli(["reset", "main/runtime", "--all"], 1);
+  await cli(["reset", "main/runtime", "--force"], 1);
 }, 60000);

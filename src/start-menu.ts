@@ -136,6 +136,7 @@ export async function planStartMenu(
   before: State,
   after: State,
   backend = new WindowsEffects(),
+  repairKeys: string[] = [],
 ) {
   const keys = new Set(
     [...Object.values(before.installs), ...Object.values(after.installs)].map(
@@ -161,12 +162,14 @@ export async function planStartMenu(
     } else if (after.startMenu) delete after.startMenu[key];
   }
   validateStartMenu(after);
-  return await startMenuEffects(before, after, backend);
+  return await startMenuEffects(before, after, backend, repairKeys);
 }
 export async function startMenuEffects(
   before: State,
   after: State,
   backend = new WindowsEffects(),
+  repairKeys: string[] = [],
+  snapshots?: Effect[],
 ): Promise<Effect[]> {
   validateStartMenu(before);
   validateStartMenu(after);
@@ -178,7 +181,26 @@ export async function startMenuEffects(
       b = next.get(id);
     if (a && b && a.key !== b.key)
       fail("Start Menu ownership transfer requires explicit removal first");
-    if (a?.hash === b?.hash) continue;
+    if (a?.hash === b?.hash) {
+      if (b && repairKeys.includes(b.key)) {
+        const target: Effect["target"] = { kind: "file", path: b.path };
+        const recorded = snapshots?.find(
+          (e) => e.target.kind === "file" && e.target.path === b.path,
+        );
+        const current = snapshots
+          ? recorded
+            ? recorded.before
+            : { hash: b.hash }
+          : await backend.read(target);
+        if (current === null)
+          effects.push({ target, before: null, after: { hash: b.hash } });
+        else if (!equalValue(current, { hash: b.hash }))
+          fail(
+            "Start Menu resource was edited externally; reset will not overwrite it",
+          );
+      }
+      continue;
+    }
     effects.push({
       target: { kind: "file", path: (b ?? a)!.path },
       before: a ? { hash: a.hash } : null,
@@ -219,8 +241,20 @@ export async function recoverStartMenu(
   chosen: State,
   recorded: unknown,
   backend = new WindowsEffects(),
+  repairKeys: string[] = [],
 ) {
-  const effects = await startMenuEffects(before, after, backend);
+  if (
+    !Array.isArray(repairKeys) ||
+    repairKeys.some((key) => typeof key !== "string" || !after.startMenu?.[key])
+  )
+    fail("Invalid Start Menu repair owners");
+  const effects = await startMenuEffects(
+    before,
+    after,
+    backend,
+    repairKeys,
+    recorded as Effect[],
+  );
   if (!same(effects, recorded))
     fail(
       "Start Menu recovery does not match installed declarations and receipts",

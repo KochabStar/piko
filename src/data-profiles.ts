@@ -28,7 +28,7 @@ import type { Store } from "./store.ts";
 import type { Install, State } from "./types.ts";
 
 type Folders = { local: string; roaming: string; documents: string };
-type Context = {
+export type Context = {
   folders?: Folders;
   processes?: (names: string[]) => Promise<number[]>;
   registry?: {
@@ -611,6 +611,60 @@ export async function assertNoDataProfile(root: string, key: string) {
     fail(
       "Remove external data-profile integration with piko persist <package> --remove before uninstall/data cleanup",
     );
+}
+export async function profileRepairPlan(
+  root: string,
+  state: State,
+  keys: string[],
+  context: Context = {},
+) {
+  const receipts = await readProfiles(root);
+  const links: { source: string; target: string }[] = [];
+  const settings: Setting[] = [];
+  const profiles: Profile[] = [];
+  for (const key of keys) {
+    const profile = receipts.profiles[key];
+    if (!profile) continue;
+    await validateProfile(root, state, profile, context);
+    for (const m of profile.mappings) {
+      if (!(await exists(m.target)) || !(await lstat(m.target)).isDirectory())
+        fail(
+          "Persistent profile data missing; restore it from backup before reset",
+        );
+      if (await isOwnedLink(m)) continue;
+      if (await exists(m.source))
+        fail("External profile path conflicts; reset preserves both paths");
+      links.push({ source: m.source, target: m.target });
+    }
+    for (const s of profile.settings) {
+      const current = await readSetting(context, s.key, s.name);
+      if (equalValue(current, s.after)) continue;
+      if (current !== null)
+        fail("External data setting changed; reset will not overwrite it");
+      settings.push({ ...s, before: null });
+    }
+    profiles.push(profile);
+  }
+  if (links.length || settings.length)
+    for (const profile of profiles) {
+      const pids = await running(profile.name, context);
+      if (pids.length)
+        fail(
+          "Close application before reset of its data paths; running PIDs: " +
+            pids.join(","),
+        );
+    }
+  return { links, settings };
+}
+export async function restoreProfileSettings(
+  settings: Setting[],
+  context: Context = {},
+) {
+  for (const s of settings) {
+    if (equalValue(await readSetting(context, s.key, s.name), s.after))
+      continue;
+    await writeSetting(context, s, false);
+  }
 }
 export async function dataProfileStatus(store: Store) {
   const state = await store.read(),

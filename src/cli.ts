@@ -44,6 +44,7 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko install <source/package>[@version] [--skip-checksum]   (alias: i)
   piko install <spec> --with-deps --dry-run | --yes --binding <hash>
   piko use <package>[@version] [--no-commands] | unuse <package>
+  piko reset <package> | reset --all [--dry-run]   Repair shims, shortcuts, current and data mappings
   piko command list | claim <command> <package> | release <command>
   piko command alias <name> <package> <provided-command> | unalias <name>
   piko cleanup <package> --data [--dry-run | --yes]
@@ -661,6 +662,36 @@ async function main(): Promise<number> {
           );
       console.log("Default and current updated");
       break;
+    case "reset": {
+      if (
+        args.length > 2 ||
+        (values.all && args[1]) ||
+        (!values.all && !args[1])
+      )
+        fail("Use reset <package> or reset --all [--dry-run]");
+      if (
+        values.force ||
+        values.data ||
+        values.fresh ||
+        values.remove ||
+        values.distribution ||
+        values.versions
+      )
+        fail(
+          "Reset repairs missing resources only; it does not delete data or force overwrites",
+        );
+      const { resetPackages } = await import("./reset.ts");
+      console.log(
+        JSON.stringify(
+          await resetPackages(packages, values.all ? undefined : required(1), {
+            dryRun: values["dry-run"],
+          }),
+          null,
+          2,
+        ),
+      );
+      break;
+    }
     case "unuse":
       await packages.unuse(required(1));
       console.log(

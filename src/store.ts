@@ -941,6 +941,7 @@ export class Store {
         chosen,
         j.startMenu,
         backend,
+        j.startMenuRepairKeys ?? [],
       );
     await this.syncCurrents(chosen, j.before, j.after);
     for (const name of new Set([
@@ -986,6 +987,7 @@ export class Store {
     before: State,
     after: State,
     backend = this.effectsBackend,
+    startMenuRepairKeys: string[] = [],
   ): Promise<void> {
     after.revision = before.revision + 1;
     const recordedSources = [
@@ -1056,12 +1058,23 @@ export class Store {
       after.schemaVersion,
     ) as State["schemaVersion"];
     selectedEnvironment(this.root, after);
-    const startMenu = await planStartMenu(this.root, before, after, backend);
+    const startMenu = await planStartMenu(
+      this.root,
+      before,
+      after,
+      backend,
+      startMenuRepairKeys,
+    );
     validateState(after);
     await checkStartMenu(startMenu, backend);
     if (await exists(this.journalPath)) fail("Unrecovered selection operation");
     for (const name of commandNames(after)) await ensureShim(this.root, name);
-    await atomicJson(this.journalPath, { before, after, startMenu });
+    await atomicJson(this.journalPath, {
+      before,
+      after,
+      startMenu,
+      ...(startMenuRepairKeys.length ? { startMenuRepairKeys } : {}),
+    });
     try {
       await writeStartMenu(this.root, startMenu, backend);
       await this.syncCurrents(after, before, after);
@@ -1077,7 +1090,11 @@ export class Store {
   }
   async mutate<T>(
     fn: (state: State) => Promise<T>,
-    options: { skipUnchanged?: boolean; effectsBackend?: WindowsEffects } = {},
+    options: {
+      skipUnchanged?: boolean;
+      effectsBackend?: WindowsEffects;
+      startMenuRepairKeys?: string[];
+    } = {},
   ): Promise<T> {
     await noLinks(join(this.root, "operations", "self-update.json"));
     if (await exists(join(this.root, "operations", "self-update.json")))
@@ -1120,9 +1137,15 @@ export class Store {
         await protectDependencies(this.root, before, state);
         if (
           !options.skipUnchanged ||
+          !!options.startMenuRepairKeys?.length ||
           JSON.stringify(before) !== JSON.stringify(state)
         )
-          await this.commit(before, state, options.effectsBackend);
+          await this.commit(
+            before,
+            state,
+            options.effectsBackend,
+            options.startMenuRepairKeys,
+          );
         await this.recoverInstallation();
         await this.recoverRebuild();
         await this.recoverRemoval();
