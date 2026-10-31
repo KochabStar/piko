@@ -247,7 +247,14 @@ aria2 配置最多 5 路连接，禁用用户配置、netrc、RPC、torrent/meta
 ## 版本与更新
 
 ```powershell
-piko list
+piko list                       # 紧凑表格，* 表示当前选择
+piko list llvm                  # 按包名／来源／版本筛选
+piko list --selected             # 只显示当前选择的版本
+piko list --verbose              # 显示版本请求和完整安装路径
+piko list --json                 # 脚本使用结构化输出
+piko search llvm                 # 本地索引搜索，不联网、不持有写锁
+piko search llvm --refresh       # 显式刷新软件源再搜索
+piko search llvm --json
 piko info main/node
 piko which node
 piko use main/node@26.12.1       # 精确版本固定
@@ -258,6 +265,27 @@ piko update --all --dry-run     # 查询候选，不安装、不切换默认
 piko update --all               # 串行逐包处理，输出成功/失败明细
 piko unuse main/node
 piko uninstall main/node@26.12.1
+```
+
+`search` 默认只读取已验证的本地源索引（离线可用），不会刷新远端、修改状态或争用 mutation.lock。使用 `source refresh [alias]` 或 `search <query> --refresh` 更新索引；本地索引缺失／损坏时明确报错，不隐式联网。`search` 与 `list` 默认使用按包排序的表格；原 JSON 字段保留在 `--json` 输出中，脚本调用需显式添加该参数。搜索与列表均支持大小写不敏感的子串匹配。
+
+### 命令行进度与输出
+
+交互终端中，安装和更新使用单行动态进度，显示当前包、解析源／清单、依赖检查、下载、SHA-256 校验、解压和提交阶段。内置下载器与 aria2 均报告已接收字节、平均速度；有可信总大小时显示百分比和估算剩余时间，无总大小时不猜测百分比。aria2 重试与重叠分段按唯一字节区间计数；下载结束仅代表传输完成，后续仍须校验与安装成功。命中缓存时显示缓存校验，不伪装为重新下载。npm 子进程显示安装／完整性核验阶段，不编造字节进度。
+
+`update --all` 显示 `[当前/总数]` 和逐包结果，结束后用表格汇总 updated／unchanged／failed；`outdated`、`status` 和更新预览也使用表格，保留固定版本、阻塞原因。精确版本请求仍保持固定，不因界面改动自动升级。
+
+- 进度写 stderr，最终结果写 stdout。默认在管道、重定向、CI 或 `TERM=dumb` 环境中关闭动态进度，避免转义字符污染日志。
+- `--progress always` 可在重定向环境输出纯文本阶段日志；`--progress never`／`--no-progress` 关闭进度。
+- `--color auto|always|never` 控制交互终端配色；`--no-color` 和 `NO_COLOR` 优先禁用颜色，关闭颜色不影响进度信息。
+- `install`、`update`、`outdated`、`status`、`list`、`search` 支持 `--json`。该选项关闭进度，只在 stdout 输出 JSON；安全警告与错误仍会写 stderr。其他审批／恢复命令保留既有输出协议。
+
+```powershell
+piko install main/node@latest
+piko update --all
+piko update --all --dry-run --json
+piko install main/node@latest --progress always 2>install.log
+piko search node --no-color
 ```
 
 支持精确版本、`latest`、语义主/次版本简写和软件源声明的渠道别名；预发布需精确版本或源显式指定，非标准版本不推断语义范围。安装不改变 default/current，更新成功后切换并保留旧版；普通卸载默认版本会拒绝，`--force` 会清除该默认和相关入口，不自动选替代版本。批量更新不是全包原子事务；失败继续其他包，总退出码为 1，失败包保留旧默认。

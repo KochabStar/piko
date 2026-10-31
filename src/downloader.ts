@@ -11,6 +11,7 @@ import {
   removeTree,
   sha256,
 } from "./util.ts";
+import { report, progressSink, TransferRanges } from "./progress.ts";
 import type { State } from "./types.ts";
 
 export async function findAria2(
@@ -58,7 +59,10 @@ export async function downloadArtifact(
   limit = 512 * 1024 * 1024,
 ): Promise<Uint8Array> {
   const aria2 = await findAria2(root, state);
-  if (!aria2) return await download(value, limit);
+  if (!aria2)
+    return await download(value, limit, (received, total, complete) =>
+      report({ kind: "download", received, total, complete }),
+    );
   return await downloadWithAria2(root, value, aria2, limit);
 }
 
@@ -75,6 +79,10 @@ export async function downloadWithAria2(
   await mkdir(staging, { recursive: true });
   const stage = await mkdtemp(join(staging, "aria2-")),
     token = crypto.randomUUID();
+  const emit = progressSink();
+  const ranges = new TransferRanges();
+  let received = 0,
+    expected: number | undefined;
   let failure: Error | undefined,
     requests = 0;
   const abort = new AbortController();
@@ -139,6 +147,13 @@ export async function downloadWithAria2(
             status: response.status,
             headers: outgoing,
           });
+        const known = rangeParts ? total : length > 0 ? length : undefined;
+        if (!response.headers.get("content-encoding") && known) {
+          if (expected !== undefined && expected !== known)
+            fail("Download total changed between requests");
+          expected = known;
+        }
+        const offset = rangeParts ? start : 0;
         let size = 0;
         const body = response.body?.pipeThrough(
           new TransformStream<Uint8Array, Uint8Array>({
@@ -149,6 +164,8 @@ export async function downloadWithAria2(
                 abort.abort();
                 throw failure;
               }
+              received = ranges.add(offset + size - chunk.length, chunk.length);
+              emit({ kind: "download", received, total: expected });
               controller.enqueue(chunk);
             },
           }),
@@ -216,7 +233,14 @@ export async function downloadWithAria2(
     const stat = await lstat(file);
     if (!stat.isFile() || stat.size > limit)
       fail("aria2 download exceeds size limit or is not a regular file");
-    return await readFile(file);
+    const bytes = await readFile(file);
+    report({
+      kind: "download",
+      received: bytes.length,
+      total: expected,
+      complete: true,
+    });
+    return bytes;
   } finally {
     abort.abort();
     server.stop(true);

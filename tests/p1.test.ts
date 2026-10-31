@@ -511,7 +511,7 @@ test("compiled P1 CLI exposes read-only status, runtime distribution, cleanup an
   await p.install("tool@1.1.0");
   await p.use("tool@1");
   const before = await p.store.read();
-  const status = await run(p.root, ["status", "main/tool"]);
+  const status = await run(p.root, ["status", "main/tool", "--json"]);
   expect(status.code).toBe(0);
   expect(JSON.parse(status.out)[0].candidate).toBe("1.1.0");
   expect((await run(p.root, ["update", "--all", "--dry-run"])).code).toBe(0);

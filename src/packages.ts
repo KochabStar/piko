@@ -1,3 +1,4 @@
+import { report } from "./progress.ts";
 import { installationUsers } from "./installation-users.ts";
 import { enrollStartMenu } from "./start-menu.ts";
 import {
@@ -130,7 +131,10 @@ export class Packages {
       const sources = alias
         ? [state.sources[component(alias)] ?? fail("Unknown source")]
         : Object.values(state.sources);
-      for (const s of sources) await refresh(this.root, s);
+      for (const s of sources) {
+        report({ kind: "stage", label: "Refresh source", detail: s.alias });
+        await refresh(this.root, s);
+      }
     });
   }
   async removeSource(alias: string, force = false): Promise<void> {
@@ -151,17 +155,26 @@ export class Packages {
   }
   async search(
     query: string,
+    options: { refresh?: boolean } = {},
   ): Promise<{ source: string; name: string; latest: string }[]> {
+    if (options.refresh) await this.refreshSources();
     const results: { source: string; name: string; latest: string }[] = [];
-    await this.store.mutate(async (state) => {
-      for (const s of Object.values(state.sources)) {
-        const index = await refresh(this.root, s);
-        for (const [name, p] of Object.entries(index.packages))
-          if (name.includes(query.toLowerCase()))
-            results.push({ source: s.alias, name, latest: p.latest });
-      }
-    });
-    return results;
+    const state = await this.store.read();
+    for (const s of Object.values(state.sources)) {
+      const path = join(this.root, "sources", s.identity, "index.json");
+      await noLinks(path);
+      if (!(await exists(path)))
+        fail(
+          `Source ${s.alias} has no cached index; run piko source refresh ${s.alias}`,
+        );
+      const index = normalizeIndex(await json(path));
+      for (const [name, p] of Object.entries(index.packages))
+        if (`${s.alias}/${name}`.toLowerCase().includes(query.toLowerCase()))
+          results.push({ source: s.alias, name, latest: p.latest });
+    }
+    return results.sort((a, b) =>
+      `${a.source}/${a.name}`.localeCompare(`${b.source}/${b.name}`),
+    );
   }
   private installed(
     state: State,
@@ -468,6 +481,7 @@ export class Packages {
     return await this.store.mutate(async (state) => {
       if (expectedRevision !== undefined && state.revision !== expectedRevision)
         fail("State changed during inventory restore; preview again");
+      report({ kind: "stage", label: "Resolve package", detail: spec });
       const parsed = parseSpec(spec),
         request = parsed.request ?? "latest";
       if (parsed.source === "npm") {
@@ -506,6 +520,11 @@ export class Packages {
         await noLinks(stage);
         await mkdir(stage, { recursive: true });
         try {
+          report({
+            kind: "stage",
+            label: "Install npm dependencies",
+            detail: "Integrity enforced; lifecycle scripts disabled",
+          });
           const prepared = await prepareNpm(
             context,
             stage,
@@ -513,6 +532,7 @@ export class Packages {
             resolved.version,
             npmLock,
           );
+          report({ kind: "stage", label: "Verify npm graph and snapshot" });
           const inputHash = await saveNpmSnapshot(this.root, stage);
           upgradeState(state);
           state.schemaVersion = Math.max(
@@ -546,6 +566,11 @@ export class Packages {
             fail(
               "Untracked npm installation directory exists; inspect before retrying",
             );
+          report({
+            kind: "stage",
+            label: "Commit installation",
+            detail: `${parsed.name}@${resolved.version}`,
+          });
           await this.store.publishInstall(installation, stage, operation);
           state.installs[id] = installation;
           if (prepared.scripts.length)
@@ -563,6 +588,11 @@ export class Packages {
         ? [state.sources[parsed.source] ?? fail("Unknown source")]
         : Object.values(state.sources);
       for (const source of sources) {
+        report({
+          kind: "stage",
+          label: "Refresh source",
+          detail: source.alias,
+        });
         const index = await refresh(this.root, source),
           entry = index.packages[parsed.name];
         if (entry) candidates.push({ source, entry });
@@ -578,6 +608,11 @@ export class Packages {
         candidate.entry.latest,
         candidate.entry.aliases,
       );
+      report({
+        kind: "stage",
+        label: "Load manifest",
+        detail: `${source.alias}/${parsed.name}@${version}`,
+      });
       const manifest = await loadManifest(
         this.root,
         source,
@@ -585,6 +620,10 @@ export class Packages {
         parsed.name,
         version,
       );
+      report({
+        kind: "stage",
+        label: "Check dependencies and installed receipt",
+      });
       const dependencyChecks = await dependencyStatus(
         this.root,
         state,
@@ -618,6 +657,11 @@ export class Packages {
           fail(
             "Existing installation was not verified; explicit reinstall is required",
           );
+        report({
+          kind: "stage",
+          label: "Already installed",
+          detail: `${prior.name}@${prior.version}; no download needed`,
+        });
         await enrollStartMenu(this.root, state, prior, this.effectsBackend);
         return prior;
       }
@@ -715,6 +759,7 @@ export class Packages {
       const dir = installDirectory(source, parsed.name, version, key, layout),
         destination = join(this.root, dir);
       try {
+        report({ kind: "stage", label: "Prepare extraction tools" });
         let sevenZip: string | undefined,
           inno: string | undefined,
           lessMsi: string | undefined;
@@ -746,6 +791,11 @@ export class Packages {
             `WARNING: checksum bypass authorized for ${source.alias}/${parsed.name}@${version} only`,
           );
         for (const [n, download] of downloads.entries()) {
+          report({
+            kind: "stage",
+            label: `Artifact ${n + 1}/${downloads.length}`,
+            detail: `${parsed.name}@${version}`,
+          });
           const bytes = await artifactBytes(
               this.root,
               download.url,
@@ -755,6 +805,11 @@ export class Packages {
               download.maxBytes,
             ),
             checksum = sha256(bytes);
+          report({
+            kind: "stage",
+            label: "Verify artifact",
+            detail: `SHA-256; artifact ${n + 1}/${downloads.length}`,
+          });
           checksums.push(checksum);
           const matches =
             !!download.sha256 && checksum === download.sha256.toLowerCase();
@@ -762,6 +817,7 @@ export class Packages {
           if (!matches && !skipChecksum)
             fail("SHA-256 mismatch; installation was not committed");
           if (download.format === "file") {
+            report({ kind: "stage", label: "Stage executable" });
             await writeArtifactFile(
               stage,
               [download.into, download.file!].filter(Boolean).join("/"),
@@ -791,6 +847,11 @@ export class Packages {
               await writeFile(path, cabBytes, { flag: "wx" });
               cabinets[cabinetName] = path;
             }
+            report({
+              kind: "stage",
+              label: "Extract archive",
+              detail: `${download.format}; artifact ${n + 1}/${downloads.length}`,
+            });
             await extractArchive(
               archive,
               download.format,
@@ -809,6 +870,10 @@ export class Packages {
             );
           }
         }
+        report({
+          kind: "stage",
+          label: "Validate files and prepare data mappings",
+        });
         const checksum =
           checksums.length === 1
             ? checksums[0]!
@@ -881,6 +946,11 @@ export class Packages {
           manifestHash,
         };
         await atomicJson(join(stage, ".piko-install.json"), installation);
+        report({
+          kind: "stage",
+          label: "Commit installation",
+          detail: `${parsed.name}@${version}`,
+        });
         await this.store.publishInstall(installation, stage, operation);
         state.installs[id] = installation;
         if (
@@ -906,6 +976,7 @@ export class Packages {
     });
   }
   async update(spec: string): Promise<Install> {
+    report({ kind: "stage", label: "Check selected version", detail: spec });
     const state = await this.store.read(),
       match = this.installed(state, spec),
       selection = state.defaults[match.key];
@@ -917,10 +988,22 @@ export class Packages {
         fail(
           "npm registry changed; refusing to change the installed package source",
         );
-      if (selection.request === previous.version) return previous;
+      if (selection.request === previous.version) {
+        report({
+          kind: "stage",
+          label: "Keep pinned version",
+          detail: `${previous.name}@${previous.version}`,
+        });
+        return previous;
+      }
       const installed = await this.install(
         `npm:${previous.name}@${selection.request}`,
       );
+      report({
+        kind: "stage",
+        label: "Switch selected version",
+        detail: `${previous.version} -> ${installed.version}`,
+      });
       await this.store.mutate(async (current) => {
         const selected = current.defaults[match.key];
         if (
@@ -940,10 +1023,22 @@ export class Packages {
     );
     if (!active)
       fail("Original source is not configured; restore it before updating");
-    if (selection.request === previous.version) return previous;
+    if (selection.request === previous.version) {
+      report({
+        kind: "stage",
+        label: "Keep pinned version",
+        detail: `${previous.name}@${previous.version}`,
+      });
+      return previous;
+    }
     const installed = await this.install(
       `${active.alias}/${previous.name}@${selection.request}`,
     );
+    report({
+      kind: "stage",
+      label: "Switch selected version",
+      detail: `${previous.version} -> ${installed.version}`,
+    });
     await this.store.mutate(async (current) => {
       const selected = current.defaults[match.key];
       if (
@@ -1059,6 +1154,7 @@ export class Packages {
     };
   }
   async outdated(spec?: string) {
+    report({ kind: "stage", label: "Check available updates" });
     const state = await this.store.read();
     const filter = spec ? this.installed(state, spec) : undefined;
     const selected = Object.entries(state.defaults).filter(
@@ -1082,6 +1178,17 @@ export class Packages {
       a.localeCompare(b),
     )) {
       const i = state.installs[selection.id]!;
+      report({
+        kind: "item",
+        package: `${i.source.alias}/${i.name}`,
+        index: results.length + 1,
+        total: selected.length,
+      });
+      report({
+        kind: "stage",
+        label: "Resolve update candidate",
+        detail: i.version,
+      });
       const row: (typeof results)[number] = {
         package:
           i.kind === "npm" ? `npm:${i.name}` : `${i.source.alias}/${i.name}`,
@@ -1228,13 +1335,24 @@ export class Packages {
         version?: string;
         error?: string;
       }[] = [];
+    let index = 0;
     for (const key of Object.keys(state.defaults).sort()) {
       const selection = state.defaults[key]!,
         i = state.installs[selection.id]!,
         spec =
           i.kind === "npm" ? `npm:${i.name}` : `${i.source.alias}/${i.name}`;
+      report({
+        kind: "item",
+        package: spec,
+        index: ++index,
+        total: Object.keys(state.defaults).length,
+      });
       try {
         const updated = await this.update(spec);
+        report({
+          kind: "result",
+          label: `${spec}@${updated.version}: ${updated.id === i.id ? "unchanged" : "updated"}`,
+        });
         results.push({
           package: spec,
           request: selection.request,
@@ -1242,6 +1360,7 @@ export class Packages {
           version: updated.version,
         });
       } catch (error) {
+        report({ kind: "result", label: `${spec}: failed`, failed: true });
         results.push({
           package: spec,
           request: selection.request,

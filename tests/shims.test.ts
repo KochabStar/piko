@@ -114,7 +114,9 @@ test("the relative shim follows a relocated root without PIKO_HOME", async () =>
   ).toBe("0.4.0");
   expect(
     JSON.parse(
-      await capture(join(moved, "shims/piko.exe"), ["list"], { env: e }),
+      await capture(join(moved, "shims/piko.exe"), ["list", "--json"], {
+        env: e,
+      }),
     ),
   ).toEqual([]);
 });

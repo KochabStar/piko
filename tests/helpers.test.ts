@@ -1,3 +1,4 @@
+import { withProgress, type ProgressEvent } from "../src/progress.ts";
 import { afterAll, expect, test } from "bun:test";
 import {
   mkdtemp,
@@ -263,24 +264,7 @@ test("aria2 downloads through validated redirects and cleans temporary files", a
         "Accept-Ranges": "bytes",
         "Content-Length": String(bytes.length),
       };
-      if (!range) {
-        let offset = 0;
-        return new Response(
-          new ReadableStream<Uint8Array>({
-            async pull(controller) {
-              await Bun.sleep(8);
-              if (offset === bytes.length) {
-                controller.close();
-                return;
-              }
-              const end = Math.min(offset + 65536, bytes.length);
-              controller.enqueue(bytes.subarray(offset, end));
-              offset = end;
-            },
-          }),
-          { headers },
-        );
-      }
+      if (!range) return new Response(bytes, { headers });
       const match = /^bytes=(\d+)-(\d*)$/.exec(range)!;
       const start = Number(match[1]),
         end = match[2] ? Number(match[2]) : bytes.length - 1;
@@ -295,15 +279,33 @@ test("aria2 downloads through validated redirects and cleans temporary files", a
     },
   });
   try {
+    const events: ProgressEvent[] = [];
     expect(
       sha256(
-        await downloadWithAria2(
-          root,
-          `http://127.0.0.1:${server.port}/redirect?token=private`,
-          aria2,
+        await withProgress(
+          (event) => events.push(event),
+          () =>
+            downloadWithAria2(
+              root,
+              `http://127.0.0.1:${server.port}/redirect?token=private`,
+              aria2,
+            ),
         ),
       ),
     ).toBe(sha256(bytes));
+    const updates = events.filter((event) => event.kind === "download");
+    expect(updates.length).toBeGreaterThan(2);
+    expect(updates.at(-1)).toMatchObject({
+      kind: "download",
+      received: bytes.length,
+      total: bytes.length,
+      complete: true,
+    });
+    for (const event of updates)
+      if (event.kind === "download") {
+        expect(event.received).toBeLessThanOrEqual(bytes.length);
+        expect(JSON.stringify(event)).not.toContain("private");
+      }
     expect(requests).toBeGreaterThan(1);
     expect(await readdir(join(root, "staging"))).toEqual([]);
   } finally {

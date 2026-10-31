@@ -379,7 +379,7 @@ test("compiled EXE supports native and npm commands from direct spawn, PowerShel
   const mainExe = join(root, "shims", "piko.exe");
   const cleanEnv = { ...env };
   Reflect.deleteProperty(cleanEnv, "PIKO_HOME");
-  const noHome = Bun.spawn([mainExe, "list"], {
+  const noHome = Bun.spawn([mainExe, "list", "--json"], {
     env: cleanEnv,
     cwd: root,
     stdout: "pipe",

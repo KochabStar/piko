@@ -16,6 +16,7 @@ import {
   sha256,
 } from "./util.ts";
 import { downloadArtifact } from "./downloader.ts";
+import { report } from "./progress.ts";
 import type { State } from "./types.ts";
 export async function artifactBytes(
   root: string,
@@ -31,8 +32,14 @@ export async function artifactBytes(
     limit > 2 * 1024 * 1024 * 1024
   )
     fail("Invalid artifact size limit");
-  if (!checksum || bypass)
+  if (!checksum || bypass) {
+    report({
+      kind: "stage",
+      label: "Download",
+      detail: "Checksum bypass explicitly authorized",
+    });
     return await downloadArtifact(root, url, state, limit);
+  }
   if (!/^[a-f0-9]{64}$/i.test(checksum)) fail("Invalid cache checksum");
   const hash = checksum.toLowerCase(),
     dir = join(root, "cache", "artifacts"),
@@ -42,12 +49,23 @@ export async function artifactBytes(
     const info = await lstat(file);
     if (!info.isFile()) fail("Invalid cached artifact");
     if (info.size > limit) fail("Cached artifact exceeds size limit");
+    report({
+      kind: "stage",
+      label: "Verify cached artifact",
+      detail: "SHA-256",
+    });
     const bytes = await readFile(file);
     if (sha256(bytes) !== hash)
       fail("Cached artifact checksum mismatch; inspect cache before retrying");
     return bytes;
   }
+  report({
+    kind: "stage",
+    label: "Download",
+    detail: "Connecting to publisher",
+  });
   const bytes = await downloadArtifact(root, url, state, limit);
+  report({ kind: "stage", label: "Verify download", detail: "SHA-256" });
   if (sha256(bytes) !== hash)
     fail("SHA-256 mismatch; installation was not committed");
   await mkdir(dir, { recursive: true });

@@ -129,9 +129,9 @@ test("compiled cleanup CLI previews and requires --data plus explicit non-intera
   expect(
     JSON.parse((await run(["info", "main/saved"])).out).available[0].latest,
   ).toBe("1.0.0");
-  expect(JSON.parse((await run(["update", "--all", "--dry-run"])).out)).toEqual(
-    [],
-  );
+  expect(
+    JSON.parse((await run(["update", "--all", "--dry-run", "--json"])).out),
+  ).toEqual([]);
   expect(
     JSON.parse((await run(["cache", "list"])).out).some(
       (e: any) => e.kind === "artifacts",

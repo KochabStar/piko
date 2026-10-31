@@ -5,6 +5,14 @@ import {
   selfUpdateStatus,
   launchSelfUpdater,
 } from "./self-update.ts";
+import { ProgressRenderer, withProgress } from "./progress.ts";
+import {
+  humanOutput,
+  installedRows,
+  installedTable,
+  table,
+  updateTable,
+} from "./display.ts";
 import { VERSION } from "./version.ts";
 import { createInterface } from "node:readline/promises";
 import { resolveCommand, commandNames } from "./commands.ts";
@@ -40,7 +48,7 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko source add <alias> <url> [--type http|git] [--ref <ref>]
   piko source list | refresh [alias] | remove <alias> [--force]
   piko info <package>                 Versions, provenance and candidate dependency checks
-  piko search <query>
+  piko search <query> [--refresh] [--json]   Search cached indexes; --refresh explicitly fetches sources
   piko install <source/package>[@version] [--skip-checksum]   (alias: i)
   piko install <spec> --with-deps --dry-run | --yes --binding <hash>
   piko use <package>[@version] [--no-commands] | unuse <package>
@@ -63,7 +71,7 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko system <package>@<installed-version> --upgrade --dry-run | --approve-admin --binding <hash>
   piko rust list
   piko rust install|use|update|remove <toolchain> --dry-run | --approve-exec --binding <hash>
-  piko list
+  piko list [query] [--selected] [--verbose] [--json]
   piko outdated [package] | status [package]
   piko update <package> | update --all [--dry-run]
   piko cleanup [package] --versions [--keep N] [--dry-run | --yes]
@@ -83,6 +91,9 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko doctor
 
 PIKO_HOME overrides the user installation root.
+Output: --json for scripts; --progress auto|always|never (or --no-progress).
+Color: --color auto|always|never; --no-color and NO_COLOR disable color.
+Dynamic progress only in interactive terminals; --progress always emits plain logs when redirected.
 Install does not select a default. current is a junction, not a copy.
 Portable dependencies are checked before install; install/select them explicitly.
 Install and update never execute lifecycle scripts. Explicit approvals and rebuild are required.
@@ -164,6 +175,14 @@ async function main(): Promise<number> {
       binding: { type: "string" },
       sha256: { type: "string" },
       all: { type: "boolean" },
+      json: { type: "boolean" },
+      refresh: { type: "boolean" },
+      selected: { type: "boolean" },
+      verbose: { type: "boolean" },
+      progress: { type: "string" },
+      color: { type: "string" },
+      "no-progress": { type: "boolean" },
+      "no-color": { type: "boolean" },
       yes: { type: "boolean", short: "y" },
     },
   });
@@ -175,6 +194,59 @@ async function main(): Promise<number> {
     console.log(help);
     return 0;
   }
+  for (const option of ["progress", "color"] as const)
+    if (
+      values[option] &&
+      !["auto", "always", "never"].includes(values[option]!)
+    )
+      fail(`--${option} must be auto, always or never`);
+  const pretty = !values.json;
+  const outputColor =
+    pretty &&
+    !!process.stdout.isTTY &&
+    !process.env.CI &&
+    process.env.TERM !== "dumb" &&
+    !values["no-color"] &&
+    process.env.NO_COLOR === undefined &&
+    values.color !== "never";
+  const show = (text: string) => console.log(humanOutput(text, outputColor));
+  const task = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const tty =
+      !!process.stderr.isTTY &&
+      !!process.stdout.isTTY &&
+      process.env.TERM !== "dumb" &&
+      !process.env.CI;
+    const enabled =
+      pretty &&
+      !values["no-progress"] &&
+      values.progress !== "never" &&
+      (values.progress === "always" || tty);
+    if (!enabled) return await fn();
+    const renderer = new ProgressRenderer({
+      write: (text) => {
+        process.stderr.write(text);
+      },
+      tty,
+      color:
+        tty &&
+        !values["no-color"] &&
+        process.env.NO_COLOR === undefined &&
+        values.color !== "never" &&
+        (values.color === "always" || process.env.TERM !== "dumb"),
+      columns: process.stderr.columns,
+    });
+    try {
+      const result = await withProgress(renderer.event, fn);
+      renderer.close(
+        !Array.isArray(result) ||
+          !result.some((r) => r && ["failed", "blocked"].includes(r.status)),
+      );
+      return result;
+    } catch (error) {
+      renderer.close(false);
+      throw error;
+    }
+  };
   // Package install/archive code is unnecessary for hot shim dispatch and --version.
   const { Packages } = await import("./packages.ts");
   const packages = new Packages(root);
@@ -304,7 +376,7 @@ async function main(): Promise<number> {
           );
           break;
         case "refresh":
-          await packages.refreshSources(args[2]);
+          await task(() => packages.refreshSources(args[2]));
           console.log("Sources refreshed");
           break;
         case "remove":
@@ -608,9 +680,26 @@ async function main(): Promise<number> {
       console.log(JSON.stringify(result, null, 2));
       break;
     }
-    case "search":
-      console.log(JSON.stringify(await packages.search(required(1)), null, 2));
+    case "search": {
+      if (args.length !== 2) fail("Use search <query> [--refresh] [--json]");
+      const results = await task(() =>
+        packages.search(required(1), {
+          refresh: values.refresh,
+        }),
+      );
+      show(
+        values.json
+          ? JSON.stringify(results, null, 2)
+          : results.length
+            ? table(
+                ["PACKAGE", "LATEST"],
+                results.map((i) => [`${i.source}/${i.name}`, i.latest]),
+              ) +
+              `\n\n${results.length} match(es). Cached indexes; use --refresh to fetch updates.`
+            : "No packages match in cached indexes. Use --refresh to fetch updates.",
+      );
       break;
+    }
     case "i":
     case "install": {
       if (values["with-deps"]) {
@@ -626,10 +715,8 @@ async function main(): Promise<number> {
           JSON.stringify(
             values["dry-run"] || !values.yes
               ? await planDependencies(packages, spec)
-              : await installWithDependencies(
-                  packages,
-                  spec,
-                  values.binding ?? "",
+              : await task(() =>
+                  installWithDependencies(packages, spec, values.binding ?? ""),
                 ),
             null,
             2,
@@ -638,12 +725,26 @@ async function main(): Promise<number> {
         break;
       }
       if (values["dry-run"]) fail("Install preview requires --with-deps");
-      const i = await packages.install(
-        await packages.runtimeSpec(required(1), values.distribution),
-        values["skip-checksum"],
+      const i = await task(async () =>
+        packages.install(
+          await packages.runtimeSpec(required(1), values.distribution),
+          values["skip-checksum"],
+        ),
       );
       console.log(
-        `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Select explicitly with piko use.`,
+        values.json
+          ? JSON.stringify(
+              {
+                package: `${i.source.alias}/${i.name}`,
+                version: i.version,
+                verified: i.verified,
+                path: join(root, i.dir),
+                defaultUnchanged: true,
+              },
+              null,
+              2,
+            )
+          : `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Select explicitly with piko use.`,
       );
       break;
     }
@@ -699,34 +800,31 @@ async function main(): Promise<number> {
       );
       break;
     case "list": {
-      const s = await packages.store.read();
-      console.log(
-        JSON.stringify(
-          Object.values(s.installs).map((i) => ({
-            package: `${i.source.alias}/${i.name}`,
-            version: i.version,
-            default: s.defaults[i.key]?.id === i.id,
-            request:
-              s.defaults[i.key]?.id === i.id
-                ? s.defaults[i.key]?.request
-                : undefined,
-            verified: i.verified,
-            path: join(root, i.dir),
-          })),
-          null,
-          2,
-        ),
+      if (args.length > 2)
+        fail("Use list [query] [--selected] [--verbose] [--json]");
+      const rows = installedRows(
+        root,
+        await packages.store.read(),
+        args[1],
+        values.selected,
+      );
+      show(
+        values.json
+          ? JSON.stringify(rows, null, 2)
+          : installedTable(rows, values.verbose),
       );
       break;
     }
     case "outdated":
     case "status": {
-      const result = await packages.outdated(
-        args[1]
-          ? await packages.runtimeSpec(args[1], values.distribution)
-          : undefined,
+      const result = await task(async () =>
+        packages.outdated(
+          args[1]
+            ? await packages.runtimeSpec(args[1], values.distribution)
+            : undefined,
+        ),
       );
-      console.log(JSON.stringify(result, null, 2));
+      show(values.json ? JSON.stringify(result, null, 2) : updateTable(result));
       if (result.some((r) => r.status === "blocked")) return 1;
       break;
     }
@@ -776,21 +874,39 @@ async function main(): Promise<number> {
     case "update": {
       if (values.all) {
         if (args[1]) fail("Use update --all without a package");
-        const result = await packages.updateAll(!!values["dry-run"]);
-        console.log(JSON.stringify(result, null, 2));
+        const result = await task(() =>
+          packages.updateAll(!!values["dry-run"]),
+        );
+        show(
+          values.json ? JSON.stringify(result, null, 2) : updateTable(result),
+        );
         if (result.some((r) => ["failed", "blocked"].includes(r.status)))
           return 1;
         break;
       }
       const spec = await packages.runtimeSpec(required(1), values.distribution);
       if (values["dry-run"]) {
-        const result = await packages.outdated(spec);
-        console.log(JSON.stringify(result, null, 2));
+        const result = await task(() => packages.outdated(spec));
+        show(
+          values.json ? JSON.stringify(result, null, 2) : updateTable(result),
+        );
         if (result.some((r) => r.status === "blocked")) return 1;
         break;
       }
-      const i = await packages.update(spec);
-      console.log(`Default: ${i.name}@${i.version}`);
+      const i = await task(() => packages.update(spec));
+      console.log(
+        values.json
+          ? JSON.stringify(
+              {
+                package: `${i.source.alias}/${i.name}`,
+                version: i.version,
+                status: "selected",
+              },
+              null,
+              2,
+            )
+          : `Default: ${i.name}@${i.version}`,
+      );
       break;
     }
     case "uninstall":

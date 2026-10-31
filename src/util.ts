@@ -219,12 +219,22 @@ export async function downloadResponse(
 export async function download(
   value: string,
   limit = 512 * 1024 * 1024,
+  progress?: (received: number, total?: number, complete?: boolean) => void,
 ): Promise<Uint8Array> {
   const response = await downloadResponse(value);
   if (Number(response.headers.get("content-length") ?? 0) > limit) {
     await response.body?.cancel();
     fail("Download exceeds size limit");
   }
+  const length = Number(response.headers.get("content-length"));
+  // Fetch may decompress the body, so encoded Content-Length is not a usable total.
+  const expected =
+    !response.headers.get("content-encoding") &&
+    Number.isSafeInteger(length) &&
+    length > 0
+      ? length
+      : undefined;
+  progress?.(0, expected);
   const reader = response.body?.getReader();
   if (!reader) fail("Empty response body");
   const chunks: Uint8Array[] = [];
@@ -236,10 +246,12 @@ export async function download(
       total += value.length;
       if (total > limit) fail("Download exceeds size limit");
       chunks.push(value);
+      progress?.(total, expected);
     }
   } finally {
     await reader.cancel();
   }
+  progress?.(total, expected, true);
   return Buffer.concat(chunks, total);
 }
 export async function capture(
