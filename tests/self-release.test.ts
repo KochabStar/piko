@@ -39,6 +39,13 @@ afterAll(() =>
   rm(work, { recursive: true, force: true, maxRetries: 30, retryDelay: 100 }),
 );
 
+// Several rejection cases reuse the same large Bun EXE. Compress and checksum
+// each immutable fixture buffer once instead of repeating that CPU work inside
+// the test timeout on slower CI runners.
+const zipPayloads = new WeakMap<
+  Buffer,
+  { compressed: Buffer; crc32: number }
+>();
 function zip(entries: { name: string; bytes: Buffer }[]) {
   const crc = (bytes: Buffer) => {
     let c = 0xffffffff;
@@ -52,14 +59,19 @@ function zip(entries: { name: string; bytes: Buffer }[]) {
     central: Buffer[] = [];
   let offset = 0;
   for (const { name: path, bytes } of entries) {
-    const name = Buffer.from(path),
-      compressed = deflateRawSync(bytes);
+    const name = Buffer.from(path);
+    let payload = zipPayloads.get(bytes);
+    if (!payload) {
+      payload = { compressed: deflateRawSync(bytes), crc32: crc(bytes) };
+      zipPayloads.set(bytes, payload);
+    }
+    const { compressed, crc32 } = payload;
     const header = Buffer.alloc(30),
       cd = Buffer.alloc(46);
     header.writeUInt32LE(0x04034b50);
     header.writeUInt16LE(20, 4);
     header.writeUInt16LE(8, 8);
-    header.writeUInt32LE(crc(bytes), 14);
+    header.writeUInt32LE(crc32, 14);
     header.writeUInt32LE(compressed.length, 18);
     header.writeUInt32LE(bytes.length, 22);
     header.writeUInt16LE(name.length, 26);
@@ -67,7 +79,7 @@ function zip(entries: { name: string; bytes: Buffer }[]) {
     cd.writeUInt16LE(20, 4);
     cd.writeUInt16LE(20, 6);
     cd.writeUInt16LE(8, 10);
-    cd.writeUInt32LE(crc(bytes), 16);
+    cd.writeUInt32LE(crc32, 16);
     cd.writeUInt32LE(compressed.length, 20);
     cd.writeUInt32LE(bytes.length, 24);
     cd.writeUInt16LE(name.length, 28);
@@ -309,23 +321,38 @@ test("invalid or unavailable release metadata fails closed with guidance and nev
   }
 }, 30000);
 
-test("tampered ZIP/executable, duplicate EXE and inconsistent candidate version leave no update journal", async () => {
-  const f = await fixture();
-  try {
-    const mutations = [
-      { checksum: "0".repeat(64) },
-      { payload: archive("0.4.0", Buffer.from("tampered")) },
-      { payload: archive("0.4.0", executable, true) },
-      { version: "0.5.0", payload: archive("0.5.0") },
-    ];
-    for (const mutation of mutations) {
-      f.set(mutation);
+for (const rejection of [
+  {
+    name: "tampered ZIP",
+    mutation: () => ({ checksum: "0".repeat(64) }),
+    error: "Release ZIP checksum mismatch",
+  },
+  {
+    name: "tampered executable",
+    mutation: () => ({ payload: archive("0.4.0", Buffer.from("tampered")) }),
+    error: "Release executable checksum mismatch",
+  },
+  {
+    name: "duplicate executable",
+    mutation: () => ({ payload: archive("0.4.0", executable, true) }),
+    error: "Invalid, duplicate or oversized release entry",
+  },
+  {
+    name: "inconsistent executable version",
+    mutation: () => ({ version: "0.5.0", payload: archive("0.5.0") }),
+    error: "Candidate executable version does not match Release metadata",
+  },
+]) {
+  test(`${rejection.name} leaves the installed binary intact and no update journal`, async () => {
+    const f = await fixture();
+    try {
+      f.set(rejection.mutation());
       await expect(
         updateSelfFromRelease(f.root, process.pid, {
           confirmed: true,
           metadataUrl: f.metadataUrl,
         }),
-      ).rejects.toThrow();
+      ).rejects.toThrow(rejection.error);
       expect((await selfUpdateStatus(f.root)).pending).toBeNull();
       expect(await executableHash(join(f.root, "apps/piko/piko.exe"))).toBe(
         oldChecksum,
@@ -336,11 +363,11 @@ test("tampered ZIP/executable, duplicate EXE and inconsistent candidate version 
             n.startsWith("release-download-"),
           ),
       ).toBe(false);
+    } finally {
+      f.server.stop(true);
     }
-  } finally {
-    f.server.stop(true);
-  }
-}, 60000);
+  }, 60000);
+}
 
 test("compiled update/update piko/self update aliases share release handling while --all remains packages only", async () => {
   const f = await fixture();

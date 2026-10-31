@@ -17,6 +17,7 @@ await cp("examples/source", join(folder, "source"), { recursive: true });
 await cp("README.md", join(folder, "README.md"));
 const hash = await executableHash(join(folder, "piko.exe"));
 await writeFile(join(folder, "SHA256SUMS.txt"), `${hash}  piko.exe\n`);
+await writeFile("dist/piko.exe.sha256", `${hash}  piko.exe\n`);
 await writeFile(
   join(folder, "release.json"),
   JSON.stringify(

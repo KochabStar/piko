@@ -49,6 +49,7 @@ jobs:
           path: |
             dist/*.zip
             dist/*.sha256
+            dist/piko.exe
             install.ps1
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -73,11 +74,11 @@ jobs:
           version="${RELEASE_TAG#v}"
           archive="piko-${version}-windows-x64.zip"
           test -s install.ps1
-          (cd dist && sha256sum --check --strict "${archive}.sha256")
+          (cd dist && sha256sum --check --strict "${archive}.sha256" piko.exe.sha256)
           args=(release create "$RELEASE_TAG" --verify-tag --title "Piko $RELEASE_TAG" --generate-notes)
           if [[ "$version" == *-* ]]; then
             args+=(--prerelease --latest=false)
           else
             args+=(--latest)
           fi
-          gh "${args[@]}" "dist/$archive" "dist/${archive}.sha256" install.ps1
+          gh "${args[@]}" "dist/$archive" "dist/${archive}.sha256" dist/piko.exe dist/piko.exe.sha256 install.ps1

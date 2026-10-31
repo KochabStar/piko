@@ -68,6 +68,7 @@ test("only verified tag pushes can publish, with write access isolated to publis
   expect(upload?.with?.path.trim().split(/\r?\n/)).toEqual([
     "dist/*.zip",
     "dist/*.sha256",
+    "dist/piko.exe",
     "install.ps1",
   ]);
 });
@@ -111,6 +112,11 @@ for (const tag of ["v1.2.3", "v1.2.3-beta.1"]) {
       join(folder, "dist", archive + ".sha256"),
       `${hash}  ${archive}\n`,
     );
+    await writeFile(join(folder, "dist", "piko.exe"), payload);
+    await writeFile(
+      join(folder, "dist", "piko.exe.sha256"),
+      `${hash}  piko.exe\n`,
+    );
     await writeFile(join(folder, "install.ps1"), "# bootstrap fixture\n");
     // A shell function intercepts gh; these tests cannot create remote releases.
     const command = [
@@ -134,9 +140,11 @@ for (const tag of ["v1.2.3", "v1.2.3-beta.1"]) {
       .split(/\r?\n/);
     expect(args.slice(0, 3)).toEqual(["release", "create", tag]);
     expect(args).toContain("--verify-tag");
-    expect(args.slice(-3)).toEqual([
+    expect(args.slice(-5)).toEqual([
       `dist/${archive}`,
       `dist/${archive}.sha256`,
+      "dist/piko.exe",
+      "dist/piko.exe.sha256",
       "install.ps1",
     ]);
     expect(args.includes("--latest")).toBe(!tag.includes("-"));
@@ -147,6 +155,12 @@ for (const tag of ["v1.2.3", "v1.2.3-beta.1"]) {
     await writeFile(join(folder, "dist", archive), "tampered archive");
     const rejected = await run(command, folder, env);
     expect(rejected.code).not.toBe(0);
+    expect(await Bun.file(join(folder, "published-args.txt")).exists()).toBe(
+      false,
+    );
+    await writeFile(join(folder, "dist", archive), payload);
+    await writeFile(join(folder, "dist", "piko.exe"), "tampered executable");
+    expect((await run(command, folder, env)).code).not.toBe(0);
     expect(await Bun.file(join(folder, "published-args.txt")).exists()).toBe(
       false,
     );

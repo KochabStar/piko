@@ -95,11 +95,13 @@ gh run list --repo KochabStar/piko --workflow verify.yml --limit 5
 gh release view v0.4.0 --repo KochabStar/piko
 ```
 
-工作流会校验 tag 与两处版本声明一致，在 Windows 上重新构建并运行测试、格式／沙盒打包检查、发行包解包与隔离安装校验；全部成功后才使用受限的 `GITHUB_TOKEN` 发布以下三个附件，无需另配个人令牌：
+工作流会校验 tag 与两处版本声明一致，在 Windows 上重新构建并运行测试、格式／沙盒打包检查、发行包解包与隔离安装校验；全部成功后才使用受限的 `GITHUB_TOKEN` 发布以下五个附件，无需另配个人令牌：
 
 ```text
 piko-<版本>-windows-x64.zip
 piko-<版本>-windows-x64.zip.sha256
+piko.exe                          # 可直接下载的独立 Windows x64 程序
+piko.exe.sha256
 install.ps1                       # 仓库根目录的在线安装脚本
 ```
 
@@ -118,6 +120,7 @@ install.ps1                       # 仓库根目录的在线安装脚本
 gh release create v0.4.0 `
     .\dist\piko-0.4.0-windows-x64.zip `
     .\dist\piko-0.4.0-windows-x64.zip.sha256 `
+    .\dist\piko.exe .\dist\piko.exe.sha256 `
     .\install.ps1 --repo KochabStar/piko --verify-tag `
     --title "Piko v0.4.0" --generate-notes --latest
 ```
