@@ -1,5 +1,11 @@
 import type { UpdateRow } from "./update-display-types.ts";
 import { cleanText } from "./progress.ts";
+import {
+  tint,
+  symbol,
+  textWidth,
+  type TerminalStyle,
+} from "./terminal-style.ts";
 import { join } from "node:path";
 import type { Source, State } from "./types.ts";
 import type { Packages } from "./packages.ts";
@@ -8,21 +14,66 @@ import { publicEndpoint } from "./util.ts";
 // Metadata may originate in a source. Never let it inject terminal control codes
 // or new rows into human-readable tables; JSON retains the original values.
 const cell = cleanText;
-export function humanOutput(text: string, color: boolean): string {
+export function humanOutput(
+  text: string,
+  color: boolean,
+  options: Omit<TerminalStyle, "color"> = {},
+): string {
   if (!color) return text;
-  const lines = text.split("\n");
-  if (/^PACKAGE\s/.test(lines[0] ?? ""))
-    lines[0] = `\x1b[1;36m${lines[0]}\x1b[0m`;
-  return lines.join("\n");
+  const style: TerminalStyle = { ...options, color };
+  return text
+    .split("\n")
+    .map((line, index) => {
+      const safe = cleanText(line);
+      if (index === 0 && /^(PACKAGE|SOURCE|COMMAND|KIND)\s/.test(safe))
+        return tint(safe, "accent", style);
+      if (
+        /^All packages are up to date\.$/.test(safe) ||
+        /^Installed |^Default: /.test(safe)
+      )
+        return (
+          tint(symbol("success", style.unicode), "success", style) + "  " + safe
+        );
+      const result =
+        /^(\S+) (\([^)]+\)): (updated|outdated|failed|blocked|downgrade)(.*)$/.exec(
+          safe,
+        );
+      if (result) {
+        const tone = ["failed", "blocked"].includes(result[3]!)
+          ? "error"
+          : result[3] === "downgrade"
+            ? "warning"
+            : "success";
+        return (
+          tint(
+            symbol(tone === "error" ? "error" : "success", style.unicode),
+            tone,
+            style,
+          ) +
+          "  " +
+          tint(result[1]!, "strong", style) +
+          " " +
+          tint(result[2]!, "muted", style) +
+          "  " +
+          tint(result[3]!, tone, style) +
+          result[4]
+        );
+      }
+      if (
+        /^\d+ (?:updated|outdated|failed|blocked)|^\d+ installed version/.test(
+          safe,
+        )
+      )
+        return tint(safe, "muted", style);
+      return safe;
+    })
+    .join("\n");
 }
 
 export function table(headers: string[], rows: string[][]): string {
   const values = [headers, ...rows].map((row) => row.map(cell));
   const widths = headers.map((_, i) =>
-    values.reduce(
-      (width, row) => Math.max(width, Array.from(row[i] ?? "").length),
-      0,
-    ),
+    values.reduce((width, row) => Math.max(width, textWidth(row[i] ?? "")), 0),
   );
   return values
     .map((row) =>
@@ -30,7 +81,7 @@ export function table(headers: string[], rows: string[][]): string {
         .map((value, i) =>
           i === row.length - 1
             ? value
-            : value + " ".repeat(widths[i]! - Array.from(value).length),
+            : value + " ".repeat(widths[i]! - textWidth(value)),
         )
         .join("  ")
         .trimEnd(),

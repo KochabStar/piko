@@ -1,4 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import {
+  activityLine,
+  plainText,
+  symbol,
+  tint,
+  type TerminalStyle,
+} from "./terminal-style.ts";
 
 export type ProgressEvent =
   | { kind: "stage"; label: string; detail?: string }
@@ -18,8 +25,7 @@ export function withProgress<T>(
 ): Promise<T> {
   return context.run(listener, fn);
 }
-export const cleanText = (text: string) =>
-  text.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "?");
+export const cleanText = plainText;
 export function formatBytes(bytes: number): string {
   const units = ["B", "KiB", "MiB", "GiB"];
   let value = Math.max(0, bytes),
@@ -34,6 +40,11 @@ export class ProgressRenderer {
   private active = "";
   private detail = "";
   private item = "";
+  private packageName = "";
+  private position = "";
+  private transfer:
+    | { percent?: number; transferred: string; speed: string; eta?: string }
+    | undefined;
   private frame = 0;
   private last = -Infinity;
   private started = 0;
@@ -46,6 +57,9 @@ export class ProgressRenderer {
       tty: boolean;
       color: boolean;
       columns?: number;
+      getColumns?: () => number;
+      unicode?: boolean;
+      trueColor?: boolean;
       verbose?: boolean;
       now?: () => number;
     },
@@ -53,30 +67,24 @@ export class ProgressRenderer {
   private now() {
     return this.options.now?.() ?? performance.now();
   }
-  private color(value: string, code: number) {
-    return this.options.color ? `\x1b[${code}m${value}\x1b[0m` : value;
+  private style(): TerminalStyle {
+    return {
+      color: this.options.color,
+      unicode: this.options.unicode ?? true,
+      trueColor: this.options.trueColor,
+    };
   }
-  private line(text: string) {
-    // Stay within one physical row, including wide characters on Windows.
-    const limit = Math.max(8, (this.options.columns ?? 100) - 2);
-    let width = 0,
-      result = "";
-    for (const char of cleanText(text)) {
-      const size = char.codePointAt(0)! > 0x2ff ? 2 : 1;
-      if (width + size > limit - 3) {
-        result += "...";
-        break;
-      }
-      result += char;
-      width += size;
-    }
-    this.options.write("\r\x1b[2K" + this.color(result, 36));
+  private color(value: string, code: number) {
+    return tint(value, code === 31 ? "error" : "success", this.style());
   }
   private finishStage() {
     if (!this.options.verbose || !this.options.tty || !this.active) return;
     this.options.write(
       "\r\x1b[2K" +
-        this.color(`  + ${this.active}`, 32) +
+        this.color(
+          `  ${symbol("success", this.style().unicode)} ${this.active}`,
+          32,
+        ) +
         `  ${((this.now() - this.started) / 1000).toFixed(1)}s\n`,
     );
   }
@@ -85,15 +93,38 @@ export class ProgressRenderer {
     const now = this.now();
     if (!force && now - this.last < 100) return;
     this.last = now;
-    if (this.options.tty)
-      this.line(
-        `${["|", "/", "-", "\\"][this.frame++ % 4]} ${this.item}${this.active}${this.detail ? "  " + this.detail : ""}`,
+    if (this.options.tty) {
+      const stage =
+        {
+          "Extract archive": "Extracting",
+          "Commit installation": "Installing",
+          "Switch selected version": "Selecting",
+        }[this.active] ?? this.active;
+      const line = activityLine(
+        {
+          stage,
+          package: this.packageName,
+          position: this.position,
+          detail: this.detail,
+          ...this.transfer,
+          frame: this.frame++,
+        },
+        Math.max(
+          1,
+          (this.options.getColumns?.() ?? this.options.columns ?? 100) - 1,
+        ),
+        this.style(),
       );
+      this.options.write("\r\x1b[2K" + line);
+    }
   }
   readonly event = (event: ProgressEvent) => {
     if (this.closed) return;
     this.seen = true;
     if (event.kind === "stage") {
+      if (event.label === "Resolve package" && !this.position)
+        this.packageName = cleanText(event.detail ?? "");
+      this.transfer = undefined;
       if (
         !this.options.verbose &&
         ![
@@ -124,6 +155,8 @@ export class ProgressRenderer {
         );
     } else if (event.kind === "item") {
       this.item = `[${event.index}/${event.total}] ${cleanText(event.package)}  `;
+      this.position = `${event.index}/${event.total}`;
+      this.packageName = cleanText(event.package);
     } else if (event.kind === "result") {
       if (this.options.tty) {
         if (!event.failed) this.finishStage();
@@ -132,7 +165,7 @@ export class ProgressRenderer {
       if (this.options.verbose)
         this.options.write(
           this.color(
-            `  ${event.failed ? "!" : "+"} ${cleanText(event.label)}`,
+            `  ${symbol(event.failed ? "error" : "success", this.style().unicode)} ${cleanText(event.label)}`,
             event.failed ? 31 : 32,
           ) + "\n",
         );
@@ -148,6 +181,15 @@ export class ProgressRenderer {
             Math.floor((event.received / total) * 100),
           )
         : undefined;
+      this.transfer = {
+        percent,
+        transferred: `${formatBytes(event.received)}${total ? " / " + formatBytes(total) : ""}`,
+        speed: `${formatBytes(speed)}/s`,
+        eta:
+          total && speed > 0 && !event.complete
+            ? `ETA ${Math.ceil((total - event.received) / speed)}s`
+            : undefined,
+      };
       const bar =
         percent === undefined
           ? ""

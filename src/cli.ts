@@ -212,7 +212,15 @@ async function main(): Promise<number> {
     !values["no-color"] &&
     process.env.NO_COLOR === undefined &&
     values.color !== "never";
-  const show = (text: string) => console.log(humanOutput(text, outputColor));
+  const unicode =
+    process.env.TERM !== "linux" &&
+    process.env.TERM !== "dumb" &&
+    (process.env.LC_ALL ?? process.env.LANG ?? "").toUpperCase() !== "C";
+  const trueColor =
+    /truecolor|24bit/i.test(process.env.COLORTERM ?? "") ||
+    !!process.env.WT_SESSION;
+  const show = (text: string) =>
+    console.log(humanOutput(text, outputColor, { unicode, trueColor }));
   const task = async <T>(fn: () => Promise<T>): Promise<T> => {
     const tty =
       !!process.stderr.isTTY &&
@@ -237,6 +245,9 @@ async function main(): Promise<number> {
         values.color !== "never" &&
         (values.color === "always" || process.env.TERM !== "dumb"),
       columns: process.stderr.columns,
+      getColumns: () => process.stderr.columns || 100,
+      unicode,
+      trueColor,
       verbose: values.verbose,
     });
     try {
@@ -765,7 +776,7 @@ async function main(): Promise<number> {
           values["skip-checksum"],
         ),
       );
-      console.log(
+      show(
         values.json
           ? JSON.stringify(
               {
@@ -938,7 +949,7 @@ async function main(): Promise<number> {
         break;
       }
       const i = await task(() => packages.update(spec));
-      console.log(
+      show(
         values.json
           ? JSON.stringify(
               {
