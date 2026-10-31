@@ -2,6 +2,7 @@ import type { UpdateRow } from "./update-display-types.ts";
 import { cleanText } from "./progress.ts";
 import {
   tint,
+  accentGradient,
   symbol,
   textWidth,
   type TerminalStyle,
@@ -21,18 +22,60 @@ export function humanOutput(
 ): string {
   if (!color) return text;
   const style: TerminalStyle = { ...options, color };
+  let headers: string[] | undefined;
   return text
     .split("\n")
     .map((line, index) => {
       const safe = cleanText(line);
-      if (index === 0 && /^(PACKAGE|SOURCE|COMMAND|KIND)\s/.test(safe))
-        return tint(safe, "accent", style);
+      if (index === 0 && /^(PACKAGE|SOURCE|COMMAND|KIND)\s/.test(safe)) {
+        headers = safe.split(/ {2,}/);
+        return accentGradient(safe, style);
+      }
+      if (headers && safe && !/^\d+ installed version/.test(safe)) {
+        let column = 0;
+        return safe
+          .split(/( {2,})/)
+          .map((part) => {
+            if (/^ +$/.test(part)) return part;
+            const header = headers![column++];
+            if (["PACKAGE", "SOURCE", "COMMAND", "KIND"].includes(header ?? ""))
+              return tint(part, "strong", style);
+            if (["VERSION", "LATEST"].includes(header ?? ""))
+              return tint(part, "purple", style);
+            if (header === "STATUS")
+              return tint(
+                part,
+                ["failed", "blocked"].includes(part)
+                  ? "error"
+                  : ["updated", "current"].includes(part)
+                    ? "success"
+                    : part === "downgrade"
+                      ? "warning"
+                      : "muted",
+                style,
+              );
+            if (header === "SELECTED" || header === "VERIFIED")
+              return tint(
+                part,
+                ["*", "yes"].includes(part)
+                  ? "success"
+                  : part === "no"
+                    ? "warning"
+                    : "muted",
+                style,
+              );
+            return tint(part, "muted", style);
+          })
+          .join("");
+      }
       if (
         /^All packages are up to date\.$/.test(safe) ||
         /^Installed |^Default: /.test(safe)
       )
         return (
-          tint(symbol("success", style.unicode), "success", style) + "  " + safe
+          tint(symbol("success", style.unicode), "success", style) +
+          "  " +
+          tint(safe, /^All packages/.test(safe) ? "muted" : "blue", style)
         );
       const result =
         /^(\S+) (\([^)]+\)): (updated|outdated|failed|blocked|downgrade)(.*)$/.exec(

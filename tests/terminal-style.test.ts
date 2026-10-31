@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   activityLine,
+  accentGradient,
   fitText,
   progressBar,
   textWidth,
@@ -34,13 +35,38 @@ test("Gemini-inspired activity uses a dot spinner, thin bar and semantic blue/pu
   });
   expect(rgb).toContain("\x1b[38;2;197;138;249m");
   expect(rgb).toContain("\x1b[38;2;168;199;250m");
-  expect(rgb).toContain("\x1b[1mmain/llvm\x1b[22m");
+  expect(rgb).toContain(
+    "\x1b[1m\x1b[38;2;168;199;250mmain/llvm\x1b[39m\x1b[22m",
+  );
   expect(strip(rgb)).toBe(plain);
   const ansi = activityLine(view, 140, { color: true });
   expect(ansi).not.toContain("38;2;");
   expect(ansi).toContain("\x1b[95m");
   expect(strip(ansi)).toBe(plain);
   expect(plain).not.toContain("\x1b");
+});
+
+test("color hierarchy accents names and versions without changing table layout", () => {
+  const gradient = accentGradient("abc", { color: true, trueColor: true });
+  expect(gradient).toContain("\x1b[38;2;197;138;249ma");
+  expect(gradient).toContain("\x1b[38;2;168;199;250mb");
+  expect(gradient).toContain("\x1b[38;2;140;233;255mc");
+  expect(strip(gradient)).toBe("abc");
+  expect(accentGradient("abc", { color: false })).toBe("abc");
+  const plain = table(
+    ["PACKAGE", "VERSION", "SELECTED", "VERIFIED"],
+    [
+      ["main/tool", "2.0.0", "*", "yes"],
+      ["main/other", "1.0.0", "-", "no"],
+    ],
+  );
+  const colored = humanOutput(plain, true, { trueColor: true });
+  expect(strip(colored)).toBe(plain);
+  expect(colored).toContain("\x1b[38;2;168;199;250mmain/tool");
+  expect(colored).toContain("\x1b[38;2;197;138;249m2.0.0");
+  expect(colored).toContain("\x1b[38;2;129;201;149myes");
+  expect(colored).not.toContain("\x1b[48;");
+  expect(humanOutput(plain, false)).toBe(plain);
 });
 
 test("live layout stays within one row at narrow widths, with CJK, emoji and terminal resize", () => {

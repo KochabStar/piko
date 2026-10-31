@@ -29,7 +29,7 @@ export const plainText = (text: string) =>
   text.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "?");
 export function tint(text: string, tone: Tone, style: TerminalStyle): string {
   if (!style.color || !text) return text;
-  if (tone === "strong") return `\x1b[1m${text}\x1b[22m`;
+  if (tone === "strong") return `\x1b[1m${tint(text, "blue", style)}\x1b[22m`;
   const [ansi, rgb] = palette[tone];
   return `\x1b[${style.trueColor ? "38;2;" + rgb : ansi}m${text}\x1b[39m`;
 }
@@ -78,6 +78,32 @@ export function fitText(text: string, width: number): string {
   }
   return out + "...";
 }
+// Keep the gradient inside the blue/purple/cyan family, rather than coloring
+// every field. Foreground-only RGB preserves the user's terminal background.
+export function accentGradient(text: string, style: TerminalStyle): string {
+  if (!style.color) return text;
+  const chars = Array.from(text);
+  const stops = [palette.purple[1], palette.blue[1], palette.cyan[1]].map((s) =>
+    s.split(";").map(Number),
+  );
+  return chars
+    .map((char, index) => {
+      const t = chars.length <= 1 ? 0 : (index / (chars.length - 1)) * 2;
+      const segment = Math.min(1, Math.floor(t)),
+        fraction = t - segment;
+      const rgb = stops[segment]!.map((value, channel) =>
+        Math.round(value + (stops[segment + 1]![channel]! - value) * fraction),
+      );
+      if (style.trueColor) return `\x1b[38;2;${rgb.join(";")}m${char}\x1b[39m`;
+      return tint(
+        char,
+        (["purple", "blue", "cyan"] as const)[Math.min(2, Math.round(t))]!,
+        style,
+      );
+    })
+    .join("");
+}
+
 export function progressBar(
   percent: number,
   width: number,
@@ -90,14 +116,7 @@ export function progressBar(
   const solid = style.unicode !== false ? "━" : "=";
   const empty = style.unicode !== false ? "─" : "-";
   const cursor = style.unicode !== false ? "╸" : ">";
-  const colors: Tone[] = ["purple", "blue", "cyan"];
-  let out = "";
-  for (let i = 0; i < filled; i++)
-    out += tint(
-      solid,
-      colors[Math.min(2, Math.floor((i / Math.max(1, count)) * 3))]!,
-      style,
-    );
+  let out = accentGradient(solid.repeat(filled), style);
   if (head) out += tint(cursor, "cyan", style);
   return (
     out +
@@ -159,7 +178,7 @@ export function activityLine(
           text: "-".repeat(barWidth),
           raw: progressBar(state.percent!, barWidth, style),
         });
-      parts.push({ text: pct, tone: "accent" });
+      parts.push({ text: pct, tone: "cyan" });
     }
     if (limit >= 105 || !pct)
       parts.push({ text: plainText(state.transferred!), tone: "muted" });
