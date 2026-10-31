@@ -530,7 +530,9 @@ piko system main/flclash --remove --approve-admin --binding <新的预览摘要>
 
 必须单独 `--approve-admin` 并已处于管理员终端；**不自动 UAC 提权，不自动打开防火墙、不启用系统功能、不重启 Explorer／系统**。预览含脚本、参数和内容摘要。系统执行不是沙箱或事务；失败／运行中记录会阻止卸载，需检查后按配方撤销／重试。活动系统集成仍绑定具体版本；安装候选后可用 `system <包>@<新版> --upgrade --dry-run` 合并预览旧撤销／新安装，再以单独 `--approve-admin --binding <摘要>` 执行。需要自行提升终端，记录阶段但不冒充事务；失败不自动重放脚本。
 
-独立源已提供 FlClashHelperService 和 TortoiseSVN Shell 扩展配方：先拒绝外部现有服务／注册值／CommonProgramFiles 路径，保留配方自己的所有权记录；撤销只恢复拥有的值，不照搬 Scoop 的整树删除。TortoiseSVN MSI 的重复架构文件以 `files` 中 `#File表标识` 精确选择；无明确映射仍拒绝重名。脚本仅做语法／预览与保护条件验证，**尚未在干净管理员环境中执行服务／COM／驱动验收**。不要把客户端能力与配方可解析当作系统集成已经验收。
+独立源已提供 FlClashHelperService 和 TortoiseSVN Shell 扩展配方：先拒绝外部现有服务／注册值／CommonProgramFiles 路径，保留配方自己的所有权记录；撤销只恢复拥有的值，不照搬 Scoop 的整树删除。TortoiseSVN MSI 的重复架构文件以 `files` 中 `#File表标识` 精确选择；无明确映射仍拒绝重名。
+
+TortoiseSVN 配方修订 `1.15.0.29830-piko.1` 起，COM／overlay 直接指向独立版本目录，不再使用固定 `CommonProgramFiles` junction；安装候选及切换系统注册不删除旧版 DLL。客户端卸载／版本清理系统集成包前通过 Windows Restart Manager 检查加载的 EXE／DLL：占用版本预览为 `defer-in-use`，结果为 `deferred-in-use`，保留旧版并在用户自行注销／重启后重新清理。直接 uninstall 在移动目录前拒绝占用。检查失败不视为无人使用；仍有进程在检查后加载文件的竞争窗口，不保证消除一切共享锁。普通更新不会绕过活动系统集成的管理员批准。详见软件源 `guides/tortoise-svn.md`。配方的 HKCU 隔离注册切换与真实 DLL 占用检查已验证；**真实 HKLM 管理员实装、Explorer UI、服务／驱动验收仍未据此认证**。
 
 以上新增元数据使用 **state schema 6**，仍可读 schema 1–5。导出只记录 desktop／bootstrap／system 意图，不带注册表旧值、Profile、用户数据或批准；目标机重新审核。需要 bootstrap 生成命令的默认选择会明确阻止自动恢复，须先单独安装／批准引导再选择。
 

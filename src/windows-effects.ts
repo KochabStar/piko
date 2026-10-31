@@ -22,6 +22,48 @@ if ($p.op -eq 'elevated') {
  ([Security.Principal.WindowsPrincipal]::new($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) | ConvertTo-Json -Compress
  exit
 }
+if ($p.op -eq 'file-users') {
+ Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class PikoRestartManager {
+ [StructLayout(LayoutKind.Sequential)] public struct UniqueProcess { public uint pid; public System.Runtime.InteropServices.ComTypes.FILETIME started; }
+ [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct ProcessInfo {
+  public UniqueProcess process;
+  [MarshalAs(UnmanagedType.ByValTStr,SizeConst=256)] public string name;
+  [MarshalAs(UnmanagedType.ByValTStr,SizeConst=64)] public string service;
+  public uint type; public uint status; public uint session;
+  [MarshalAs(UnmanagedType.Bool)] public bool restartable;
+ }
+ [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern uint RmStartSession(out uint handle,uint flags,StringBuilder key);
+ [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern uint RmRegisterResources(uint handle,uint count,string[] files,uint apps,IntPtr appList,uint services,IntPtr serviceList);
+ [DllImport("rstrtmgr.dll")] static extern uint RmGetList(uint handle,out uint needed,ref uint count,[In,Out] ProcessInfo[] info,ref uint reasons);
+ [DllImport("rstrtmgr.dll")] static extern uint RmEndSession(uint handle);
+ public static ProcessInfo[] Users(string[] files) {
+  uint handle; uint error=RmStartSession(out handle,0,new StringBuilder(33));
+  if(error!=0) throw new InvalidOperationException("Restart Manager start failed: "+error);
+  try {
+   error=RmRegisterResources(handle,(uint)files.Length,files,0,IntPtr.Zero,0,IntPtr.Zero);
+   if(error!=0) throw new InvalidOperationException("Restart Manager registration failed: "+error);
+   uint needed=0,count=0,reasons=0;
+   error=RmGetList(handle,out needed,ref count,null,ref reasons);
+   if(error==0) return new ProcessInfo[0];
+   for(int attempt=0;attempt<5 && error==234;attempt++) {
+    if(needed>10000) throw new InvalidOperationException("Restart Manager process limit exceeded");
+    var list=new ProcessInfo[needed]; count=needed;
+    error=RmGetList(handle,out needed,ref count,list,ref reasons);
+    if(error==0) { Array.Resize(ref list,(int)count); return list; }
+   }
+   throw new InvalidOperationException("Restart Manager query failed: "+error);
+  } finally { RmEndSession(handle); }
+ }
+}
+'@
+ $users=[PikoRestartManager]::Users([string[]]$p.files)
+ ConvertTo-Json -Compress -InputObject @($users | ForEach-Object { @{pid=[int]$_.process.pid;name=$_.name} })
+ exit
+}
 if ($p.op -eq 'read' -or $p.op -eq 'write') {
  if (!$p.key.StartsWith('HKCU\\')) { throw 'Only HKCU integration values are supported' }
  $sub=$p.key.Substring(5)
@@ -120,6 +162,11 @@ export function equalValue(a: EffectValue, b: EffectValue): boolean {
 export class WindowsEffects {
   // Test-only roots are supplied by in-process tests, never CLI/environment flags.
   constructor(readonly testRoot?: string) {}
+  async fileUsers(files: string[]): Promise<{ pid: number; name: string }[]> {
+    if (!files.length || this.testRoot) return [];
+    if (files.length > 4096) fail("Too many executable images to inspect");
+    return await nativeRequest({ op: "file-users", files });
+  }
   registryKey(key: string) {
     if (
       !/^HKCU\\(?:Environment$|Software\\(?:Classes\\|Microsoft\\Windows NT\\CurrentVersion\\Fonts$))/i.test(

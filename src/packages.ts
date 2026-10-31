@@ -1,3 +1,4 @@
+import { installationUsers } from "./installation-users.ts";
 import { enrollStartMenu } from "./start-menu.ts";
 import {
   carryDesktopIntegration,
@@ -1521,13 +1522,18 @@ export class Packages {
         );
       let retained = 0;
       for (const i of group) {
-        const action =
+        let action =
           state.defaults[key]?.id === i.id
             ? "protect-default"
             : retained++ < keep
               ? "keep"
               : "remove";
         const path = join(this.root, i.dir);
+        if (
+          action === "remove" &&
+          (await installationUsers(this.root, i, this.effectsBackend)).length
+        )
+          action = "defer-in-use";
         if (action === "remove") {
           await noLinks(path);
           await noLinks(join(path, ".piko-install.json"));
@@ -1565,6 +1571,12 @@ export class Packages {
       status: string;
       error?: string;
     }[] = [];
+    for (const item of plan.entries.filter((e) => e.action === "defer-in-use"))
+      results.push({
+        package: item.package,
+        version: item.version,
+        status: "deferred-in-use",
+      });
     for (const item of plan.entries.filter((e) => e.action === "remove")) {
       try {
         await this.uninstall(
@@ -1638,6 +1650,16 @@ export class Packages {
           fail("Installation receipt changed since cleanup preview");
       }
       await noLinks(dirname(to));
+      const users = await installationUsers(
+        this.root,
+        installation,
+        this.effectsBackend,
+      );
+      if (users.length)
+        fail(
+          "Installation is in use by loaded DLLs/processes; keep this version and retry cleanup after sign-out/restart: " +
+            users.map((p) => `${p.name} (${p.pid})`).join(", "),
+        );
       await mkdir(dirname(to), { recursive: true });
       // Only unlink declared mappings after verifying their exact managed target.
       await checkPersistentFileMappings(this.root, installation);

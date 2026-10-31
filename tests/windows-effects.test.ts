@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, copyFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -78,6 +78,45 @@ test("real .lnk generation preserves executable and literal special-character ar
   expect(value.target.toLowerCase()).toBe(target.toLowerCase());
   expect(value.args).toBe(args.map(quoteArgument).join(" "));
 });
+test("Restart Manager reports a real loaded DLL without unloading it or killing the owning process", async () => {
+  const dll = join(root, "loaded-version.dll"),
+    ready = join(root, "loaded-ready");
+  await copyFile(join(process.env.SystemRoot!, "System32/version.dll"), dll);
+  const body = `$ErrorActionPreference='Stop';Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class NativeLoad {[DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern IntPtr LoadLibrary(string path);[DllImport("kernel32.dll")] public static extern bool FreeLibrary(IntPtr handle);}';$h=[NativeLoad]::LoadLibrary($env:PIKO_TEST_DLL);if($h -eq [IntPtr]::Zero){throw 'DLL load failed'};try{[IO.File]::WriteAllText($env:PIKO_TEST_READY,'ready');[Console]::ReadLine()|Out-Null}finally{[void][NativeLoad]::FreeLibrary($h)}`;
+  const child = Bun.spawn(
+    [
+      powershellExecutable(),
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(body, "utf16le").toString("base64"),
+    ],
+    {
+      env: { ...process.env, PIKO_TEST_DLL: dll, PIKO_TEST_READY: ready },
+      stdin: "pipe",
+      stdout: "ignore",
+      stderr: "pipe",
+    },
+  );
+  try {
+    for (let n = 0; !(await Bun.file(ready).exists()); n++) {
+      if (n > 100 || child.exitCode !== null)
+        throw Error("DLL owner did not become ready");
+      await Bun.sleep(100);
+    }
+    const real = new WindowsEffects();
+    expect((await real.fileUsers([dll])).some((p) => p.pid === child.pid)).toBe(
+      true,
+    );
+    expect(child.exitCode).toBeNull();
+  } finally {
+    child.stdin.write("release\n");
+    child.stdin.end();
+    await child.exited;
+  }
+  expect((await new WindowsEffects().fileUsers([dll])).length).toBe(0);
+}, 30000);
+
 test("font and shortcut files only write isolated target roots and detect drift before removal", async () => {
   const path = join(root, "font-test.ttf"),
     target: EffectTarget = { kind: "file", path, font: true },
