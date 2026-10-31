@@ -116,6 +116,16 @@ piko source remove tools --force  # 只移除配置，软件与来源记录保�
 
 源是 Piko 清单格式，不兼容 Scoop bucket。Git 从固定 commit 读取，不 checkout 或运行仓库代码。源刷新失败直接报错，不使用过期缓存；移除源后更新需要恢复同一来源。
 
+## 模板包清单
+
+客户端同时支持原 `schemaVersion: 1` 完整清单和 `schemaVersion: 2` 多版本模板包；索引仍为 schema 1，不改变已安装状态格式。多个版本可在 `index.json` 中指向同一个 `packages/<name>/package.json`。客户端只解析已登记的版本，不凭 URL 模板猜测未校验版本。
+
+模板包包含 `recipes`（可复用的完整 schema 1 配方）和 `versions`（版本 → 配方引用、逐下载 SHA-256 及可选配额）。只在下载 URL、显式解压路径、命令路径和桌面入口路径中替换 `{version}`，各下载的 `{sha256}`／`{sha2562}` 按版本表填入；Shell、配置正文、环境、持久化和执行代码不做全局替换。展开后继续执行原有完整清单校验、配额与摘要校验。
+
+配方变化时在同一文件中保留独立 recipe，不改旧配方；迁移要求所有历史版本展开后的 `JSON.stringify` 及安装 `manifestHash` 完全一致。HTTP 和固定 Git commit 源均使用同一解析器。原格式源继续可用，但**旧客户端不能读取模板包源，须先升级客户端再刷新迁移后的源**。
+
+独立源已迁移为 47 个包文件，仍保留 58 个版本；普通版本更新只增加校验表条目，不增加清单文件。未启用按数量删旧版。
+
 ## 分发格式与声明式安装
 
 平台分发项的 `format` 支持 `file`、`zip`、`7z`、`tar`、`tar.gz`、`tar.xz`、`inno`、`msi` 和 `nsis`。后三者均只解包；`nsis` 必须明确选择内层归档，不执行安装器。单文件／单归档继续沿用现有 `url`、`sha256`、`format` 写法；`.tgz` 可声明为 `tar.gz`。

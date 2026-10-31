@@ -6,6 +6,7 @@ import {
 import { persistence, validateTemplates } from "./persistence.ts";
 import { validateShell } from "./shell-declarations.ts";
 import semver from "semver";
+import { resolveManifestDocument } from "./manifest-template.ts";
 import { validateEnv } from "./environment.ts";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -289,6 +290,7 @@ export function normalizeManifest(
   name: string,
   version: string,
 ): Manifest {
+  value = resolveManifestDocument(value, name, version);
   if (
     !record(value) ||
     value.schemaVersion !== 1 ||

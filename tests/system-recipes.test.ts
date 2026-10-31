@@ -4,12 +4,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { powershellExecutable } from "../src/windows.ts";
 import { capture, exists } from "../src/util.ts";
+import { normalizeManifest } from "../src/catalog.ts";
 
 test.skipIf(
   !(await exists(
     join(
       import.meta.dir,
-      "../../piko-source/packages/tortoise-svn/1.14.9.29743.json",
+      "../../piko-source/packages/tortoise-svn/package.json",
     ),
   )),
 )(
@@ -21,19 +22,23 @@ test.skipIf(
         ["flclash", "0.9.2"],
         ["tortoise-svn", "1.14.9.29743"],
       ]) {
-        const m = JSON.parse(
-          await readFile(
-            join(
-              import.meta.dir,
-              "../../piko-source/packages",
-              name!,
-              version + ".json",
+        const m = normalizeManifest(
+          JSON.parse(
+            await readFile(
+              join(
+                import.meta.dir,
+                "../../piko-source/packages",
+                name!,
+                "package.json",
+              ),
+              "utf8",
             ),
-            "utf8",
           ),
+          name!,
+          version!,
         );
-        const p = m.platforms["windows-x64"],
-          body = p.configFiles[p.admin.install.path];
+        const p = m.platforms["windows-x64"]!,
+          body = p.configFiles![p.admin!.install.path]!;
         expect(body).toContain("ownership");
         const path = join(dir, name + ".ps1");
         await writeFile(path, body);
