@@ -44,6 +44,8 @@ node scripts/bootstrap-bun.cjs
 
 ## 安装
 
+新电脑安装、默认获取最新稳定版和维护者发布步骤见 [安装与 Release 发布指南](INSTALL.md)。推送 `v<版本>` tag 后，CI 校验通过才创建 Release；安装脚本默认 `-Version latest`，不跟随未发布的源码。匿名在线安装要求发行仓库与软件源可公开访问，私有仓库请按指南使用认证下载。
+
 ```powershell
 .\dist\piko.exe setup          # 默认 %LOCALAPPDATA%\piko，不改 PATH
 .\dist\piko.exe setup --path   # 显式加入用户 PATH，不改系统 PATH
@@ -60,7 +62,7 @@ bun run release:check            # 解包、核对摘要、实际安装到临时
 .\install.ps1 -Sha256 <EXE_SHA256> -PikoHome D:\piko -Path
 ```
 
-发行物当前未签名；ZIP、EXE 各有摘要。打包不会上传，CI 配置不会自行发布；已有同版本发行目录时拒绝覆盖。
+发行物当前未签名；ZIP、EXE 各有摘要。本地打包不会上传；普通 push／PR 只校验，推送匹配源码版本的 `v<版本>` tag 后，CI 全部校验通过才发布 ZIP、ZIP 摘要和在线安装脚本。稳定版标为 Latest，预发布版不会替代 Latest；已有同版本发行目录时拒绝覆盖。
 
 ## 可读软件目录
 

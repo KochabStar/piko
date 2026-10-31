@@ -3,6 +3,8 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   verify:
     runs-on: windows-latest
@@ -10,13 +12,26 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '26.12.1'
+          node-version: "26.12.1"
       - name: Pin tested npm (CI environment only)
         run: npm install --global npm@11.20.0 --ignore-scripts
       - name: Bootstrap pinned Bun without lifecycle scripts
         run: |
           npm install --ignore-scripts --package-lock=false
           node scripts/bootstrap-bun.cjs
+      - name: Validate release tag against both version declarations
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$' -or
+              $env:GITHUB_REF_NAME -cne "v$version") {
+            throw 'Release tag must be v<package.json version>.'
+          }
+          $source = Get-Content src/version.ts -Raw
+          if ($source -cnotmatch ('^export const VERSION = "' + [regex]::Escape($version) + '";\s*$')) {
+            throw 'src/version.ts and package.json versions must match.'
+          }
       - name: Typecheck, build and regressions
         run: .\.tools\bun.exe run verify
       - name: Check formatting and Sandbox packaging (no Sandbox launch)
@@ -30,6 +45,39 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: piko-windows-x64-unsigned
+          if-no-files-found: error
           path: |
             dist/*.zip
             dist/*.sha256
+            install.ps1
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: piko-windows-x64-unsigned
+          path: release
+      - name: Publish verified assets (stable versions become Latest)
+        shell: bash
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          archive="piko-${version}-windows-x64.zip"
+          test -s install.ps1
+          (cd dist && sha256sum --check --strict "${archive}.sha256")
+          args=(release create "$RELEASE_TAG" --verify-tag --title "Piko $RELEASE_TAG" --generate-notes)
+          if [[ "$version" == *-* ]]; then
+            args+=(--prerelease --latest=false)
+          else
+            args+=(--latest)
+          fi
+          gh "${args[@]}" "dist/$archive" "dist/${archive}.sha256" install.ps1
