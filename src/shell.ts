@@ -320,13 +320,10 @@ export async function integrate(
   });
 }
 
-export async function shellInit(
-  store: Store,
-  path: string,
-  shell: "powershell" | "bash" = "powershell",
-): Promise<string> {
+async function assertShellSnapshotReady(store: Store): Promise<void> {
   for (const journal of [
     join(store.root, "operations", "persist.json"),
+    join(store.root, "operations", "layout.json"),
     join(store.root, "operations", "desktop.json"),
     profileJournal(store.root),
     store.installPath,
@@ -342,11 +339,62 @@ export async function shellInit(
         "Interrupted operation; run piko recover before Shell initialization",
       );
   }
-  if (await exists(join(store.root, "mutation.lock")))
-    fail("Piko mutation in progress; open a new Shell after it finishes");
+}
+
+// Source fetches and downloads may hold the writer lock for minutes. They do
+// not invalidate already committed, explicitly approved initializer content.
+// Compare only inputs used by shellContent; a source commit/revision alone is
+// not a change to selected executable content or approval.
+function shellSnapshot(state: State, path: string): string {
+  const profile = state.profiles?.[profileKey(path)];
+  const keys = new Set(Object.keys(profile?.approvals ?? {}));
+  const sourceAliases = new Set<string>();
+  for (const key of [...keys]) {
+    const selected = state.defaults[key];
+    const install = selected && state.installs[selected.id];
+    for (const dependency of install?.depends ?? []) {
+      const parsed = parseSpec(dependency.package);
+      if (parsed.source) sourceAliases.add(parsed.source);
+      const source = parsed.source
+        ? state.sources[parsed.source]
+        : install!.source;
+      if (source) keys.add(packageKey(source, parsed.name));
+    }
+  }
+  return JSON.stringify([
+    profile,
+    [...keys]
+      .sort()
+      .map((key) => [
+        key,
+        state.defaults[key],
+        state.defaults[key] && state.installs[state.defaults[key]!.id],
+      ]),
+    state.commands,
+    state.aliases,
+    [...sourceAliases]
+      .sort()
+      .map((alias) => [alias, state.sources[alias]?.identity]),
+  ]);
+}
+
+export async function shellInit(
+  store: Store,
+  path: string,
+  shell: "powershell" | "bash" = "powershell",
+): Promise<string> {
+  await assertShellSnapshotReady(store);
   const state = await store.read(),
     profile = state.profiles?.[profileKey(path)];
-  if (!profile) return "# No approved Piko Shell initializers";
+  if (!profile) {
+    const latest = await store.read();
+    await assertShellSnapshotReady(store);
+    if (shellSnapshot(latest, path) !== shellSnapshot(state, path))
+      fail(
+        "Piko Shell approvals changed during initialization; retry in a new Shell",
+      );
+    return "# No approved Piko Shell initializers";
+  }
   if ((profile.shell ?? "powershell") !== shell) fail("Profile Shell mismatch");
   const output: string[] = [];
   for (const [key, approval] of Object.entries(profile.approvals).sort()) {
@@ -399,10 +447,9 @@ export async function shellInit(
       );
     }
   }
-  if (
-    (await store.read()).revision !== state.revision ||
-    (await exists(join(store.root, "mutation.lock")))
-  )
+  const latest = await store.read();
+  await assertShellSnapshotReady(store);
+  if (shellSnapshot(latest, path) !== shellSnapshot(state, path))
     fail(
       "Piko state changed while preparing Shell initialization; retry in a new Shell",
     );

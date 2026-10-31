@@ -122,20 +122,24 @@ export class Packages {
         fail("State changed during inventory restore; preview again");
       if (Object.hasOwn(state.sources, source.alias))
         fail("Source already exists; remove it explicitly before replacing it");
+      report({ kind: "stage", label: "Refresh source", detail: source.alias });
       await refresh(this.root, source);
       state.sources[source.alias] = source;
     });
   }
   async refreshSources(alias?: string): Promise<void> {
-    await this.store.mutate(async (state) => {
-      const sources = alias
-        ? [state.sources[component(alias)] ?? fail("Unknown source")]
-        : Object.values(state.sources);
-      for (const s of sources) {
-        report({ kind: "stage", label: "Refresh source", detail: s.alias });
-        await refresh(this.root, s);
-      }
-    });
+    await this.store.mutate(
+      async (state) => {
+        const sources = alias
+          ? [state.sources[component(alias)] ?? fail("Unknown source")]
+          : Object.values(state.sources);
+        for (const s of sources) {
+          report({ kind: "stage", label: "Refresh source", detail: s.alias });
+          await refresh(this.root, s);
+        }
+      },
+      { skipUnchanged: true },
+    );
   }
   async removeSource(alias: string, force = false): Promise<void> {
     await this.store.mutate(async (state) => {
@@ -1054,6 +1058,7 @@ export class Packages {
     return installed;
   }
   async info(spec: string) {
+    report({ kind: "stage", label: "Load package information", detail: spec });
     const parsed = parseSpec(spec),
       state = await this.store.read();
     const installed = Object.values(state.installs).filter(
@@ -1103,6 +1108,11 @@ export class Packages {
         for (const source of Object.values(current.sources).filter(
           (s) => !parsed.source || s.alias === parsed.source,
         )) {
+          report({
+            kind: "stage",
+            label: "Refresh source",
+            detail: source.alias,
+          });
           const index = await refresh(this.root, source),
             entry = index.packages[parsed.name];
           if (entry) {

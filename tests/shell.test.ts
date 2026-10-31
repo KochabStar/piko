@@ -27,15 +27,17 @@ import {
   importInventory,
 } from "../src/inventory.ts";
 import { emptyState } from "../src/store.ts";
-import { sha256 } from "../src/util.ts";
+import { atomicJson, exists, sha256 } from "../src/util.ts";
 
 const work = await mkdtemp(join(tmpdir(), "piko-shell-中文-"));
 const bytes = Buffer.from("fixture, not an executable");
+let indexGate: Promise<void> | undefined;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
-  fetch(request): Response {
+  async fetch(request): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if (path === "/index.json" && indexGate) await indexGate;
     if (path === "/index.json")
       return Response.json({
         schemaVersion: 1,
@@ -180,6 +182,148 @@ test("Profile integration requires content-bound approval; install does not acti
     "approve integration again",
   );
   expect(await shellInit(p.store, profile)).not.toContain("function global:");
+});
+
+test("approved initialization remains available during a real stalled source refresh and never removes its lock", async () => {
+  const { p, profile } = await fixture();
+  const plan = await inspectIntegration(p.store, "main/consumer", profile);
+  await integrate(p.store, "main/consumer", profile, {
+    confirmed: true,
+    binding: plan.binding,
+  });
+  await p.use("main/consumer@1.0.0");
+  const before = await readFile(p.store.statePath);
+  let release!: () => void;
+  indexGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const refresh = p.refreshSources("main");
+  try {
+    for (
+      let n = 0;
+      n < 100 && !(await exists(join(p.root, "mutation.lock", "owner.json")));
+      n++
+    )
+      await Bun.sleep(5);
+    expect(await exists(join(p.root, "mutation.lock", "owner.json"))).toBe(
+      true,
+    );
+    const owner = await readFile(join(p.root, "mutation.lock", "owner.json"));
+    const content = await shellInit(p.store, profile);
+    expect(content).toContain("function global:PikoShellFixture");
+    expect(content).not.toContain("approve integration again");
+    expect(await readFile(join(p.root, "mutation.lock", "owner.json"))).toEqual(
+      owner,
+    );
+    expect(await readFile(p.store.statePath)).toEqual(before);
+    release();
+    await refresh;
+    expect(await readFile(p.store.statePath)).toEqual(before);
+  } finally {
+    indexGate = undefined;
+    release();
+    await refresh;
+  }
+  // A dead writer lock is not proof that approved executable content is invalid.
+  const lock = join(p.root, "mutation.lock");
+  await mkdir(lock);
+  await writeFile(
+    join(lock, "owner.json"),
+    JSON.stringify({ pid: 2147483647, started: "2000-01-01T00:00:00.000Z" }),
+  );
+  try {
+    expect(await shellInit(p.store, profile)).toContain(
+      "function global:PikoShellFixture",
+    );
+    expect(await exists(lock)).toBe(true);
+  } finally {
+    await rm(lock, { recursive: true });
+  }
+});
+
+test("initialization tolerates metadata revision changes, but rejects approval changes and pending destructive journals", async () => {
+  const { p, profile, root } = await fixture();
+  const plan = await inspectIntegration(p.store, "main/consumer", profile);
+  await integrate(p.store, "main/consumer", profile, {
+    confirmed: true,
+    binding: plan.binding,
+  });
+  await p.use("main/consumer@1.0.0");
+  const read = p.store.read.bind(p.store);
+  let count = 0;
+  p.store.read = async () => {
+    const state = await read();
+    if (++count === 2) {
+      state.revision++;
+      await atomicJson(p.store.statePath, state);
+    }
+    return state;
+  };
+  expect(await shellInit(p.store, profile)).toContain(
+    "function global:PikoShellFixture",
+  );
+  count = 0;
+  p.store.read = async () => {
+    const state = await read();
+    if (++count === 2) {
+      state.profiles![profileKey(profile)]!.approvals = {};
+    }
+    return state;
+  };
+  await expect(shellInit(p.store, profile)).rejects.toThrow("state changed");
+  p.store.read = read;
+  await mkdir(join(root, "operations"), { recursive: true });
+  for (const name of [
+    "selection.json",
+    "removal.json",
+    "npm-rebuild.json",
+    "data-removal.json",
+    "profile.json",
+    "desktop.json",
+    "persist.json",
+    "layout.json",
+    "self-update.json",
+    "install.json",
+  ]) {
+    const file = join(root, "operations", name);
+    await writeFile(file, "{}");
+    try {
+      await expect(shellInit(p.store, profile)).rejects.toThrow(
+        "Interrupted operation",
+      );
+    } finally {
+      await rm(file);
+    }
+  }
+  count = 0;
+  p.store.read = async () => {
+    const state = await read();
+    if (++count === 2) await writeFile(p.store.journalPath, "{}");
+    return state;
+  };
+  try {
+    await expect(shellInit(p.store, profile)).rejects.toThrow(
+      "Interrupted operation",
+    );
+  } finally {
+    p.store.read = read;
+    await rm(p.store.journalPath, { force: true });
+  }
+});
+
+test("source-only commits publish metadata without touching current links or selection journals", async () => {
+  const { p, profile } = await fixture();
+  const sync = p.store["syncCurrents"].bind(p.store);
+  p.store["syncCurrents"] = async () => {
+    throw new Error("Source metadata must not rewrite currents");
+  };
+  try {
+    await p.addSource("other", `http://127.0.0.1:${server.port}/`);
+  } finally {
+    p.store["syncCurrents"] = sync;
+  }
+  expect(await exists(p.store.journalPath)).toBe(false);
+  expect(await shellInit(p.store, profile)).toContain("No approved");
 });
 
 test("Shell dependency aliases use local source metadata and fail closed when missing or changed", async () => {

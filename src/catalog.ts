@@ -7,7 +7,7 @@ import { persistence, validateTemplates } from "./persistence.ts";
 import { validateShell } from "./shell-declarations.ts";
 import semver from "semver";
 import { validateEnv } from "./environment.ts";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
   download,
@@ -21,6 +21,7 @@ import {
   capture,
   exists,
   noLinks,
+  atomicJson,
 } from "./util.ts";
 import { sourceIdentity } from "./store.ts";
 import type {
@@ -184,7 +185,7 @@ export async function refresh(root: string, s: Source): Promise<Index> {
         8 * 1024 * 1024,
       ),
       i = normalizeIndex(JSON.parse(Buffer.from(bytes).toString("utf8")));
-    await writeFile(join(dir, "index.json"), bytes);
+    await atomicJson(join(dir, "index.json"), i);
     return i;
   }
   if (!Bun.which("git"))
@@ -232,7 +233,7 @@ export async function refresh(root: string, s: Source): Promise<Index> {
     { env },
   );
   const i = normalizeIndex(JSON.parse(text));
-  await writeFile(join(dir, "index.json"), text);
+  await atomicJson(join(dir, "index.json"), i);
   return i;
 }
 export function distributionDownloads(platform: Distribution): Download[] {

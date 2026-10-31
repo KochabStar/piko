@@ -110,9 +110,9 @@ test("cached HTTP and Git search is offline, read-only and lock-free; explicit r
     await mkdir(join(root, "mutation.lock"));
     try {
       expect((await p.search("tool")).length).toBe(2);
-      await expect(
-        shellInit(p.store, join(root, "profile.ps1")),
-      ).rejects.toThrow("mutation in progress");
+      expect(await shellInit(p.store, join(root, "profile.ps1"))).toContain(
+        "No approved",
+      );
       expect(await exists(join(root, "mutation.lock"))).toBe(true);
     } finally {
       await rm(join(root, "mutation.lock"), { recursive: true });

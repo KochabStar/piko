@@ -1,5 +1,12 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile, readFile, access } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  rm,
+  writeFile,
+  readFile,
+  access,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { sha256 } from "../src/util.ts";
@@ -164,21 +171,32 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
     "--binding",
     plan.binding,
   ]);
-  for (const shell of ["powershell", "pwsh"] as const) {
-    if (shell === "pwsh" && !Bun.which("pwsh.exe")) continue;
-    const out = await runExe(
-      powershellExecutable(shell),
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `. ${psQuote(profile)}; PikoFixtureFunction; if ($env:PIKO_HOME -ne ${psQuote(resolve(root, "unrelated"))}) { throw 'PIKO_HOME leaked' }`,
-      ],
-      0,
-      { PIKO_HOME: resolve(root, "unrelated") },
-    );
-    expect(out).toBe("shell-function-ok");
+  const lock = join(home, "mutation.lock");
+  await mkdir(lock);
+  await writeFile(
+    join(lock, "owner.json"),
+    JSON.stringify({ pid: process.pid, started: new Date().toISOString() }),
+  );
+  try {
+    for (const shell of ["powershell", "pwsh"] as const) {
+      if (shell === "pwsh" && !Bun.which("pwsh.exe")) continue;
+      const out = await runExe(
+        powershellExecutable(shell),
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `. ${psQuote(profile)}; PikoFixtureFunction; if ($env:PIKO_HOME -ne ${psQuote(resolve(root, "unrelated"))}) { throw 'PIKO_HOME leaked' }`,
+        ],
+        0,
+        { PIKO_HOME: resolve(root, "unrelated") },
+      );
+      expect(out).toBe("shell-function-ok");
+    }
+    await access(join(lock, "owner.json"));
+  } finally {
+    await rm(lock, { recursive: true });
   }
   const bash = [
     Bun.which("bash.exe"),

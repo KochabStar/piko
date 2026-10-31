@@ -186,7 +186,7 @@ export function activityLine(
       parts.push({ text: plainText(state.speed), tone: "muted" });
     if (state.eta && pct && limit >= 120)
       parts.push({ text: `${sep} ${plainText(state.eta)}`, tone: "muted" });
-  } else if (state.detail && limit >= 90)
+  } else if (state.detail && limit >= 60)
     parts.push({
       text: fitText(state.detail, Math.floor(limit / 3)),
       tone: "muted",

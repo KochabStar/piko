@@ -1068,6 +1068,22 @@ export class Store {
     validateState(after);
     await checkStartMenu(startMenu, backend);
     if (await exists(this.journalPath)) fail("Unrecovered selection operation");
+    // Source metadata does not switch executables, currents or approved Shell
+    // content. Publish it atomically without creating a selection journal or
+    // repairing every command while a slow source refresh holds the writer lock.
+    if (
+      !startMenuRepairKeys.length &&
+      JSON.stringify(before.sources) !== JSON.stringify(after.sources) &&
+      JSON.stringify({
+        ...before,
+        sources: after.sources,
+        revision: after.revision,
+        schemaVersion: after.schemaVersion,
+      }) === JSON.stringify(after)
+    ) {
+      await atomicJson(this.statePath, after);
+      return;
+    }
     for (const name of commandNames(after)) await ensureShim(this.root, name);
     await atomicJson(this.journalPath, {
       before,

@@ -5,7 +5,7 @@ import {
   selfUpdateStatus,
   launchSelfUpdater,
 } from "./self-update.ts";
-import { ProgressRenderer, withProgress } from "./progress.ts";
+import { ProgressRenderer, report, withProgress } from "./progress.ts";
 import {
   humanOutput,
   installedRows,
@@ -251,7 +251,25 @@ async function main(): Promise<number> {
       verbose: values.verbose,
     });
     try {
-      const result = await withProgress(renderer.event, fn);
+      const result = await withProgress(renderer.event, async () => {
+        report({
+          kind: "stage",
+          label:
+            (
+              {
+                source: "Connecting to source",
+                search: "Searching packages",
+                info: "Loading package information",
+                install: "Preparing installation",
+                i: "Preparing installation",
+                update: "Checking updates",
+                outdated: "Checking updates",
+                status: "Checking updates",
+              } as Record<string, string>
+            )[args[0]!] ?? "Working",
+        });
+        return await fn();
+      });
       renderer.close(
         !Array.isArray(result) ||
           !result.some((r) => r && ["failed", "blocked"].includes(r.status)),
@@ -377,7 +395,9 @@ async function main(): Promise<number> {
             values.type ?? (required(3).endsWith(".git") ? "git" : "http");
           if (type !== "git" && type !== "http")
             fail("Source type must be http or git");
-          await packages.addSource(required(2), required(3), type, values.ref);
+          await task(() =>
+            packages.addSource(required(2), required(3), type, values.ref),
+          );
           console.log("Source added");
           break;
         }

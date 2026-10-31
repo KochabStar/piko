@@ -13,6 +13,7 @@ import {
   type ProgressEvent,
 } from "../src/progress.ts";
 import { updateTable } from "../src/display.ts";
+import { Packages } from "../src/packages.ts";
 
 const work = await mkdtemp(join(tmpdir(), "piko-progress-"));
 const native = await readFile(
@@ -178,6 +179,89 @@ test("compact rendering leaves no stage/result transcript for a batch, while kee
   expect(out).not.toContain("Commit installation");
 });
 
+test("slow source refresh keeps dot animation alive without verbose logs and always stops on close", async () => {
+  let out = "";
+  const ui = new ProgressRenderer({
+    write: (s) => {
+      out += s;
+    },
+    tty: true,
+    color: false,
+    columns: 80,
+  });
+  try {
+    ui.event({ kind: "stage", label: "Refresh source", detail: "main" });
+    expect(out).toContain("Refreshing source");
+    expect(out).toContain("main");
+    const initial = out;
+    await Bun.sleep(400);
+    expect(out.length).toBeGreaterThan(initial.length);
+    expect(out).toMatch(/[⠋⠙⠹⠸]/);
+    expect(out).not.toContain("\n");
+    expect(out).not.toContain("%");
+    ui.close(false);
+    const closed = out;
+    await Bun.sleep(180);
+    ui.event({ kind: "stage", label: "ignored" });
+    expect(out).toBe(closed);
+    expect(out.endsWith("\r\x1b[2K")).toBe(true);
+  } finally {
+    ui.close(false);
+  }
+  let plain = "";
+  const log = new ProgressRenderer({
+    write: (s) => {
+      plain += s;
+    },
+    tty: false,
+    color: false,
+  });
+  log.event({ kind: "stage", label: "Refresh source", detail: "main" });
+  log.close(true);
+  expect(plain).toBe("");
+});
+
+test("source refresh emits its waiting stage before network headers arrive", async () => {
+  let delay = false,
+    requested = false,
+    release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slow = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(): Promise<Response> {
+      requested = true;
+      if (delay) await gate;
+      return Response.json({ schemaVersion: 1, packages: {} });
+    },
+  });
+  const p = new Packages(join(work, "source-wait"));
+  try {
+    await p.addSource("main", `http://127.0.0.1:${slow.port}/`);
+    delay = true;
+    requested = false;
+    const events: ProgressEvent[] = [];
+    const pending = withProgress(
+      (e) => events.push(e),
+      () => p.refreshSources("main"),
+    );
+    for (let i = 0; i < 100 && !requested; i++) await Bun.sleep(5);
+    expect(requested).toBe(true);
+    expect(events).toContainEqual({
+      kind: "stage",
+      label: "Refresh source",
+      detail: "main",
+    });
+    release!();
+    await pending;
+  } finally {
+    release!();
+    slow.stop(true);
+  }
+});
+
 test("range progress deduplicates out-of-order overlapping transfers and retries", () => {
   const ranges = new TransferRanges();
   expect(ranges.add(100, 100)).toBe(100);
@@ -254,6 +338,32 @@ test("compiled CLI progress stays on stderr; JSON, pipes, CI and no-progress rem
   };
   expect(
     (await run(["source", "add", "main", `http://127.0.0.1:${server.port}/`]))
+      .err,
+  ).toBe("");
+  const refresh = await run([
+    "source",
+    "refresh",
+    "main",
+    "--progress",
+    "always",
+  ]);
+  expect(refresh.out).toBe("Sources refreshed\n");
+  expect(refresh.err).toBe("");
+  const refreshVerbose = await run([
+    "source",
+    "refresh",
+    "main",
+    "--progress",
+    "always",
+    "--verbose",
+  ]);
+  expect(refreshVerbose.err).toContain("Refresh source");
+  expect(refreshVerbose.err).toContain("main");
+  expect((await run(["source", "refresh", "main", "--no-progress"])).err).toBe(
+    "",
+  );
+  expect(
+    (await run(["source", "refresh", "main", "--json", "--progress", "always"]))
       .err,
   ).toBe("");
   const installed = await run([

@@ -96,6 +96,10 @@ export class ProgressRenderer {
     if (this.options.tty) {
       const stage =
         {
+          "Refresh source": "Refreshing source",
+          "Load manifest": "Loading manifest",
+          "Check available updates": "Checking updates",
+          "Resolve update candidate": "Checking version",
           "Extract archive": "Extracting",
           "Commit installation": "Installing",
           "Switch selected version": "Selecting",
@@ -125,19 +129,6 @@ export class ProgressRenderer {
       if (event.label === "Resolve package" && !this.position)
         this.packageName = cleanText(event.detail ?? "");
       this.transfer = undefined;
-      if (
-        !this.options.verbose &&
-        ![
-          "Download",
-          "Extract archive",
-          "Commit installation",
-          "Switch selected version",
-        ].includes(event.label)
-      ) {
-        if (this.options.tty && this.active) this.options.write("\r\x1b[2K");
-        this.active = "";
-        return;
-      }
       this.finishStage();
       this.active = cleanText(event.label);
       this.detail = cleanText(event.detail ?? "");
