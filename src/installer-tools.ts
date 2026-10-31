@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { artifactBytes } from "./cache.ts";
+import { report } from "./progress.ts";
 import { extractZip } from "./artifacts.ts";
 import { ensureSevenZip } from "./helpers.ts";
 import { helperOutput } from "./helpers-process.ts";
@@ -86,9 +87,11 @@ export async function ensureInstallerTool(
     await verify(directory, release.files);
     return executable;
   }
-  console.error(
-    `Preparing verified private ${kind} ${release.version} (no installer execution or default changes)`,
-  );
+  report({
+    kind: "stage",
+    label: `Prepare verified ${kind}`,
+    detail: release.version,
+  });
   const staging = join(root, "staging");
   await noLinks(staging);
   await mkdir(staging, { recursive: true });

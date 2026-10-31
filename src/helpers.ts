@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { extractZip } from "./artifacts.ts";
 import { artifactBytes } from "./cache.ts";
+import { report } from "./progress.ts";
 import { helperOutput, installedHelper } from "./helpers-process.ts";
 import { exists, fail, noLinks, removeTree, sha256 } from "./util.ts";
 import type { State } from "./types.ts";
@@ -48,9 +49,11 @@ export async function ensureInnoUnpacker(
       fail("Inno unpacker helper checksum mismatch; inspect before retrying");
     return executable;
   }
-  console.error(
-    `Preparing verified Inno unpacker ${innoRelease.version} helper (no default or command ownership changes)`,
-  );
+  report({
+    kind: "stage",
+    label: "Prepare verified Inno unpacker",
+    detail: innoRelease.version,
+  });
   const staging = join(root, "staging");
   await noLinks(staging);
   await mkdir(staging, { recursive: true });
@@ -108,9 +111,11 @@ export async function ensureSevenZip(
       );
     return executable;
   }
-  console.error(
-    `Preparing verified 7-Zip ${sevenZipRelease.version} helper (no default or command ownership changes)`,
-  );
+  report({
+    kind: "stage",
+    label: "Prepare verified 7-Zip",
+    detail: sevenZipRelease.version,
+  });
   const staging = join(root, "staging");
   await noLinks(staging);
   await mkdir(staging, { recursive: true });

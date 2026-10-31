@@ -46,6 +46,7 @@ export class ProgressRenderer {
       tty: boolean;
       color: boolean;
       columns?: number;
+      verbose?: boolean;
       now?: () => number;
     },
   ) {}
@@ -72,7 +73,7 @@ export class ProgressRenderer {
     this.options.write("\r\x1b[2K" + this.color(result, 36));
   }
   private finishStage() {
-    if (!this.options.tty || !this.active) return;
+    if (!this.options.verbose || !this.options.tty || !this.active) return;
     this.options.write(
       "\r\x1b[2K" +
         this.color(`  + ${this.active}`, 32) +
@@ -93,6 +94,19 @@ export class ProgressRenderer {
     if (this.closed) return;
     this.seen = true;
     if (event.kind === "stage") {
+      if (
+        !this.options.verbose &&
+        ![
+          "Download",
+          "Extract archive",
+          "Commit installation",
+          "Switch selected version",
+        ].includes(event.label)
+      ) {
+        if (this.options.tty && this.active) this.options.write("\r\x1b[2K");
+        this.active = "";
+        return;
+      }
       this.finishStage();
       this.active = cleanText(event.label);
       this.detail = cleanText(event.detail ?? "");
@@ -104,9 +118,9 @@ export class ProgressRenderer {
           this.clock.unref();
         }
         this.draw(true);
-      } else
+      } else if (this.options.verbose || this.active === "Download")
         this.options.write(
-          `  > ${this.item}${this.active}${this.detail ? "  " + this.detail : ""}\n`,
+          `  > ${this.options.verbose ? this.item : ""}${this.active}${this.options.verbose && this.detail ? "  " + this.detail : ""}\n`,
         );
     } else if (event.kind === "item") {
       this.item = `[${event.index}/${event.total}] ${cleanText(event.package)}  `;
@@ -115,12 +129,13 @@ export class ProgressRenderer {
         if (!event.failed) this.finishStage();
         this.options.write("\r\x1b[2K");
       }
-      this.options.write(
-        this.color(
-          `  ${event.failed ? "!" : "+"} ${cleanText(event.label)}`,
-          event.failed ? 31 : 32,
-        ) + "\n",
-      );
+      if (this.options.verbose)
+        this.options.write(
+          this.color(
+            `  ${event.failed ? "!" : "+"} ${cleanText(event.label)}`,
+            event.failed ? 31 : 32,
+          ) + "\n",
+        );
       this.active = "";
     } else {
       const seconds = Math.max(0.001, (this.now() - this.started) / 1000);
@@ -139,7 +154,10 @@ export class ProgressRenderer {
           : `[${"=".repeat(Math.floor(percent / 10))}${"-".repeat(10 - Math.floor(percent / 10))}] ${percent}%  `;
       this.detail = `${bar}${formatBytes(event.received)}${total ? " / " + formatBytes(total) : ""}  ${formatBytes(speed)}/s${total && speed > 0 && !event.complete ? "  ETA " + Math.ceil((total - event.received) / speed) + "s" : ""}`;
       if (this.options.tty) this.draw(!!event.complete);
-      else if (event.complete || this.now() - this.last >= 2000) {
+      else if (
+        event.complete ||
+        (this.options.verbose && this.now() - this.last >= 2000)
+      ) {
         this.last = this.now();
         this.options.write(`    ${this.detail}\n`);
       }
@@ -152,12 +170,13 @@ export class ProgressRenderer {
     if (!this.seen) return;
     if (success) this.finishStage();
     if (this.options.tty) this.options.write("\r\x1b[2K");
-    this.options.write(
-      this.color(
-        success ? "  + Completed" : "  ! Failed; see error details below",
-        success ? 32 : 31,
-      ) + "\n",
-    );
+    if (this.options.verbose)
+      this.options.write(
+        this.color(
+          success ? "  + Completed" : "  ! Failed; see error details below",
+          success ? 32 : 31,
+        ) + "\n",
+      );
   }
 }
 

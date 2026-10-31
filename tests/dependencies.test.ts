@@ -380,7 +380,10 @@ test("compiled CLI reports dependencies and rejects missing ones without modifyi
     ]);
     return { out, error, code };
   };
-  const info = await run(["info", "main/consumer@1.0.0"]);
+  const summary = await run(["info", "main/consumer@1.0.0"]);
+  expect(summary.out).toContain("Dependency: main/runtime@1.0 (unmet)");
+  expect(summary.out).toContain("piko install main/runtime@1.0");
+  const info = await run(["info", "main/consumer@1.0.0", "--json"]);
   expect(info.code).toBe(0);
   expect(JSON.parse(info.out).available[0].dependencies[0].satisfied).toBe(
     false,
@@ -394,8 +397,8 @@ test("compiled CLI reports dependencies and rejects missing ones without modifyi
   await p.use("main/runtime@1.0.0");
   expect((await run(["install", "main/consumer@1.0.0"])).code).toBe(0);
   expect(
-    JSON.parse((await run(["info", "main/consumer@1.0.0"])).out).available[0]
-      .dependencies[0].satisfied,
+    JSON.parse((await run(["info", "main/consumer@1.0.0", "--json"])).out)
+      .available[0].dependencies[0].satisfied,
   ).toBe(true);
 });
 

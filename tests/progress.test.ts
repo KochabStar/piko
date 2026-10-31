@@ -80,6 +80,7 @@ test("progress rendering is bounded, sanitized, throttled and explicitly complet
     tty: true,
     color: false,
     columns: 140,
+    verbose: true,
     now: () => now,
   });
   try {
@@ -118,6 +119,7 @@ test("progress rendering is bounded, sanitized, throttled and explicitly complet
     },
     tty: false,
     color: false,
+    verbose: true,
     now: () => now,
   });
   logs.event({ kind: "item", package: "main/tool", index: 1, total: 3 });
@@ -132,6 +134,48 @@ test("progress rendering is bounded, sanitized, throttled and explicitly complet
   expect(plain).not.toContain("Completed");
   expect(formatBytes(1024 * 1024)).toBe("1.0 MiB");
   expect(cleanText("x\u202ey")).toBe("x?y");
+});
+
+test("compact rendering leaves no stage/result transcript for a batch, while keeping live download progress", () => {
+  let out = "";
+  const ui = new ProgressRenderer({
+    write: (s) => {
+      out += s;
+    },
+    tty: true,
+    color: false,
+    columns: 100,
+  });
+  try {
+    for (let i = 1; i <= 46; i++) {
+      ui.event({ kind: "item", package: "main/tool", index: i, total: 46 });
+      ui.event({ kind: "stage", label: "Resolve package" });
+      ui.event({ kind: "stage", label: "Keep pinned version" });
+      ui.event({ kind: "result", label: "main/tool@1: unchanged" });
+    }
+    ui.close(true);
+    expect(out).not.toContain("\n");
+    expect(out).not.toContain("Completed");
+  } finally {
+    ui.close(false);
+  }
+  out = "";
+  const log = new ProgressRenderer({
+    write: (s) => {
+      out += s;
+    },
+    tty: false,
+    color: false,
+  });
+  log.event({ kind: "stage", label: "Resolve package" });
+  log.event({ kind: "stage", label: "Download" });
+  log.event({ kind: "download", received: 10, total: 20 });
+  log.event({ kind: "download", received: 20, total: 20, complete: true });
+  log.event({ kind: "stage", label: "Commit installation" });
+  log.close(true);
+  expect(out.trim().split("\n").length).toBe(2);
+  expect(out).toContain("100%");
+  expect(out).not.toContain("Commit installation");
 });
 
 test("range progress deduplicates out-of-order overlapping transfers and retries", () => {
@@ -217,6 +261,7 @@ test("compiled CLI progress stays on stderr; JSON, pipes, CI and no-progress rem
     "main/tool@1",
     "--progress",
     "always",
+    "--verbose",
   ]);
   expect(installed.err).toContain("Resolve package");
   expect(installed.err).toContain("Download");
@@ -241,9 +286,44 @@ test("compiled CLI progress stays on stderr; JSON, pipes, CI and no-progress rem
   expect((await run(["install", "main/tool@1"])).err).toBe("");
   await run(["use", "main/tool@1.0.0"]);
   const update = await run(["update", "--all", "--progress", "always"]);
-  expect(update.err).toContain("[1/1] main/tool");
-  expect(update.err).toContain("Keep pinned version");
-  expect(update.out).toContain("unchanged");
+  expect(update.err).toBe("");
+  expect(update.out).toBe("All packages are up to date.\n");
+  expect(update.out).not.toContain("PACKAGE");
+  const verbose = await run([
+    "update",
+    "--all",
+    "--progress",
+    "always",
+    "--verbose",
+  ]);
+  expect(verbose.err).toContain("Keep pinned version");
+  expect(verbose.out).toContain("PACKAGE");
+  const status = await run(["status"]);
+  expect(status.out).toBe("All packages are up to date.\n");
+  expect((await run(["source", "list"])).out).toContain("SOURCE");
+  expect(
+    JSON.parse((await run(["source", "list", "--json"])).out)[0].alias,
+  ).toBe("main");
+  expect((await run(["command", "list"])).out).toContain("COMMAND");
+  expect(
+    JSON.parse((await run(["command", "list", "--json"])).out)[0].name,
+  ).toBe("tool");
+  const info = await run(["info", "main/tool"]);
+  expect(info.out).toContain("Latest: 1.0.0");
+  expect(info.out).not.toContain("manifestHash");
+  const conciseInstall = await run([
+    "install",
+    "main/tool@1",
+    "--progress",
+    "always",
+  ]);
+  expect(conciseInstall.err).toBe("");
+  expect((await run(["cache", "list"])).out).not.toContain("cache\\artifacts");
+  expect(
+    JSON.parse((await run(["info", "main/tool", "--json"])).out).available[0]
+      .latest,
+  ).toBe("1.0.0");
+  expect((await run(["cache", "list"])).out).toContain("REMOVABLE");
   const updateJson = await run(["update", "--all", "--json"]);
   expect(JSON.parse(updateJson.out)[0].status).toBe("unchanged");
   expect(updateJson.err).toBe("");
@@ -251,11 +331,19 @@ test("compiled CLI progress stays on stderr; JSON, pipes, CI and no-progress rem
     ["install", "main/absent", "--progress", "always"],
     1,
   );
-  expect(failure.err).toContain("Failed");
+  expect(failure.err).toContain("Package not found");
   expect(failure.err).not.toContain("Completed");
   expect((await run(["list", "--progress", "bad"], 1)).err).toContain(
     "auto, always or never",
   );
+  await run(["source", "remove", "main", "--force"]);
+  const blocked = await run(["update", "--all", "--progress", "always"], 1);
+  expect(blocked.out).toContain("main/tool");
+  expect(blocked.out).toContain("failed");
+  expect(blocked.out).toContain("Original source is not configured");
+  expect(blocked.out).not.toContain("up to date");
+  const failedJson = await run(["update", "--all", "--json"], 1);
+  expect(JSON.parse(failedJson.out)[0].status).toBe("failed");
 });
 
 test("update summary preserves failed/blocked reasons and pins without color injection", () => {
@@ -272,5 +360,39 @@ test("update summary preserves failed/blocked reasons and pins without color inj
   ]);
   expect(out).toContain("1 -> 2");
   expect(out).toContain("approval required?next");
-  expect(out).toContain("1 blocked; 1 unchanged");
+  expect(out).toContain("1 blocked.");
+  expect(out).not.toContain("unchanged");
+  expect(
+    updateTable([
+      {
+        package: "main/new",
+        version: "2",
+        status: "updated",
+        request: "latest",
+      },
+      { package: "main/same", version: "1", status: "unchanged", request: "1" },
+    ]),
+  ).toBe("main/new (2): updated\n\n1 updated.");
+  expect(out).not.toContain("main/other");
+  expect(out.match(/approval required/g)?.length).toBe(1);
+  expect(
+    updateTable(
+      Array.from({ length: 46 }, (_, i) => ({
+        package: `main/tool-${i}`,
+        version: "1",
+        status: "unchanged",
+        request: "1",
+      })),
+    ),
+  ).toBe("All packages are up to date.");
+  expect(
+    updateTable([
+      {
+        package: "main/tool",
+        version: "2",
+        status: "updated",
+        request: "latest",
+      },
+    ]),
+  ).toBe("main/tool (2): updated\n\n1 updated.");
 });

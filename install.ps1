@@ -209,7 +209,7 @@ try {
     $installedVersion = (Invoke-Piko $target @('--version') | Out-String).Trim()
     if ($installedVersion -cne $metadata.version) { throw 'Installed Piko version does not match release metadata.' }
     if (-not $NoSource) {
-        $sources = (Invoke-Piko $target @('source', 'list') | Out-String) | ConvertFrom-Json
+        $sources = (Invoke-Piko $target @('source', 'list', '--json') | Out-String) | ConvertFrom-Json
         $existing = @($sources | Where-Object { $_.alias -eq $SourceName })
         if ($existing.Count) {
             if ($existing.Count -ne 1 -or $existing[0].type -ne $SourceType -or

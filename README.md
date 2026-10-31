@@ -273,18 +273,20 @@ piko uninstall main/node@26.12.1
 
 交互终端中，安装和更新使用单行动态进度，显示当前包、解析源／清单、依赖检查、下载、SHA-256 校验、解压和提交阶段。内置下载器与 aria2 均报告已接收字节、平均速度；有可信总大小时显示百分比和估算剩余时间，无总大小时不猜测百分比。aria2 重试与重叠分段按唯一字节区间计数；下载结束仅代表传输完成，后续仍须校验与安装成功。命中缓存时显示缓存校验，不伪装为重新下载。npm 子进程显示安装／完整性核验阶段，不编造字节进度。
 
-`update --all` 显示 `[当前/总数]` 和逐包结果，结束后用表格汇总 updated／unchanged／failed；`outdated`、`status` 和更新预览也使用表格，保留固定版本、阻塞原因。精确版本请求仍保持固定，不因界面改动自动升级。
+默认使用精简输出：`update --all` 只在一行动态显示当前包／阶段，真正更新或失败的包各显示一条最终结果；未变化、已固定和已是最新的包不显示、不计入默认摘要；没有实际更新或错误时仅输出 `All packages are up to date.`，不再重复打印结果表格或 Completed。`outdated`、`status` 和更新预览同样只展开有变化／受阻的条目。`--verbose` 才保留全部阶段日志、完整包表和原因。精确版本请求仍保持固定，不因界面改动自动升级。
+
+`info` 默认显示来源、最新／请求版本、依赖问题和已安装版本，不输出完整收据；`source list`、`command list` 使用精简表格，`cache list` 按缓存类别汇总数量，`--verbose` 再展开路径／版本明细。搜索和列表不再重复打印每次相同的使用提示。执行代码、数据删除、系统集成等审批预览和恢复协议保持原样，安全警告及失败原因不省略。
 
 - 进度写 stderr，最终结果写 stdout。默认在管道、重定向、CI 或 `TERM=dumb` 环境中关闭动态进度，避免转义字符污染日志。
-- `--progress always` 可在重定向环境输出纯文本阶段日志；`--progress never`／`--no-progress` 关闭进度。
+- `--progress always` 可在重定向环境输出纯文本下载进度；配合 `--verbose` 输出全部阶段日志。`--progress never`／`--no-progress` 关闭进度。
 - `--color auto|always|never` 控制交互终端配色；`--no-color` 和 `NO_COLOR` 优先禁用颜色，关闭颜色不影响进度信息。
-- `install`、`update`、`outdated`、`status`、`list`、`search` 支持 `--json`。该选项关闭进度，只在 stdout 输出 JSON；安全警告与错误仍会写 stderr。其他审批／恢复命令保留既有输出协议。
+- `install`、`update`、`outdated`、`status`、`list`、`search`、`info`、`source list`、`command list`、`cache list` 支持 `--json`。该选项关闭进度，在 stdout 保留原始结构化数据（含未变化的包）；安全警告与错误仍会写 stderr。解析列表的脚本必须使用 `--json`，新机引导脚本已同步。其他审批／恢复命令保留既有输出协议。
 
 ```powershell
 piko install main/node@latest
 piko update --all
 piko update --all --dry-run --json
-piko install main/node@latest --progress always 2>install.log
+piko install main/node@latest --progress always --verbose 2>install.log
 piko search node --no-color
 ```
 

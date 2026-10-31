@@ -127,13 +127,14 @@ test("compiled cleanup CLI previews and requires --data plus explicit non-intera
     (await run(["cleanup", "main/saved", "--data", "--yes"], 1)).err,
   ).toContain("installed");
   expect(
-    JSON.parse((await run(["info", "main/saved"])).out).available[0].latest,
+    JSON.parse((await run(["info", "main/saved", "--json"])).out).available[0]
+      .latest,
   ).toBe("1.0.0");
   expect(
     JSON.parse((await run(["update", "--all", "--dry-run", "--json"])).out),
   ).toEqual([]);
   expect(
-    JSON.parse((await run(["cache", "list"])).out).some(
+    JSON.parse((await run(["cache", "list", "--json"])).out).some(
       (e: any) => e.kind === "artifacts",
     ),
   ).toBe(true);

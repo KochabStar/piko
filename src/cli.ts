@@ -10,6 +10,8 @@ import {
   humanOutput,
   installedRows,
   installedTable,
+  sourceTable,
+  infoSummary,
   table,
   updateTable,
 } from "./display.ts";
@@ -91,7 +93,8 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko doctor
 
 PIKO_HOME overrides the user installation root.
-Output: --json for scripts; --progress auto|always|never (or --no-progress).
+Output: concise by default; --verbose for detailed stages; --json for scripts.
+Progress: --progress auto|always|never (or --no-progress).
 Color: --color auto|always|never; --no-color and NO_COLOR disable color.
 Dynamic progress only in interactive terminals; --progress always emits plain logs when redirected.
 Install does not select a default. current is a junction, not a copy.
@@ -234,6 +237,7 @@ async function main(): Promise<number> {
         values.color !== "never" &&
         (values.color === "always" || process.env.TERM !== "dumb"),
       columns: process.stderr.columns,
+      verbose: values.verbose,
     });
     try {
       const result = await withProgress(renderer.event, fn);
@@ -366,15 +370,15 @@ async function main(): Promise<number> {
           console.log("Source added");
           break;
         }
-        case "list":
-          console.log(
-            JSON.stringify(
-              Object.values((await packages.store.read()).sources),
-              null,
-              2,
-            ),
+        case "list": {
+          const sources = Object.values((await packages.store.read()).sources);
+          show(
+            values.json
+              ? JSON.stringify(sources, null, 2)
+              : sourceTable(sources, values.verbose),
           );
           break;
+        }
         case "refresh":
           await task(() => packages.refreshSources(args[2]));
           console.log("Sources refreshed");
@@ -585,17 +589,19 @@ async function main(): Promise<number> {
       );
       break;
     }
-    case "info":
-      console.log(
-        JSON.stringify(
-          await packages.info(
-            await packages.runtimeSpec(required(1), values.distribution),
-          ),
-          null,
-          2,
+    case "info": {
+      const info = await task(async () =>
+        packages.info(
+          await packages.runtimeSpec(required(1), values.distribution),
         ),
       );
+      show(
+        values.json
+          ? JSON.stringify(info, null, 2)
+          : infoSummary(info, values.verbose),
+      );
       break;
+    }
     case "persist": {
       const { planPersist, applyPersist, recoverPersist } =
         await import("./data-profiles.ts");
@@ -677,7 +683,36 @@ async function main(): Promise<number> {
           : await packages.store.mutate((s) =>
               cleanCache(root, s, !values["dry-run"] && !!values.yes),
             );
-      console.log(JSON.stringify(result, null, 2));
+      if (action === "list" && !values.json) {
+        const kinds = [...new Set(result.map((entry) => entry.kind))].sort();
+        show(
+          result.length
+            ? values.verbose
+              ? table(
+                  ["KIND", "REMOVABLE", "PATH"],
+                  result.map((entry) => [
+                    entry.kind,
+                    entry.removable ? "yes" : "no",
+                    entry.path,
+                  ]),
+                )
+              : table(
+                  ["KIND", "ENTRIES", "REMOVABLE"],
+                  kinds.map((kind) => [
+                    kind,
+                    String(
+                      result.filter((entry) => entry.kind === kind).length,
+                    ),
+                    String(
+                      result.filter(
+                        (entry) => entry.kind === kind && entry.removable,
+                      ).length,
+                    ),
+                  ]),
+                )
+            : "Cache is empty.",
+        );
+      } else console.log(JSON.stringify(result, null, 2));
       break;
     }
     case "search": {
@@ -694,8 +729,7 @@ async function main(): Promise<number> {
             ? table(
                 ["PACKAGE", "LATEST"],
                 results.map((i) => [`${i.source}/${i.name}`, i.latest]),
-              ) +
-              `\n\n${results.length} match(es). Cached indexes; use --refresh to fetch updates.`
+              ) + `\n\n${results.length} match(es). `
             : "No packages match in cached indexes. Use --refresh to fetch updates.",
       );
       break;
@@ -824,7 +858,11 @@ async function main(): Promise<number> {
             : undefined,
         ),
       );
-      show(values.json ? JSON.stringify(result, null, 2) : updateTable(result));
+      show(
+        values.json
+          ? JSON.stringify(result, null, 2)
+          : updateTable(result, { verbose: values.verbose }),
+      );
       if (result.some((r) => r.status === "blocked")) return 1;
       break;
     }
@@ -878,7 +916,11 @@ async function main(): Promise<number> {
           packages.updateAll(!!values["dry-run"]),
         );
         show(
-          values.json ? JSON.stringify(result, null, 2) : updateTable(result),
+          values.json
+            ? JSON.stringify(result, null, 2)
+            : updateTable(result, {
+                verbose: values.verbose,
+              }),
         );
         if (result.some((r) => ["failed", "blocked"].includes(r.status)))
           return 1;
@@ -888,7 +930,9 @@ async function main(): Promise<number> {
       if (values["dry-run"]) {
         const result = await task(() => packages.outdated(spec));
         show(
-          values.json ? JSON.stringify(result, null, 2) : updateTable(result),
+          values.json
+            ? JSON.stringify(result, null, 2)
+            : updateTable(result, { verbose: values.verbose }),
         );
         if (result.some((r) => r.status === "blocked")) return 1;
         break;
@@ -917,26 +961,37 @@ async function main(): Promise<number> {
       switch (required(1)) {
         case "list": {
           const state = await packages.store.read();
-          console.log(
-            JSON.stringify(
-              commandNames(state)
-                .sort()
-                .map((name) => {
-                  const { install, provided, bin } = resolveCommand(
-                    state,
-                    name,
-                  );
-                  return {
-                    name,
-                    package: `${install.source.alias}/${install.name}`,
-                    provided,
-                    alias: !!state.aliases?.[name],
-                    path: join(root, install.dir, bin.path),
-                  };
-                }),
-              null,
-              2,
-            ),
+          const rows = commandNames(state)
+            .sort()
+            .map((name) => {
+              const { install, provided, bin } = resolveCommand(state, name);
+              return {
+                name,
+                package: `${install.source.alias}/${install.name}`,
+                provided,
+                alias: !!state.aliases?.[name],
+                path: join(root, install.dir, bin.path),
+              };
+            });
+          show(
+            values.json
+              ? JSON.stringify(rows, null, 2)
+              : rows.length
+                ? table(
+                    [
+                      "COMMAND",
+                      "PACKAGE",
+                      "KIND",
+                      ...(values.verbose ? ["TARGET"] : []),
+                    ],
+                    rows.map((r) => [
+                      r.name,
+                      r.package,
+                      r.alias ? `alias: ${r.provided}` : "command",
+                      ...(values.verbose ? [r.path] : []),
+                    ]),
+                  )
+                : "No selected commands.",
           );
           break;
         }

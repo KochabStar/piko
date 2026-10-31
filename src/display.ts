@@ -1,7 +1,9 @@
 import type { UpdateRow } from "./update-display-types.ts";
 import { cleanText } from "./progress.ts";
 import { join } from "node:path";
-import type { State } from "./types.ts";
+import type { Source, State } from "./types.ts";
+import type { Packages } from "./packages.ts";
+import { publicEndpoint } from "./util.ts";
 
 // Metadata may originate in a source. Never let it inject terminal control codes
 // or new rows into human-readable tables; JSON retains the original values.
@@ -66,7 +68,34 @@ export function installedRows(
         a.version.localeCompare(b.version, undefined, { numeric: true }),
     );
 }
-export function updateTable(rows: UpdateRow[]): string {
+export function updateTable(
+  rows: UpdateRow[],
+  options: { verbose?: boolean } = {},
+): string {
+  if (!options.verbose) {
+    if (!rows.length) return "No selected packages to update.";
+    const visible = rows.filter(
+      (row) => !["current", "pinned", "unchanged"].includes(row.status),
+    );
+    if (!visible.length) return "All packages are up to date.";
+    const counts = new Map<string, number>();
+    for (const row of visible)
+      counts.set(row.status, (counts.get(row.status) ?? 0) + 1);
+    const lines = visible.map((row) => {
+      const version =
+        row.current && row.candidate && row.current !== row.candidate
+          ? `${row.current} -> ${row.candidate}`
+          : (row.version ?? row.current ?? "-");
+      const reason = row.error ?? row.reason;
+      return cleanText(
+        `${row.package} (${version}): ${row.status}${reason && !["current", "pinned", "unchanged"].includes(row.status) ? " - " + reason : ""}`,
+      );
+    });
+    const summary =
+      [...counts].map(([status, count]) => `${count} ${status}`).join(", ") +
+      ".";
+    return [...lines, ...(lines.length ? [""] : []), summary].join("\n");
+  }
   if (!rows.length) return "No selected packages to update.";
   const counts = new Map<string, number>();
   for (const row of rows)
@@ -87,6 +116,69 @@ export function updateTable(rows: UpdateRow[]): string {
     [...counts].map(([status, count]) => `${count} ${status}`).join("; ") +
     "."
   );
+}
+
+export function sourceTable(sources: Source[], verbose = false): string {
+  if (!sources.length) return "No configured sources.";
+  return table(
+    ["SOURCE", "TYPE", "URL", ...(verbose ? ["REF", "COMMIT"] : [])],
+    sources
+      .sort((a, b) => a.alias.localeCompare(b.alias))
+      .map((s) => [
+        s.alias,
+        s.type,
+        publicEndpoint(s.url),
+        ...(verbose ? [s.ref ?? "-", s.commit ?? "-"] : []),
+      ]),
+  );
+}
+
+export function infoSummary(
+  info: Awaited<ReturnType<Packages["info"]>>,
+  verbose = false,
+): string {
+  const lines = [info.package];
+  if (info.ambiguous) lines.push("Ambiguous package; specify a source.");
+  for (const entry of info.available) {
+    lines.push(
+      `Source: ${entry.source.alias} (${publicEndpoint(entry.source.url)})`,
+      `Latest: ${entry.latest}`,
+    );
+    if (entry.version && entry.version !== entry.latest)
+      lines.push(`Requested: ${entry.version}`);
+    if (entry.runtime)
+      lines.push(
+        `Runtime: ${entry.runtime.family} / ${entry.runtime.distribution}`,
+      );
+    if (entry.aliases && Object.keys(entry.aliases).length)
+      lines.push(
+        `Aliases: ${Object.entries(entry.aliases)
+          .map(([a, v]) => `${a}=${v}`)
+          .join(", ")}`,
+      );
+    if (verbose) lines.push(`Versions: ${entry.versions.join(", ")}`);
+    else lines.push(`Versions: ${entry.versions.length} available`);
+    for (const dependency of entry.dependencies ?? []) {
+      lines.push(
+        `Dependency: ${dependency.package} (${dependency.satisfied ? "ready" : "unmet"})`,
+      );
+      if (!dependency.satisfied)
+        lines.push(...dependency.issues, ...dependency.advice);
+    }
+  }
+  lines.push(
+    "Installed: " +
+      (info.installed
+        .map(
+          (i) =>
+            `${i.version}${i.default ? " *" : ""}${!i.verified ? " [unverified]" : ""}`,
+        )
+        .join(", ") || "none"),
+  );
+  if (verbose)
+    for (const i of info.installed)
+      lines.push(`Path (${i.version}): ${i.path}`);
+  return lines.map(cleanText).join("\n");
 }
 
 export function installedTable(
@@ -110,7 +202,6 @@ export function installedTable(
         i.verified ? "yes" : "no",
         ...(verbose ? [i.request ?? "-", i.path] : []),
       ]),
-    ) +
-    `\n\n${rows.length} installed version(s); * = selected. Use --verbose for paths, --json for scripts.`
+    ) + `\n\n${rows.length} installed version(s); * = selected.`
   );
 }
