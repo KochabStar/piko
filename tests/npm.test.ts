@@ -317,6 +317,9 @@ test("npm installs scoped CLI in its own version directory and never runs lifecy
   expect(newer.version).toBe("1.1.0");
   expect(await exists(file)).toBe(true);
   expect((await manager.store.read()).defaults[newer.key]?.request).toBe("1");
+  const unchangedState = await readFile(manager.store.statePath, "utf8");
+  expect((await manager.update("npm:@piko-fixture/cli")).id).toBe(newer.id);
+  expect(await readFile(manager.store.statePath, "utf8")).toBe(unchangedState);
 }, 60000);
 
 test("compiled EXE supports native and npm commands from direct spawn, PowerShell and CMD", async () => {

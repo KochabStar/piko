@@ -69,7 +69,13 @@ import {
 } from "./scripts.ts";
 import { npmContext, resolveNpm, prepareNpm } from "./npm.ts";
 import { npmCompatibility } from "./npm-runtime.ts";
+import { selectedNode } from "./windows.ts";
 import type { Bin, CatalogPackage, Install, Source, State } from "./types.ts";
+
+type SourceIndexes = Map<
+  string,
+  Promise<{ source: Source; index: Awaited<ReturnType<typeof refresh>> }>
+>;
 
 export class Packages {
   readonly store: Store;
@@ -482,7 +488,34 @@ export class Packages {
     expectedManifestHash?: string,
     npmLock?: unknown,
   ): Promise<Install> {
-    return await this.store.mutate(async (state) => {
+    return this.installPackage(spec, {
+      skipChecksum,
+      expectedRevision,
+      expectedManifestHash,
+      npmLock,
+    });
+  }
+  private async installPackage(
+    spec: string,
+    {
+      skipChecksum = false,
+      expectedRevision,
+      expectedManifestHash,
+      npmLock,
+      sourceIndexes,
+      context: providedContext,
+      skipUnchanged = false,
+    }: {
+      skipChecksum?: boolean;
+      expectedRevision?: number;
+      expectedManifestHash?: string;
+      npmLock?: unknown;
+      sourceIndexes?: SourceIndexes;
+      context?: Awaited<ReturnType<typeof npmContext>>;
+      skipUnchanged?: boolean;
+    } = {},
+  ): Promise<Install> {
+    const install = async (state: State) => {
       if (expectedRevision !== undefined && state.revision !== expectedRevision)
         fail("State changed during inventory restore; preview again");
       report({ kind: "stage", label: "Resolve package", detail: spec });
@@ -490,13 +523,22 @@ export class Packages {
         request = parsed.request ?? "latest";
       if (parsed.source === "npm") {
         if (skipChecksum) fail("--skip-checksum does not bypass npm integrity");
-        const context = await npmContext(this.root, state, parsed.name),
-          resolved = await resolveNpm(
-            context,
-            parsed.name,
-            request,
-            join(this.root, "apps", "piko"),
-          );
+        const selected = selectedNode(this.root, state);
+        const context =
+          providedContext?.node === selected.exe &&
+          providedContext.npm === selected.npm
+            ? providedContext
+            : await npmContext(this.root, state, parsed.name);
+        if (context === providedContext) {
+          await noLinks(context.node);
+          await noLinks(context.npm);
+        }
+        const resolved = await resolveNpm(
+          context,
+          parsed.name,
+          request,
+          join(this.root, "apps", "piko"),
+        );
         const key = packageKey(resolved.source, parsed.name),
           id = installId(key, resolved.version),
           prior = state.installs[id];
@@ -597,8 +639,23 @@ export class Packages {
           label: "Refresh source",
           detail: source.alias,
         });
-        const index = await refresh(this.root, source),
-          entry = index.packages[parsed.name];
+        let index: Awaited<ReturnType<typeof refresh>>;
+        if (sourceIndexes) {
+          let snapshot = sourceIndexes.get(source.identity);
+          if (!snapshot) {
+            const original = structuredClone(source);
+            snapshot = refresh(this.root, original).then((index) => ({
+              source: original,
+              index,
+            }));
+            sourceIndexes.set(source.identity, snapshot);
+          }
+          const resolved = await snapshot;
+          if (resolved.source.commit !== undefined)
+            source.commit = resolved.source.commit;
+          index = resolved.index;
+        } else index = await refresh(this.root, source);
+        const entry = index.packages[parsed.name];
         if (entry) candidates.push({ source, entry });
       }
       if (!candidates.length) fail("Package not found in configured sources");
@@ -977,9 +1034,16 @@ export class Packages {
         if (!(await exists(this.store.installPath)))
           await removeTree(stageRoot);
       }
-    });
+    };
+    return this.store.mutate(install, { skipUnchanged });
   }
   async update(spec: string): Promise<Install> {
+    return this.updatePackage(spec, new Map());
+  }
+  private async updatePackage(
+    spec: string,
+    sourceIndexes: SourceIndexes,
+  ): Promise<Install> {
     report({ kind: "stage", label: "Check selected version", detail: spec });
     const state = await this.store.read(),
       match = this.installed(state, spec),
@@ -1000,9 +1064,11 @@ export class Packages {
         });
         return previous;
       }
-      const installed = await this.install(
+      const installed = await this.installPackage(
         `npm:${previous.name}@${selection.request}`,
+        { context, skipUnchanged: true },
       );
+      if (installed.id === previous.id) return installed;
       report({
         kind: "stage",
         label: "Switch selected version",
@@ -1035,9 +1101,11 @@ export class Packages {
       });
       return previous;
     }
-    const installed = await this.install(
+    const installed = await this.installPackage(
       `${active.alias}/${previous.name}@${selection.request}`,
+      { sourceIndexes, skipUnchanged: true },
     );
+    if (installed.id === previous.id) return installed;
     report({
       kind: "stage",
       label: "Switch selected version",
@@ -1345,6 +1413,8 @@ export class Packages {
         version?: string;
         error?: string;
       }[] = [];
+    // One fresh source snapshot per batch, never a persistent/stale fallback.
+    const sourceIndexes: SourceIndexes = new Map();
     let index = 0;
     for (const key of Object.keys(state.defaults).sort()) {
       const selection = state.defaults[key]!,
@@ -1358,7 +1428,7 @@ export class Packages {
         total: Object.keys(state.defaults).length,
       });
       try {
-        const updated = await this.update(spec);
+        const updated = await this.updatePackage(spec, sourceIndexes);
         report({
           kind: "result",
           label: `${spec}@${updated.version}: ${updated.id === i.id ? "unchanged" : "updated"}`,
