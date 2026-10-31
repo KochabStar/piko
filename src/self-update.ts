@@ -39,6 +39,7 @@ export async function prepareSelfUpdate(
   checksum: string,
   parent: number,
   legacyRollback = false,
+  expectedVersion?: string,
 ) {
   if (!/^[a-f0-9]{64}$/i.test(checksum))
     fail("Self-update requires an explicit SHA-256 from a trusted channel");
@@ -122,6 +123,8 @@ export async function prepareSelfUpdate(
         );
         if (probe.protocol !== 1 || typeof probe.version !== "string")
           fail("Candidate does not support the Piko upgrade protocol");
+        if (expectedVersion && probe.version !== expectedVersion)
+          fail("Candidate executable version does not match Release metadata");
         const names = [...new Set(["piko", ...commandNames(state)])].sort();
         for (const name of names) await inspectShim(root, name, [target]);
         await copyFile(target, join(dir, "old.exe"));

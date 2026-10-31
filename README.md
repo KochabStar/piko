@@ -628,11 +628,25 @@ piko recover --force
 
 ## Piko 自升级
 
+自升级集成到 `update`，不用再手动寻找新版 EXE：
+
 ```powershell
-piko self update D:\downloads\piko.exe --sha256 <可信摘要> --yes
-piko self status
+piko update                        # 检查 Piko 最新稳定 Release，不执行候选
+piko update --dry-run               # 同上；可加 --json 供脚本读取
+piko update --yes                   # 校验下载后升级 Piko
+piko update piko --yes              # 显式写法，与上一条相同
+piko self update --yes              # 兼容别名
+piko update main/node               # 仍只更新指定软件
+piko update --all                   # 仍只更新已选软件，不隐式升级管理器
+piko self status                    # 查看异步升级终态
 piko self rollback --yes
+# 离线／私有发行渠道仍支持手动提供 EXE 与独立可信的 EXE 摘要：
+piko self update D:\downloads\piko.exe --sha256 <EXE_SHA256> --yes
 ```
+
+在线升级只读取官方最新稳定 Release，不采用草稿／预发布，不降级，不把仓库未发布的提交当新版；没有 `--yes` 时只查询，不下载或执行候选。执行时先校验 ZIP 摘要，再核对包内版本、平台、EXE 摘要和实际候选版本，保留状态兼容检查、备份与日志恢复。只提取所需 EXE 和校验元数据，不运行发行包内脚本。在线模式的可选 `--sha256` 是独立核对的 **ZIP 摘要**；手动 EXE 模式仍要求 **EXE 摘要**。发布渠道提供的摘要不构成独立签名或独立信任根。
+
+若尚无稳定 Release，或发行仓库为私有且匿名不可访问，命令明确失败并保留原安装；不会悄悄使用缓存／CI 构建。可通过认证下载后使用手动模式，或先发布可访问的 Release。旧版不认识新的 `update` 入口时，需先用原 `self update <EXE> --sha256 <EXE_SHA256> --yes` 引导一次。
 
 旧版没有 self update 时，可从可信新版 EXE 对目标 PIKO_HOME 发起。候选先匹配可信摘要，再检查状态兼容，父进程退出后由独立 helper 替换程序并重绑已有 shims。state.json 不重写，Piko 仍不分版本、不设自身 current，固定 backup.exe 只供兼容回退。升级/回退是异步操作，用 self status 查看终态。
 

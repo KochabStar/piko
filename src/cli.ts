@@ -44,6 +44,7 @@ import { noLinks, fail, exists, json, capture } from "./util.ts";
 
 const help = `Piko ${VERSION} — Windows package manager (preview)
 
+  piko self update [latest] [--dry-run | --yes]   Update from the latest stable Release
   piko self update <file|https-url> --sha256 <hash> --yes
   piko self status | rollback --yes | recover [--force]
   piko setup [--path]                 Install this executable; --path updates user PATH
@@ -75,7 +76,8 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko rust install|use|update|remove <toolchain> --dry-run | --approve-exec --binding <hash>
   piko list [query] [--selected] [--verbose] [--json]
   piko outdated [package] | status [package]
-  piko update <package> | update --all [--dry-run]
+  piko update [piko] [--dry-run | --yes]   Check/update Piko itself
+  piko update <package> | update --all [--dry-run]   Managed packages only
   piko cleanup [package] --versions [--keep N] [--dry-run | --yes]
   piko export [file.json] [--lock]
   piko import <file.json> [--dry-run | --yes] [--binding <hash>]
@@ -285,6 +287,33 @@ async function main(): Promise<number> {
   const packages = new Packages(root);
   const required = (index: number) =>
     args[index] ?? fail(`Missing argument; run piko --help`);
+  const updatePiko = async () => {
+    const { updateSelfFromRelease } = await import("./self-release.ts");
+    const result = await task(() =>
+      updateSelfFromRelease(root, process.pid, {
+        confirmed: !!values.yes,
+        dryRun: !!values["dry-run"],
+        checksum: values.sha256,
+      }),
+    );
+    if (result.status === "prepared") {
+      const log = await launchSelfUpdater(root, result.candidate);
+      if (values.json)
+        console.log(
+          JSON.stringify({ ...result, log, status: "pending" }, null, 2),
+        );
+      else
+        show(
+          `Piko ${result.current} -> ${result.version}: update pending. Check piko self status.`,
+        );
+    } else if (values.json) console.log(JSON.stringify(result, null, 2));
+    else if (result.status === "current")
+      show(`Piko ${result.current} is up to date.`);
+    else
+      show(
+        `Piko ${result.current} -> ${result.version} available. Run piko update --yes to install.`,
+      );
+  };
   switch (args[0]) {
     case "self": {
       switch (required(1)) {
@@ -324,15 +353,24 @@ async function main(): Promise<number> {
           break;
         }
         case "update": {
+          const from = args[2];
+          if (!from || from === "latest") {
+            await updatePiko();
+            break;
+          }
+          if (values["dry-run"])
+            fail("Use self update --dry-run to preview the latest Release");
           if (!values.yes)
             fail(
-              "Self-update executes a trusted candidate; explicit --yes and --sha256 are required",
+              "Self-update executes a trusted candidate; explicit --yes is required",
             );
-          const planned = await prepareSelfUpdate(
-            root,
-            required(2),
-            values.sha256 ?? fail("Self-update requires --sha256"),
-            process.pid,
+          const planned = await task(() =>
+            prepareSelfUpdate(
+              root,
+              from,
+              values.sha256 ?? fail("Self-update requires --sha256"),
+              process.pid,
+            ),
           );
           const log = await launchSelfUpdater(root, planned.candidate);
           console.log(
@@ -352,7 +390,7 @@ async function main(): Promise<number> {
         }
         default:
           fail(
-            "Use self update <file|https-url> --sha256 <hash> --yes, status or recover [--force]",
+            "Use update [piko] --dry-run | --yes, self update <file|https-url> --sha256 <hash> --yes, status or recover [--force]",
           );
       }
       break;
@@ -955,6 +993,14 @@ async function main(): Promise<number> {
         );
         if (result.some((r) => ["failed", "blocked"].includes(r.status)))
           return 1;
+        break;
+      }
+      if (!args[1] || args[1] === "piko") {
+        if (args.length > 2 || values.distribution)
+          fail(
+            "Use update [piko] [--dry-run | --yes] without a package distribution",
+          );
+        await updatePiko();
         break;
       }
       const spec = await packages.runtimeSpec(required(1), values.distribution);

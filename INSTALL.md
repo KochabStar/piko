@@ -37,7 +37,7 @@ Invoke-WebRequest https://github.com/KochabStar/piko/releases/latest/download/in
 - 将 `shims` 加入**用户 PATH**，更新本 PowerShell 会话的 PATH 和 `PIKO_HOME`；其他已打开终端需重开。使用 `powershell -File` 启动时，调用方父终端环境不能被子进程更新。
 - 配置 `main` HTTPS 清单源 `https://raw.githubusercontent.com/KochabStar/piko-source/main/`，不依赖 Git。
 - 不自动安装任何软件，不编辑 Shell Profile，不启用字体、关联、服务或驱动，不删除 Scoop／mise。
-- 已有同摘要 Piko 时保持安装和软件状态；不同构建拒绝覆盖，升级用 `piko self update`。已有同名源配置不一致时拒绝替换。失败时可能保留已完成的 Piko 安装或源配置，不承诺跨注册表／文件系统事务，也不删除已有数据。
+- 已有同摘要 Piko 时保持安装和软件状态；不同构建拒绝覆盖。新版用 `piko update` 检查自身、`piko update --yes` 确认升级；旧版用 `piko self update <EXE> --sha256 <EXE_SHA256> --yes` 引导升级。已有同名源配置不一致时拒绝替换。失败时可能保留已完成的 Piko 安装或源配置，不承诺跨注册表／文件系统事务，也不删除已有数据。
 
 ## 发布前／离线安装
 
