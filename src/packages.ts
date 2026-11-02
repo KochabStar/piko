@@ -291,8 +291,47 @@ export class Packages {
   }
   async use(
     spec: string,
-    options: { noCommands?: boolean; expectedRevision?: number } = {},
+    options: {
+      noCommands?: boolean;
+      expectedRevision?: number;
+      installLatest?: boolean;
+    } = {},
   ): Promise<void> {
+    let installedLatest: Install | undefined;
+    if (options.installLatest && parseSpec(spec).request === "latest") {
+      if (options.expectedRevision !== undefined)
+        fail(
+          "Automatic latest installation cannot change an approved dependency plan",
+        );
+      const parsed = parseSpec(spec),
+        state = await this.store.read();
+      let installSpec = spec;
+      if (
+        parsed.source !== "npm" &&
+        Object.values(state.installs).some(
+          (i) =>
+            i.name === parsed.name &&
+            (!parsed.source || i.source.alias === parsed.source),
+        )
+      ) {
+        const match = this.installed(state, spec),
+          original = match.installs[0]!;
+        if (original.kind === "npm") installSpec = `npm:${parsed.name}@latest`;
+        else {
+          const source = Object.values(state.sources).find(
+            (s) => s.identity === original.source.identity,
+          );
+          if (!source)
+            fail(
+              "Restore the original source before installing its latest version",
+            );
+          installSpec = `${source.alias}/${parsed.name}@latest`;
+        }
+      }
+      installedLatest = await this.installPackage(installSpec, {
+        skipUnchanged: true,
+      });
+    }
     await this.store.mutate(async (state) => {
       if (
         options.expectedRevision !== undefined &&
@@ -300,6 +339,8 @@ export class Packages {
       )
         fail("State changed during dependency installation; preview again");
       const match = this.installed(state, spec);
+      if (installedLatest && match.key !== installedLatest.key)
+        fail("Package source changed while installing latest; retry selection");
       if (!match.request && match.installs.length !== 1)
         fail("Multiple versions are installed; specify a version");
       const request = match.request ?? match.installs[0]!.version;
@@ -320,7 +361,7 @@ export class Packages {
         ]?.aliases;
       }
       let latest: string | undefined;
-      if (request === "latest") {
+      if (request === "latest" && !installedLatest) {
         const source = match.installs[0]!.source;
         const indexFile = join(
           this.root,
@@ -330,7 +371,8 @@ export class Packages {
         );
         // Use the validated cached source designation, not semver coercion:
         // vendors also publish four-part versions and build identifiers.
-        // Selection stays offline and never installs a missing newer version.
+        // Internal selection-only calls stay offline. Public explicit @latest
+        // requests supply their resolved installation above instead.
         if (await exists(indexFile)) {
           await noLinks(indexFile);
           latest = normalizeIndex(await json(indexFile)).packages[
@@ -338,32 +380,27 @@ export class Packages {
           ]?.latest;
         }
       }
-      const version = chooseVersion(
-        match.installs.map((i) => i.version),
-        request,
-        latest,
-        aliases,
-      );
-      await checkPersistentFileMappings(
-        this.root,
-        state.installs[match.installs.find((i) => i.version === version)!.id]!,
-      );
-      for (const bin of Object.values(
-        match.installs.find((i) => i.version === version)!.bins,
-      ))
+      const version =
+        installedLatest?.version ??
+        chooseVersion(
+          match.installs.map((i) => i.version),
+          request,
+          latest,
+          aliases,
+        );
+      const target =
+        match.installs.find((i) => i.version === version) ??
+        fail("Latest installation is no longer available; retry selection");
+      await checkPersistentFileMappings(this.root, target);
+      for (const bin of Object.values(target.bins))
         if (bin.data)
           await (
             await import("./execution.ts")
-          ).persistentExecutable(
-            this.root,
-            state,
-            match.installs.find((i) => i.version === version)!,
-            bin.path,
-          );
+          ).persistentExecutable(this.root, state, target, bin.path);
       await this.select(
         state,
         match.key,
-        match.installs.find((i) => i.version === version)!.id,
+        target.id,
         request,
         options.noCommands,
       );

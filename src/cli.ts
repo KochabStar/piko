@@ -55,6 +55,7 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko install <source/package>[@version] [--skip-checksum]   (alias: i)
   piko install <spec> --with-deps --dry-run | --yes --binding <hash>
   piko use <package>[@version] [--no-commands] | unuse <package>
+  piko use <package>@latest          Install missing latest version and select it
   piko reset <package> | reset --all [--dry-run]   Repair shims, shortcuts, current and data mappings
   piko command list | claim <command> <package> | release <command>
   piko command alias <name> <package> <provided-command> | unalias <name>
@@ -265,6 +266,7 @@ async function main(): Promise<number> {
                 info: "Loading package information",
                 install: "Preparing installation",
                 i: "Preparing installation",
+                use: "Selecting package",
                 update: "Checking updates",
                 outdated: "Checking updates",
                 status: "Checking updates",
@@ -890,9 +892,15 @@ async function main(): Promise<number> {
       break;
     }
     case "use":
-      await packages.use(
-        await packages.runtimeSpec(required(1), values.distribution),
-        { noCommands: values["no-commands"] },
+      if (values["dry-run"])
+        fail(
+          "Use does not support --dry-run; preview available versions with piko info",
+        );
+      await task(async () =>
+        packages.use(
+          await packages.runtimeSpec(required(1), values.distribution),
+          { noCommands: values["no-commands"], installLatest: true },
+        ),
       );
       for (const issue of await pathDiagnostics(
         root,
