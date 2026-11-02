@@ -1,3 +1,4 @@
+import { VERSION } from "../src/version.ts";
 import { afterAll, expect, test } from "bun:test";
 import {
   mkdtemp,
@@ -66,14 +67,14 @@ let fixture:
   { file: string; sha256: string; executableHash: string } | undefined;
 async function release() {
   if (fixture) return fixture;
-  const folder = join(work, "piko-0.4.0-windows-x64");
+  const folder = join(work, `piko-${VERSION}-windows-x64`);
   await mkdir(folder);
   await copyFile(exe, join(folder, "piko.exe"));
   const executableHash = hash(await readFile(exe));
   await writeFile(
     join(folder, "release.json"),
     JSON.stringify({
-      version: "0.4.0",
+      version: VERSION,
       platform: "windows-x64",
       sha256: executableHash,
       signed: false,
@@ -249,7 +250,7 @@ test("verified ZIP still rejects inconsistent executable bytes before setup", as
     shells[0]!,
     [
       "-Command",
-      "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.IO.Compression;Add-Type -AssemblyName System.IO.Compression.FileSystem;$z=[IO.Compression.ZipFile]::Open($env:PIKO_BAD_ZIP,[IO.Compression.ZipArchiveMode]::Update);try{$e=$z.GetEntry('piko-0.4.0-windows-x64/piko.exe');$e.Delete();$e=$z.CreateEntry('piko-0.4.0-windows-x64/piko.exe');$w=[IO.StreamWriter]::new($e.Open());try{$w.Write('corrupt executable')}finally{$w.Dispose()}}finally{$z.Dispose()}",
+      `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.IO.Compression;Add-Type -AssemblyName System.IO.Compression.FileSystem;$z=[IO.Compression.ZipFile]::Open($env:PIKO_BAD_ZIP,[IO.Compression.ZipArchiveMode]::Update);try{$e=$z.GetEntry('piko-${VERSION}-windows-x64/piko.exe');$e.Delete();$e=$z.CreateEntry('piko-${VERSION}-windows-x64/piko.exe');$w=[IO.StreamWriter]::new($e.Open());try{$w.Write('corrupt executable')}finally{$w.Dispose()}}finally{$z.Dispose()}`,
     ],
     { ...process.env, PIKO_BAD_ZIP: bad },
   );

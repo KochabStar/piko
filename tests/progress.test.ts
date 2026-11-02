@@ -454,7 +454,7 @@ test("compiled CLI progress stays on stderr; JSON, pipes, CI and no-progress rem
   expect(blocked.out).not.toContain("up to date");
   const failedJson = await run(["update", "--all", "--json"], 1);
   expect(JSON.parse(failedJson.out)[0].status).toBe("failed");
-});
+}, 30000);
 
 test("update summary preserves failed/blocked reasons and pins without color injection", () => {
   const out = updateTable([

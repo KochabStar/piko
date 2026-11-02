@@ -1,8 +1,12 @@
 # Piko
 
-使用 **TypeScript + Bun** 开发的 Windows x64 命令行包管理器，当前为 **0.4.0 预览版**。统一管理便携程序、Node 等运行时和 npm CLI；Piko 的 EXE 不需要预装 Node/Bun。
+使用 **TypeScript + Bun** 开发的 Windows x64 命令行包管理器，当前为 **0.4.1 预览版**。统一管理便携程序、Node 等运行时和 npm CLI；Piko 的 EXE 不需要预装 Node/Bun。
 
 替代目标与待办见 [替代 Scoop 与 mise 的功能差距](docs/replacement-gaps.md)（仅用户级软件与全局版本管理，不包含 mise 项目功能）。本轮依赖、集成升级、Shell、npm、安装载荷与 Rust 的新增能力、用法和边界见 [B 类限制完善记录](docs/b-improvements.md)。
+
+## QQNT 下载授权（0.4.1）
+
+原生支持 QQ 官网 QQNTV2 下载前免登录签名；清单只保存固定版本的原始官方地址与 SHA-256。支持内置下载及 aria2 分段，共享短期签名并最多刷新一次，不引入第三方中转、账号 Cookie 或安装脚本。缓存命中不请求签名；不改变旧 QQNT／其他下载。详见 [下载边界与验证](docs/qqnt-download.md)。
 
 ## 已实现
 

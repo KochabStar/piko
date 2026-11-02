@@ -12,6 +12,7 @@ import {
   sha256,
 } from "./util.ts";
 import { report, progressSink, TransferRanges } from "./progress.ts";
+import { isQQDownload, QQDownloadSession } from "./qq-download.ts";
 import type { State } from "./types.ts";
 
 export async function findAria2(
@@ -86,6 +87,10 @@ export async function downloadWithAria2(
   let failure: Error | undefined,
     requests = 0;
   const abort = new AbortController();
+  const identity = new URL(value);
+  const qqSession = isQQDownload(identity)
+    ? new QQDownloadSession(identity)
+    : undefined;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -108,6 +113,7 @@ export async function downloadWithAria2(
           method: request.method as "GET" | "HEAD",
           headers,
           signal: abort.signal,
+          qqSession,
         });
         const contentRange = response.headers.get("content-range"),
           length = Number(response.headers.get("content-length") ?? 0),

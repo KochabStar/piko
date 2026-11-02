@@ -1,3 +1,4 @@
+import { VERSION } from "../src/version.ts";
 import { test, expect, afterAll } from "bun:test";
 import {
   mkdtemp,
@@ -41,7 +42,7 @@ test("native shim is a small PE with Scoop-shaped companion metadata, not the ru
     shimConfiguration("piko"),
   );
   expect((await capture(shim, ["--version"], { env: env(root) })).trim()).toBe(
-    "0.4.0",
+    VERSION,
   );
 });
 test("verified old hardlinks migrate without truncating the real executable", async () => {
@@ -111,7 +112,7 @@ test("the relative shim follows a relocated root without PIKO_HOME", async () =>
     (
       await capture(join(moved, "shims/piko.exe"), ["--version"], { env: e })
     ).trim(),
-  ).toBe("0.4.0");
+  ).toBe(VERSION);
   expect(
     JSON.parse(
       await capture(join(moved, "shims/piko.exe"), ["list", "--json"], {
@@ -131,5 +132,5 @@ test("native dispatch keeps its own command identity and rejects unauthorised mi
   ).rejects.toThrow();
   expect(
     (await capture(target, ["--version"], { env: env(root) })).trim(),
-  ).toBe("0.4.0");
+  ).toBe(VERSION);
 });

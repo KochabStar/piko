@@ -1,3 +1,4 @@
+import { VERSION } from "../src/version.ts";
 import { afterAll, expect, test } from "bun:test";
 import {
   mkdtemp,
@@ -88,7 +89,7 @@ test("self update preserves lightweight shims and state, supports rollback and r
   expect((await selfUpdateStatus(root)).last.phase).toBe("committed");
   expect(
     (await run(root, join(root, "shims/piko.exe"), ["--version"])).trim(),
-  ).toBe("0.4.0");
+  ).toBe(VERSION);
   const again = await prepareSelfUpdate(root, exe, hash, dead.pid);
   await writeFile(target, "unknown executable");
   await expect(applySelfUpdate(root, false)).rejects.toThrow(
@@ -101,7 +102,7 @@ test("self update preserves lightweight shims and state, supports rollback and r
   expect(await exists(join(root, "apps/piko/current"))).toBe(false);
   expect(await exists(again.candidate)).toBe(true);
   expect(before.length).toBeGreaterThan(0);
-  expect(prepared.version).toBe("0.4.0");
+  expect(prepared.version).toBe(VERSION);
 }, 60000);
 
 test("older executable upgrades to new bytes and interrupted directory swap rolls forward", async () => {
@@ -114,7 +115,7 @@ test("older executable upgrades to new bytes and interrupted directory swap roll
   await run(root, older, ["setup"]);
   expect(
     (await run(root, join(root, "shims/piko.exe"), ["--version"])).trim(),
-  ).toMatch(/^0\.[34]\.0$/);
+  ).toBe(older === exe ? VERSION : "0.3.0");
   const dead = Bun.spawn([exe, "--version"], {
     stdout: "ignore",
     stderr: "ignore",
@@ -141,7 +142,7 @@ test("older executable upgrades to new bytes and interrupted directory swap roll
   await applySelfUpdate(root, false);
   expect(
     (await run(root, join(root, "shims/piko.exe"), ["--version"])).trim(),
-  ).toBe("0.4.0");
+  ).toBe(VERSION);
   expect(await readFile(join(root, "apps/piko/state.json"), "utf8")).toBe(
     state,
   );
@@ -158,7 +159,7 @@ test("older executable upgrades to new bytes and interrupted directory swap roll
   }
   expect(
     (await run(root, join(root, "shims/piko.exe"), ["--version"])).trim(),
-  ).toBe(older === exe ? "0.4.0" : "0.3.0");
+  ).toBe(older === exe ? VERSION : "0.3.0");
   expect(await readFile(join(root, "apps/piko/state.json"), "utf8")).toBe(
     state,
   );

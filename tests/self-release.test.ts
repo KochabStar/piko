@@ -1,3 +1,4 @@
+import { VERSION } from "../src/version.ts";
 import { afterAll, expect, test } from "bun:test";
 import {
   copyFile,
@@ -97,7 +98,7 @@ function zip(entries: { name: string; bytes: Buffer }[]) {
   end.writeUInt32LE(offset, 16);
   return Buffer.concat([...local, directory, end]);
 }
-function archive(version = "0.4.0", candidate = executable, duplicate = false) {
+function archive(version = VERSION, candidate = executable, duplicate = false) {
   const prefix = `piko-${version}-windows-x64/`;
   const entries = [
     { name: prefix + "piko.exe", bytes: candidate },
@@ -129,7 +130,7 @@ async function fixture() {
   const env = { ...process.env, PIKO_HOME: root };
   await capture(exe, ["setup"], { env });
   await copyFile(old, join(root, "apps/piko/piko.exe"));
-  let version = "0.4.0",
+  let version = VERSION,
     payload: Buffer = releaseArchive,
     checksum = sha256(payload);
   let draft = false,
@@ -212,7 +213,7 @@ test("preview requires no confirmation, never downloads a candidate and compares
       expect(result).toMatchObject({
         package: "piko",
         current: "0.3.0",
-        version: "0.4.0",
+        version: VERSION,
         status: "available",
       });
     }
@@ -262,7 +263,7 @@ test("confirmed release verifies ZIP and executable then uses journaled self upd
       metadataUrl: f.metadataUrl,
     });
     expect(result.status).toBe("prepared");
-    expect((await selfUpdateStatus(f.root)).pending.version).toBe("0.4.0");
+    expect((await selfUpdateStatus(f.root)).pending.version).toBe(VERSION);
     await applySelfUpdate(f.root, false);
     expect(await executableHash(join(f.root, "apps/piko/piko.exe"))).toBe(
       executableChecksum,
@@ -274,7 +275,7 @@ test("confirmed release verifies ZIP and executable then uses journaled self upd
       await capture(join(f.root, "shims/piko.exe"), ["--version"], {
         env: f.env,
       }),
-    ).toBe("0.4.0");
+    ).toBe(VERSION);
     expect(await readFile(join(f.root, "apps/piko/state.json"), "utf8")).toBe(
       state,
     );
@@ -329,12 +330,12 @@ for (const rejection of [
   },
   {
     name: "tampered executable",
-    mutation: () => ({ payload: archive("0.4.0", Buffer.from("tampered")) }),
+    mutation: () => ({ payload: archive(VERSION, Buffer.from("tampered")) }),
     error: "Release executable checksum mismatch",
   },
   {
     name: "duplicate executable",
-    mutation: () => ({ payload: archive("0.4.0", executable, true) }),
+    mutation: () => ({ payload: archive(VERSION, executable, true) }),
     error: "Invalid, duplicate or oversized release entry",
   },
   {
@@ -415,7 +416,7 @@ test("compiled update/update piko/self update aliases share release handling whi
         package: "piko",
         status: "available",
         current: "0.3.0",
-        version: "0.4.0",
+        version: VERSION,
       });
     }
     expect((await selfUpdateStatus(f.root)).pending).toBeNull();
@@ -443,7 +444,7 @@ test("compiled update/update piko/self update aliases share release handling whi
       await capture(join(f.root, "shims/piko.exe"), ["--version"], {
         env: f.env,
       }),
-    ).toBe("0.4.0");
+    ).toBe(VERSION);
     expect(await exists(join(f.root, "apps/piko/backup.exe"))).toBe(true);
   } finally {
     f.server.stop(true);

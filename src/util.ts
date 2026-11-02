@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import {
+  isQQDownload,
+  QQDownloadSession,
+  validateQQDownload,
+} from "./qq-download.ts";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
   lstat,
@@ -175,9 +180,15 @@ export async function downloadResponse(
     method?: "GET" | "HEAD";
     headers?: Headers;
     signal?: AbortSignal;
+    qqSession?: QQDownloadSession;
   } = {},
 ): Promise<Response> {
-  let url = networkUrl(value);
+  const initial = networkUrl(value);
+  const qq = isQQDownload(initial)
+    ? (options.qqSession ?? new QQDownloadSession(initial))
+    : undefined;
+  let url = qq ? await qq.resolve(options.signal) : initial;
+  if (qq) validateQQDownload(new QQDownloadSession(initial).identity, url);
   for (let redirects = 0; redirects < 6; redirects++) {
     let response: Response;
     try {
@@ -205,10 +216,19 @@ export async function downloadResponse(
       await response.body?.cancel();
       if (!location) fail("Redirect missing Location");
       const next = networkUrl(new URL(location, url).href);
+      if (qq) validateQQDownload(qq.identity, next);
       if (url.protocol === "https:" && next.protocol !== "https:")
         fail("Refusing HTTPS downgrade");
       url = next;
       continue;
+    }
+    if (qq && [401, 403].includes(response.status)) {
+      await response.body?.cancel();
+      const refreshed = await qq.refresh(url, options.signal);
+      if (refreshed) {
+        url = refreshed;
+        continue;
+      }
     }
     if (!response.ok)
       fail(`Download failed: HTTP ${response.status} (${publicEndpoint(url)})`);
