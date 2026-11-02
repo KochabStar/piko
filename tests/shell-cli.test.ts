@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { sha256 } from "../src/util.ts";
 import { powershellExecutable } from "../src/windows.ts";
 import { psQuote } from "../src/profiles.ts";
+import type { State } from "../src/types.ts";
 
 const root = await mkdtemp(join(tmpdir(), "piko-shell-cli-中文-"));
 const psBytes = Buffer.from(
@@ -135,6 +136,63 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
     return out.trim();
   };
   const run = (args: string[], expected = 0) => runExe(exe, args, expected);
+  // Exercise the CLI prompt through real streams, simulating terminal flags only.
+  const ttyEntry = join(root, "tty-entry.ts");
+  await writeFile(
+    ttyEntry,
+    [
+      'Object.defineProperty(process.stdin, "isTTY", { value: true });',
+      'Object.defineProperty(process.stdout, "isTTY", { value: true });',
+      `await import(${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)});`,
+    ].join("\n"),
+  );
+  const runInteractive = async (
+    args: string[],
+    answer: string,
+    onPrompt?: () => Promise<void>,
+  ) => {
+    const child = Bun.spawn([process.execPath, ttyEntry, ...args], {
+      env: { ...process.env, PIKO_HOME: home },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = (async () => {
+      let out = "",
+        answered = false;
+      for await (const chunk of child.stdout) {
+        out += Buffer.from(chunk).toString("utf8");
+        if (!answered && out.includes("[y/N]: ")) {
+          answered = true;
+          await onPrompt?.();
+          child.stdin.write(answer + "\n");
+          child.stdin.end();
+        }
+      }
+      return out;
+    })();
+    const [out, err, code] = await Promise.all([
+      stdout,
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return { out, err, code };
+  };
+  const deniedCommand = async (args: string[]) => {
+    const child = Bun.spawn([exe, ...args], {
+      env: { ...process.env, PIKO_HOME: home },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [, err, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code).toBe(1);
+    return err;
+  };
   await run(["setup"]);
   await run(["source", "add", "main", `http://127.0.0.1:${server.port}/`]);
   for (const name of ["initializer", "ps-entry", "com-entry"]) {
@@ -149,21 +207,18 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
     profile,
   ];
   const plan = JSON.parse(await run(["integrate", ...common, "--dry-run"]));
-  const denied = Bun.spawn(
-    [exe, "integrate", ...common, "--yes", "--binding", plan.binding],
-    {
-      env: { ...process.env, PIKO_HOME: home },
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
-  const [, error, code] = await Promise.all([
-    new Response(denied.stdout).text(),
-    new Response(denied.stderr).text(),
-    denied.exited,
-  ]);
-  expect(code).toBe(1);
-  expect(error).toContain("--approve-shell");
+  expect(
+    await deniedCommand([
+      "integrate",
+      ...common,
+      "--yes",
+      "--binding",
+      plan.binding,
+    ]),
+  ).toContain("--approve-shell");
+  expect(
+    await deniedCommand(["integrate", "initializer", "--dry-run"]),
+  ).toContain("No matching Shell integration");
   await run([
     "integrate",
     ...common,
@@ -171,6 +226,96 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
     "--binding",
     plan.binding,
   ]);
+  const shortPlan = JSON.parse(
+    await run(["integrate", "initializer", "--dry-run"]),
+  );
+  expect(shortPlan.profile).toBe(resolve(profile));
+  const statePath = join(home, "apps", "piko", "state.json"),
+    before = await readFile(statePath),
+    profileBefore = await readFile(profile);
+  for (const flags of [[], ["--yes"], ["--approve-shell"], ["--json"]])
+    expect(
+      await deniedCommand(["integrate", "initializer", ...flags]),
+    ).toContain("--approve-shell and preview --binding");
+  for (const answer of ["", "no"]) {
+    const cancelled = await runInteractive(
+      ["integrate", "initializer"],
+      answer,
+    );
+    expect(cancelled.code).toBe(1);
+    expect(cancelled.err).toContain("Shell integration cancelled");
+  }
+  expect(await readFile(statePath)).toEqual(before);
+  expect(await readFile(profile)).toEqual(profileBefore);
+  const jsonDenied = await runInteractive(
+    ["integrate", "initializer", "--json"],
+    "yes",
+  );
+  expect(jsonDenied.code).toBe(1);
+  expect(jsonDenied.out).not.toContain("[y/N]");
+  const changedProfile = await runInteractive(
+    ["integrate", "initializer"],
+    "yes",
+    () => writeFile(profile, profileBefore + "\n# changed during approval\n"),
+  );
+  expect(changedProfile.code).toBe(1);
+  expect(changedProfile.err).toContain("changed after preview");
+  expect(await readFile(statePath)).toEqual(before);
+  const approved = await runInteractive(["integrate", "initializer"], "y");
+  expect(approved.code).toBe(0);
+  expect(approved.err).toBe("");
+  expect(approved.out).toContain('"status": "completed"');
+  const installedState: State = JSON.parse(await readFile(statePath, "utf8"));
+  const initializer = Object.values(installedState.installs).find(
+    (install) => install.name === "initializer",
+  )!;
+  await writeFile(
+    join(home, initializer.dir, "tool.ps1"),
+    Buffer.concat([psBytes, Buffer.from("# content changed\n")]),
+  );
+  const initArgs = [
+    "shell",
+    "init",
+    "--shell",
+    "powershell",
+    "--profile",
+    profile,
+  ];
+  expect(await run(initArgs)).toContain("run piko integrate main/initializer");
+  const reapproved = await runInteractive(
+    ["integrate", "initializer"],
+    " YES ",
+  );
+  expect(reapproved.code).toBe(0);
+  expect(await run(initArgs)).toContain("function global:PikoFixtureFunction");
+  const initialProfile = join(root, "interactive-first.ps1");
+  const initialApproval = await runInteractive(
+    [
+      "integrate",
+      "initializer",
+      "--shell",
+      "pwsh",
+      "--profile",
+      initialProfile,
+    ],
+    "yes",
+  );
+  expect(initialApproval.code).toBe(0);
+  expect(await readFile(initialProfile, "utf8")).toContain("# >>> piko");
+  expect(
+    await deniedCommand(["integrate", "initializer", "--dry-run"]),
+  ).toContain("Multiple Shell Profiles");
+  expect(
+    JSON.parse(
+      await run([
+        "integrate",
+        "initializer",
+        "--profile",
+        profile,
+        "--dry-run",
+      ]),
+    ).profile,
+  ).toBe(resolve(profile));
   const lock = join(home, "mutation.lock");
   await mkdir(lock);
   await writeFile(
@@ -240,6 +385,17 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
     bashProfile,
   ]);
   expect(bashInit).not.toContain("\r");
+  expect(
+    JSON.parse(
+      await run([
+        "integrate",
+        "initializer",
+        "--profile",
+        bashProfile,
+        "--dry-run",
+      ]),
+    ).initializer,
+  ).toContain("PikoBashFixture");
   const args = [
     "space value",
     "a'b",

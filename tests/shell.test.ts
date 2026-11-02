@@ -10,7 +10,12 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Packages } from "../src/packages.ts";
-import { integrate, inspectIntegration, shellInit } from "../src/shell.ts";
+import {
+  existingIntegrationProfile,
+  integrate,
+  inspectIntegration,
+  shellInit,
+} from "../src/shell.ts";
 import {
   editProfile,
   profileBytes,
@@ -182,6 +187,54 @@ test("Profile integration requires content-bound approval; install does not acti
     "approve integration again",
   );
   expect(await shellInit(p.store, profile)).not.toContain("function global:");
+});
+
+test("short integration commands reuse only an unambiguous package Profile", async () => {
+  const { p, profile, install } = await fixture();
+  const before = await p.store.read();
+  expect(() => existingIntegrationProfile(before, "consumer")).toThrow(
+    "No matching Shell integration",
+  );
+  const plan = await inspectIntegration(p.store, "main/consumer", profile);
+  await integrate(p.store, "main/consumer", profile, {
+    confirmed: true,
+    binding: plan.binding,
+  });
+  const state = await p.store.read();
+  expect(existingIntegrationProfile(state, "consumer").path).toBe(profile);
+  expect(
+    existingIntegrationProfile(state, "main/consumer@1.0.0", profile).path,
+  ).toBe(profile);
+  expect(() =>
+    existingIntegrationProfile(state, "consumer", join(work, "missing.ps1")),
+  ).toThrow("No matching Shell integration");
+  const bashProfile = join(work, "second.bash");
+  state.profiles![profileKey(bashProfile)] = {
+    ...state.profiles![profileKey(profile)]!,
+    path: bashProfile,
+    shell: "bash",
+  };
+  expect(() => existingIntegrationProfile(state, "consumer")).toThrow(
+    "Multiple Shell Profiles",
+  );
+  expect(existingIntegrationProfile(state, "consumer", profile).path).toBe(
+    profile,
+  );
+  expect(existingIntegrationProfile(state, "consumer", bashProfile).shell).toBe(
+    "bash",
+  );
+  state.installs.other = {
+    ...install,
+    id: "other",
+    key: "other-source-consumer",
+    source: { ...install.source, alias: "other" },
+  };
+  expect(() => existingIntegrationProfile(state, "consumer", profile)).toThrow(
+    "Ambiguous package",
+  );
+  expect(existingIntegrationProfile(state, "main/consumer", profile).path).toBe(
+    profile,
+  );
 });
 
 test("approved initialization remains available during a real stalled source refresh and never removes its lock", async () => {

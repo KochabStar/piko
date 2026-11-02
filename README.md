@@ -458,12 +458,21 @@ piko install main/lua@5.5.0
 piko use main/lua@5.5.0
 piko install main/z.lua@1.8.26
 piko use main/z.lua@1.8.26
+# 首次接入：显示初始化内容和依赖路径，输入 y 确认（默认取消）
+piko integrate main/z.lua --shell pwsh
+# 更新后重新授权：自动沿用这个包已有的唯一 Profile 和 Shell
+piko integrate z.lua
+```
+
+`--shell powershell` 对应 Windows PowerShell 5.1，`pwsh` 对应 PowerShell 7；显式指定 Shell 时，默认查询所选 Shell 的 `$PROFILE.CurrentUserAllHosts`。可用 `--profile <path>` 显式指定文件。不指定 `--shell` 时只复用已有集成，多个 Profile 时须用 `--profile` 选择，不猜测目标。交互终端在显示预览后询问 `[y/N]`；确认时自动提交本次预览的 binding，期间内容或 Profile 变化仍拒绝。`--yes` 不会跳过 Shell 授权询问。仅当前用户，不修改所有用户配置，不放宽 ExecutionPolicy。使用前需执行编译 EXE 的 `setup`。
+
+自动化、重定向和 `--json` 模式继续要求显式授权及预览摘要，不接受管道输入 `y` 绕过确认：
+
+```powershell
 piko integrate main/z.lua --shell pwsh --dry-run
 # 阅读输出内容、依赖路径及 binding；用输出的真实摘要替换 <hash>
 piko integrate main/z.lua --shell pwsh --approve-shell --binding <hash>
 ```
-
-`--shell powershell` 对应 Windows PowerShell 5.1，`pwsh` 对应 PowerShell 7；默认查询所选 Shell 的 `$PROFILE.CurrentUserAllHosts`。可用 `--profile <path>` 显式指定文件。仅当前用户，不修改所有用户配置，不放宽 ExecutionPolicy。`--yes` 不能代替 `--approve-shell`，必须提交预览 binding。使用前需执行编译 EXE 的 `setup`。
 
 每份 Profile 仅插入一个带根目录标识的加载块；保存旧文件备份，保留块外内容、UTF-8／UTF-16LE BOM 与换行。其他编码拒绝，管理块被修改或预览后文件变化则停止。新建／生成的路径表达式为 ASCII，支持 5.1 的 Unicode 路径；输出按 UTF-8 解码。写入与状态记录使用恢复日志，`piko recover`／`doctor` 可恢复。恢复先检查整份日志的路径、唯一目标、相同起始 revision、托管块归属，并重新执行纯文本编辑推导前后字节；不接受块外替换。所有 Profile 的外部字节均预检通过后才开始恢复，冲突则保留现场。
 
@@ -555,7 +564,7 @@ foreach ($package in $packages) {
 piko doctor
 ```
 
-`z.lua` 需要先安装并选择 Piko 的 Lua，`PSFzf` 需要先安装并选择 fzf；也可用已有的 `install --with-deps --dry-run`／`--yes --binding` 审批依赖计划。Shell 初始化另用 `integrate --shell pwsh --dry-run` 与 `--approve-shell --binding`，不在安装阶段静默执行。已有手写初始化需用户移除冲突行，Piko 不猜测或覆盖个人 Profile。`doctor` 在无待恢复操作时只诊断，不增加状态 revision；存在恢复日志时仍执行安全恢复。
+`z.lua` 需要先安装并选择 Piko 的 Lua，`PSFzf` 需要先安装并选择 fzf；也可用已有的 `install --with-deps --dry-run`／`--yes --binding` 审批依赖计划。Shell 初始化另用 `integrate --shell pwsh` 预览后交互确认，已有集成更新后可用 `integrate <包名>` 重新确认；自动化继续使用 `--dry-run` 与 `--approve-shell --binding`，不在安装阶段静默执行。已有手写初始化需用户移除冲突行，Piko 不猜测或覆盖个人 Profile。`doctor` 在无待恢复操作时只诊断，不增加状态 revision；存在恢复日志时仍执行安全恢复。
 
 Rust 的全新安装沿用下一节的 `install → bootstrap → use`，之后再显式安装需要的工具链。复制旧工具链／缓存属于旧机器的数据迁移，不是新电脑安装的前置条件。CLI 端到端回归 `tests/native-workflow.test.ts` 从空根开始，仅用公开命令安装一批夹具，再统一验证引导、依赖、5.1／7 Shell 初始化与命令入口。
 

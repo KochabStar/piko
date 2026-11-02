@@ -158,6 +158,26 @@ function findInstallation(state: State, spec: string) {
   );
 }
 
+export function existingIntegrationProfile(
+  state: State,
+  spec: string,
+  path?: string,
+): ProfileIntegration {
+  const install = findInstallation(state, spec),
+    profiles = Object.values(state.profiles ?? {}).filter(
+      (profile) =>
+        profile.approvals[install.key] &&
+        (path === undefined || profileKey(profile.path) === profileKey(path)),
+    );
+  if (!profiles.length)
+    fail(
+      "No matching Shell integration; specify --shell powershell, pwsh, or bash to create one",
+    );
+  if (profiles.length !== 1)
+    fail("Multiple Shell Profiles match; specify --profile <path>");
+  return profiles[0]!;
+}
+
 async function integrationPlan(
   root: string,
   state: State,
@@ -405,7 +425,7 @@ export async function shellInit(
       const content = await shellContent(store.root, state, install, shell);
       if (content.binding !== approval.binding)
         fail(
-          "content or dependency changed; preview and approve integration again",
+          `content or dependency changed; run piko integrate ${install.source.alias}/${install.name} to preview and approve integration again`,
         );
       if (shell === "bash") {
         output.push(
@@ -483,7 +503,7 @@ export async function shellDiagnostics(store: Store) {
               .binding !== approval.binding
           )
             throw new Error(
-              "Content or dependency changed; preview and approve integration again",
+              `Content or dependency changed; run piko integrate ${install.source.alias}/${install.name} to preview and approve integration again`,
             );
         } catch (error) {
           status = "blocked";

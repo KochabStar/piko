@@ -62,7 +62,8 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko persist <package> --fresh --dry-run | --yes --binding <hash>
   piko persist <package> --remove --dry-run | --yes --binding <hash>
   piko persist --recover
-  piko integrate <package> --shell powershell|pwsh [--profile <path>] --dry-run
+  piko integrate <package>            Preview and confirm an existing Shell integration
+  piko integrate <package> --shell powershell|pwsh|bash [--profile <path>] [--dry-run]
   piko integrate <package> --shell powershell|pwsh --approve-shell --binding <hash>
   piko unintegrate <package> --shell powershell|pwsh [--dry-run | --yes] [--binding <hash>]
   piko shell init --shell powershell|bash --profile <path>
@@ -607,17 +608,34 @@ async function main(): Promise<number> {
         );
         break;
       }
-      const shell = values.shell;
-      if (shell !== "powershell" && shell !== "pwsh" && shell !== "bash")
+      if (
+        values.shell !== undefined &&
+        values.shell !== "powershell" &&
+        values.shell !== "pwsh" &&
+        values.shell !== "bash"
+      )
         fail(
           "Specify --shell powershell (5.1), pwsh (7), or bash with --profile",
         );
-      if (shell === "bash" && !values.profile)
+      const { existingIntegrationProfile, inspectIntegration, integrate } =
+        await import("./shell.ts");
+      const remove = args[0] === "unintegrate",
+        spec = required(1),
+        existing =
+          values.shell === undefined
+            ? existingIntegrationProfile(
+                await store.read(),
+                spec,
+                values.profile,
+              )
+            : undefined,
+        shell = values.shell ?? existing?.shell ?? "powershell";
+      if (shell === "bash" && !values.profile && !existing)
         fail("Bash integration requires an explicit --profile path");
-      const { inspectIntegration, integrate } = await import("./shell.ts");
       const profile = values.profile
         ? resolve(values.profile)
-        : await capture(
+        : (existing?.path ??
+          (await capture(
             powershellExecutable(shell === "pwsh" ? "pwsh" : "powershell"),
             [
               "-NoLogo",
@@ -626,9 +644,7 @@ async function main(): Promise<number> {
               "-Command",
               "$PROFILE.CurrentUserAllHosts",
             ],
-          );
-      const remove = args[0] === "unintegrate",
-        spec = required(1);
+          )));
       const plan = await inspectIntegration(
         store,
         spec,
@@ -638,17 +654,39 @@ async function main(): Promise<number> {
       );
       console.log(JSON.stringify(plan, null, 2));
       if (values["dry-run"]) break;
-      if (remove ? !values.yes : !values["approve-shell"])
-        fail(
-          remove
-            ? "Removal requires --yes and preview --binding"
-            : "Shell code execution requires --approve-shell and preview --binding; --yes alone is insufficient",
-        );
+      let binding = values.binding;
+      if (remove) {
+        if (!values.yes) fail("Removal requires --yes and preview --binding");
+      } else if (!values["approve-shell"] || binding === undefined) {
+        if (
+          binding !== undefined ||
+          values.json ||
+          !process.stdin.isTTY ||
+          !process.stdout.isTTY
+        )
+          fail(
+            "Non-interactive Shell code execution requires --approve-shell and preview --binding; --yes alone is insufficient",
+          );
+        const prompt = createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        try {
+          const answer = await prompt.question(
+            "Allow the Shell initialization shown above with your user permissions in future sessions? [y/N]: ",
+          );
+          if (!/^(y|yes)$/i.test(answer.trim()))
+            fail("Shell integration cancelled");
+        } finally {
+          prompt.close();
+        }
+        binding = plan.binding;
+      }
       console.log(
         JSON.stringify(
           await integrate(store, spec, profile, {
             confirmed: true,
-            binding: values.binding,
+            binding,
             remove,
             shell: shell === "bash" ? "bash" : "powershell",
           }),
