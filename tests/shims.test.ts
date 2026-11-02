@@ -45,6 +45,38 @@ test("native shim is a small PE with Scoop-shaped companion metadata, not the ru
     VERSION,
   );
 });
+test("verified protocol-compatible release shims survive different compiler builds", async () => {
+  const root = join(work, "release-build"),
+    target = await setup(root),
+    shim = join(root, "shims/piko.exe"),
+    config = join(root, "shims/piko.shim"),
+    release = Buffer.from(
+      await readFile(
+        resolve("tests/fixtures/native-shim-0.4.1.base64"),
+        "utf8",
+      ),
+      "base64",
+    );
+  await writeFile(shim, release);
+  expect((await inspectShim(root, "piko")).kind).toBe("native");
+  const inode = (await stat(shim)).ino;
+  await ensureShim(root, "piko");
+  expect(await readFile(shim)).toEqual(release);
+  expect((await stat(shim)).ino).toBe(inode);
+  expect((await capture(shim, ["--version"], { env: env(root) })).trim()).toBe(
+    VERSION,
+  );
+  await writeFile(config, "external configuration");
+  await expect(ensureShim(root, "piko")).rejects.toThrow("configuration");
+  await writeFile(config, shimConfiguration("piko"));
+  const changed = Buffer.from(release);
+  changed[64] = changed[64]! ^ 1;
+  await writeFile(shim, changed);
+  await expect(ensureShim(root, "piko")).rejects.toThrow("external shim");
+  expect(await readFile(shim)).toEqual(changed);
+  expect(await exists(target)).toBe(true);
+});
+
 test("verified old hardlinks migrate without truncating the real executable", async () => {
   const root = join(work, "legacy");
   await mkdir(join(root, "apps/piko"), { recursive: true });

@@ -13,6 +13,14 @@ import { exists, fail, noLinks, sha256, commandName } from "./util.ts";
 const launcher = Buffer.from(nativeShimBase64, "base64");
 if (sha256(launcher) !== nativeShimSha256)
   fail("Embedded native shim checksum differs");
+// Verified protocol-1 builds from the Windows development toolchain and the
+// published 0.4.1 release. Compiler differences do not change their protocol.
+// Preserve compatible launchers, including ones still running, across updates.
+const compatibleLaunchers = new Set([
+  nativeShimSha256,
+  "bdd2164ad26f44755496cf512bf2fa71ca9f46c83b128bc5f9ef2a0c9ecadf5d",
+  "3d6d5bb9619515fd7f19986a418ea89390cc377bfd52319f866d9260064ab0f9",
+]);
 function validateName(name: string) {
   if (name !== "piko") commandName(name);
 }
@@ -38,8 +46,8 @@ export async function inspectShim(
     return { kind: hasConfig ? "configuration-only" : "missing", file, config };
   const info = await stat(file);
   if (
-    info.size === launcher.length &&
-    sha256(await readFile(file)) === nativeShimSha256
+    info.size <= 65536 &&
+    compatibleLaunchers.has(sha256(await readFile(file)))
   )
     return {
       kind: hasConfig ? "native" : "native-without-config",

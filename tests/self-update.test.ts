@@ -105,6 +105,33 @@ test("self update preserves lightweight shims and state, supports rollback and r
   expect(prepared.version).toBe(VERSION);
 }, 60000);
 
+test("self update preserves verified protocol-compatible shims from another compiler build", async () => {
+  const root = join(work, "different-shim-build");
+  await run(root, exe, ["setup"]);
+  const shim = join(root, "shims/piko.exe"),
+    release = Buffer.from(
+      await readFile(
+        resolve("tests/fixtures/native-shim-0.4.1.base64"),
+        "utf8",
+      ),
+      "base64",
+    );
+  await writeFile(shim, release);
+  const before = await readFile(join(root, "apps/piko/state.json"));
+  const dead = Bun.spawn([exe, "--version"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await dead.exited;
+  await prepareSelfUpdate(root, exe, await executableHash(exe), dead.pid);
+  await applySelfUpdate(root, false);
+  expect((await selfUpdateStatus(root)).pending).toBeNull();
+  expect((await selfUpdateStatus(root)).last.phase).toBe("committed");
+  expect(await readFile(shim)).toEqual(release);
+  expect(await readFile(join(root, "apps/piko/state.json"))).toEqual(before);
+  expect((await run(root, shim, ["--version"])).trim()).toBe(VERSION);
+}, 60000);
+
 test("older executable upgrades to new bytes and interrupted directory swap rolls forward", async () => {
   const root = join(work, "real-upgrade"),
     older = (await exists(
