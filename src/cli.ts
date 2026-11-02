@@ -87,7 +87,7 @@ const help = `Piko ${VERSION} — Windows package manager (preview)
   piko maintenance orphans | quarantine [--dry-run | --yes]
   piko maintenance layout --dry-run | --yes --binding <hash> | --recover
   piko cache list | clean [--dry-run | --yes]
-  piko uninstall <package>@<exact-version> [--force]
+  piko uninstall <package>[@exact-version] [--force]   Remove selected or sole installed version
   piko which <command>
   piko scripts list <npm:package>@<exact-version>
   piko scripts approve <spec> [--package-path node_modules/name] [--binding hash] [--yes]
@@ -1077,6 +1077,10 @@ async function main(): Promise<number> {
       break;
     }
     case "uninstall":
+      if (values["dry-run"])
+        fail(
+          "Uninstall does not support --dry-run; inspect installed versions with piko list",
+        );
       await packages.uninstall(required(1), values.force);
       console.log("Uninstalled; persistent data retained");
       break;

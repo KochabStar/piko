@@ -1844,10 +1844,17 @@ export class Packages {
     await this.store.mutate(async (state) => {
       upgradeState(state);
       const match = this.installed(state, spec);
-      if (!match.request) fail("Uninstall requires an exact installed version");
-      const installation = match.installs.find(
-        (i) => i.version === match.request,
-      );
+      const installation =
+        match.request === undefined
+          ? match.installs.length === 1
+            ? match.installs[0]
+            : (match.installs.find(
+                (i) => i.id === state.defaults[match.key]?.id,
+              ) ??
+              fail(
+                "Multiple versions are installed with no selected default; specify <package>@<exact-version>",
+              ))
+          : match.installs.find((i) => i.version === match.request);
       if (!installation) fail("Exact installed version not found");
       await (
         await import("./data-profiles.ts")
@@ -1866,7 +1873,7 @@ export class Packages {
       if (expected && JSON.stringify(expected) !== JSON.stringify(installation))
         fail("Installation changed since cleanup preview");
       if (state.defaults[match.key]?.id === installation.id) {
-        if (!force)
+        if (!force && match.request !== undefined)
           fail(
             "Cannot uninstall the default version; switch or unuse it first, or explicitly use --force",
           );

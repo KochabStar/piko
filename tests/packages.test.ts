@@ -212,6 +212,64 @@ describe("portable package lifecycle", () => {
     expect(await exists(join(p.root, a.dir, "tool.exe"))).toBe(true);
     expect((await p.store.read()).defaults).toEqual({});
   });
+  test("package-name uninstall removes the sole inactive version without a source prefix", async () => {
+    const p = await manager("uninstall-sole"),
+      installed = await p.install("main/tool@1.0.0");
+    await p.uninstall("tool");
+    expect((await p.store.read()).installs).toEqual({});
+    expect(await exists(join(p.root, installed.dir))).toBe(false);
+  });
+  test("package-name uninstall clears the selected version and its command aliases", async () => {
+    const p = await manager("uninstall-selected"),
+      installed = await p.install("main/tool@1.0.0");
+    await p.use("tool@1.0.0");
+    await p.aliasCommand("alternate-tool", "tool", "tool");
+    await p.uninstall("tool");
+    const state = await p.store.read();
+    expect(state.installs).toEqual({});
+    expect(state.defaults).toEqual({});
+    expect(state.commands).toEqual({});
+    expect(state.aliases).toEqual({});
+    expect(await exists(join(p.root, "shims", "tool.exe"))).toBe(false);
+    expect(await exists(join(p.root, "shims", "alternate-tool.exe"))).toBe(
+      false,
+    );
+    expect(
+      await exists(join(p.root, "apps", appFolder(installed), "current")),
+    ).toBe(false);
+  });
+  test("package-name uninstall removes only the selected version without activating another copy", async () => {
+    const p = await manager("uninstall-selected-multiple"),
+      selected = await p.install("main/tool@1.0.0"),
+      other = await p.install("main/tool@2.0.0");
+    await p.use("tool@1.0.0");
+    await p.uninstall("tool");
+    const state = await p.store.read();
+    expect(state.installs[selected.id]).toBeUndefined();
+    expect(state.installs[other.id]).toBeDefined();
+    expect(state.defaults[selected.key]).toBeUndefined();
+    expect(await exists(join(p.root, selected.dir))).toBe(false);
+    expect(await exists(join(p.root, other.dir))).toBe(true);
+    expect(
+      await exists(join(p.root, "apps", appFolder(selected), "current")),
+    ).toBe(false);
+  });
+  test("package-name uninstall refuses multiple inactive versions and non-exact requests", async () => {
+    const p = await manager("uninstall-ambiguous"),
+      first = await p.install("main/tool@1.0.0"),
+      second = await p.install("main/tool@2.0.0");
+    const before = await readFile(p.store.statePath);
+    await expect(p.uninstall("tool")).rejects.toThrow("no selected default");
+    await expect(p.uninstall("main/tool")).rejects.toThrow(
+      "no selected default",
+    );
+    await expect(p.uninstall("tool@latest")).rejects.toThrow(
+      "Exact installed version",
+    );
+    expect(await readFile(p.store.statePath)).toEqual(before);
+    expect(await exists(join(p.root, first.dir))).toBe(true);
+    expect(await exists(join(p.root, second.dir))).toBe(true);
+  });
   test("major request survives update and retains old version", async () => {
     const p = await manager("update");
     await p.install("tool@1.0.0");
@@ -339,7 +397,7 @@ describe("portable package lifecycle", () => {
         );
       await writeFile(data, "retained");
       await p.use("tool@1.0.0");
-      await p.uninstall("tool@1.0.0", true);
+      await p.uninstall("tool");
       expect(await readFile(data, "utf8")).toBe("retained");
       expect(await exists(join(p.root, i.dir))).toBe(false);
     } finally {

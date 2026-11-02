@@ -89,6 +89,16 @@ async function fixture() {
   await writeFile(join(root, old.dir, "data/settings"), "persistent data kept");
   return { p, effects, old };
 }
+test("package-name uninstall still protects a selected version that is in use", async () => {
+  const { p, old } = await fixture();
+  const before = await readFile(p.store.statePath);
+  await expect(p.uninstall("extension")).rejects.toThrow(
+    "loaded DLLs/processes",
+  );
+  expect(await readFile(p.store.statePath)).toEqual(before);
+  expect(await exists(join(p.root, old.dir, "extension.exe"))).toBe(true);
+});
+
 test("loaded old executable images never block side-by-side update; cleanup defers without rename/delete", async () => {
   const { p, effects, old } = await fixture();
   latest = "2.0.0";
@@ -154,6 +164,10 @@ test("active system registration is still content-approved; loaded-image support
     },
   };
   await atomicJson(p.store.statePath, state);
+  await expect(p.uninstall("extension")).rejects.toThrow(
+    "desktop/system integration",
+  );
+  expect(await p.store.read()).toEqual(state);
   latest = "2.0.0";
   const next = await p.install("main/extension@2.0.0");
   await expect(p.use("main/extension@2.0.0")).rejects.toThrow(

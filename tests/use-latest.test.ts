@@ -272,4 +272,14 @@ test("compiled CLI installs latest in one command and rejects dry-run before cha
     request: "latest",
     commands: [],
   });
+  const beforeUninstall = await readFile(manager.store.statePath);
+  await expect(
+    capture(exe, ["uninstall", "tool", "--dry-run"], { env }),
+  ).rejects.toThrow("does not support --dry-run");
+  expect(await readFile(manager.store.statePath)).toEqual(beforeUninstall);
+  expect(await capture(exe, ["uninstall", "tool"], { env })).toContain(
+    "Uninstalled",
+  );
+  expect((await manager.store.read()).installs).toEqual({});
+  expect((await manager.store.read()).defaults).toEqual({});
 }, 60000);

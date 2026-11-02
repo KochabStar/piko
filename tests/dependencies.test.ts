@@ -341,6 +341,7 @@ test("active dependency protection covers command transfers, aliases, unuse and 
   await expect(p.uninstall("main/runtime@1.0.0", true)).rejects.toThrow(
     "Dependency protection",
   );
+  await expect(p.uninstall("runtime")).rejects.toThrow("Dependency protection");
   expect(await p.store.read()).toEqual(before);
   expect(await exists(join(p.root, runtime.dir, "tool.exe"))).toBe(true);
   await p.unuse("main/consumer");
