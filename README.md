@@ -371,6 +371,9 @@ piko info main/java --distribution temurin
 ## 旧安装版本清理
 
 ```powershell
+piko update *                         # 更新所有已选软件；与 update --all 等价
+piko cleanup *                        # 所有包保留默认版本和 1 个其他版本
+piko cleanup * --dry-run              # 仅预览
 piko cleanup main/node --versions --keep 2 --dry-run
 piko cleanup main/node --versions --keep 2 --yes
 piko cleanup --versions --keep 1 --dry-run   # 所有已登记包
@@ -380,7 +383,7 @@ piko cleanup main/node --versions --keep 0 --yes --binding <hash>
 
 `--keep N` 表示除默认版本外再保留 N 个版本，默认 N=1；默认版本始终保护，N=0 也不删除它。标准语义版本按版本从高到低排序，其他版本标识按数字感知的字符串排序（不代表上游发布时间），请核对预览。只卸载已登记且收据一致的版本，保留 persist 数据，不清理缓存，也不扫描未知目录；不与 `--data` 混用。
 
-执行前和每次卸载持锁时重新检查目标，默认或收据漂移会拒绝。逐项沿用已有卸载日志恢复，不是全包原子操作；失败项列明错误，其他项继续。没有传 `--yes` 不删除任何版本。
+执行前和每次卸载持锁时重新检查目标，默认或收据漂移会拒绝。逐项沿用已有卸载日志恢复，不是全包原子操作；失败项列明错误，其他项继续。常规版本清理必须传 `--yes`；交互终端中的 `cleanup *` 可输入 `CLEANUP` 确认，非交互脚本仍须先检查预览再传 `--yes`。
 
 ## 整机软件清单导出／恢复
 
@@ -460,6 +463,11 @@ piko persist --recover # 仅用于中断日志前滚恢复
 这是固定目录／配置值重定向，不是容器或沙箱，不保证应用的日志、缓存、系统组件及任意用户选定路径全部位于 persist。浏览器凭据可能绑定旧 EXE 加密身份，不迁移、不解密。新账号登录、跨版本数据库兼容、GUI 实际写入与应用自更新须独立验收。原清单已有包内 `persist` 的软件仍按清单执行。
 
 ## 软件源声明的 Shell 初始化
+
+```powershell
+piko help integrate
+# 也可用：piko integrate --help
+```
 
 支持 PowerShell 与 Git Bash 分别声明、分别批准。Bash 使用 `shell.bash`，接入时指定 `--shell bash --profile <UTF-8文件>`；不自动翻译现有 PowerShell 初始化。`piko shell env --shell powershell|pwsh|cmd|bash|json` 另行输出默认环境文本，不执行软件初始化或修改父 Shell。
 

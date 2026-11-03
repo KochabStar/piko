@@ -515,7 +515,25 @@ test("compiled P1 CLI exposes read-only status, runtime distribution, cleanup an
   expect(status.code).toBe(0);
   expect(JSON.parse(status.out)[0].candidate).toBe("1.1.0");
   expect((await run(p.root, ["update", "--all", "--dry-run"])).code).toBe(0);
+  expect((await run(p.root, ["update", "*", "--dry-run"])).code).toBe(0);
   expect(await p.store.read()).toEqual(before);
+  await p.install("tool@2.0.0");
+  const cleanupPreview = await run(p.root, ["cleanup", "*", "--dry-run"]);
+  expect(cleanupPreview.code).toBe(0);
+  expect(
+    JSON.parse(cleanupPreview.out).entries.some(
+      (entry: { version: string; action: string }) =>
+        entry.version === "1.0.0" && entry.action === "remove",
+    ),
+  ).toBe(true);
+  const cleaned = await run(p.root, ["cleanup", "*", "--yes"]);
+  expect(cleaned.code).toBe(0);
+  const stateAfterClean = await p.store.read();
+  expect(
+    Object.values(stateAfterClean.installs).some(
+      (i) => i.name === "tool" && i.version === "1.0.0",
+    ),
+  ).toBe(false);
   expect(
     (await run(p.root, ["cleanup", "main/tool", "--versions", "--keep", "0"]))
       .code,
