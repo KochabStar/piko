@@ -98,6 +98,46 @@ test("compiled cleanup CLI previews and requires --data plus explicit non-intera
     }).toEqual({ code: expected, expected, error: undefined });
     return { out, err };
   };
+  const helpTopics = [
+    "install",
+    "i",
+    "use",
+    "unuse",
+    "uninstall",
+    "list",
+    "search",
+    "info",
+    "outdated",
+    "status",
+    "update",
+    "cleanup",
+    "source",
+    "cache",
+    "integrate",
+    "unintegrate",
+    "shell",
+    "persist",
+    "reset",
+    "command",
+    "bootstrap",
+    "system",
+    "rust",
+    "export",
+    "import",
+    "maintenance",
+    "scripts",
+    "self",
+    "setup",
+    "recover",
+    "doctor",
+    "which",
+    "help",
+  ];
+  for (const topic of helpTopics) {
+    const details = await run(["help", topic]);
+    expect(details.out).toContain("Usage:");
+  }
+  expect((await run(["source", "--help"])).out).toContain("piko source add");
   await run(["setup"]);
   await run(["source", "add", "main", `http://127.0.0.1:${server.port}/`]);
   await run(["install", "main/saved@1.0.0"]);

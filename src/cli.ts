@@ -83,23 +83,195 @@ Progress/color: --progress auto|always|never; --color auto|always|never
 PIKO_HOME overrides the user installation root. Install/update never run lifecycle scripts.
 See README for detailed options and confirmation requirements.
 `;
-const integrationHelp = `Piko ${VERSION} — Shell integration
+const commandHelp: Record<string, string> = {
+  install: `Usage:
+  piko install <source/package>[@version] [--skip-checksum]
+  piko install <spec> --with-deps --dry-run
+  piko install <spec> --with-deps --yes --binding <hash>
 
-Usage:
-  piko integrate <package> --shell powershell|pwsh [--profile <path>]
-  piko integrate <package> --shell bash --profile <path>
+Install a version without selecting it. Alias: piko i.
+`,
+  use: `Usage: piko use <package>[@version] [--no-commands] [--distribution <vendor>]
+       piko use <package>@latest
+
+Select an installed version; @latest installs the missing latest version first.
+`,
+  unuse: `Usage: piko unuse <package>
+
+Clear the selected version without uninstalling it or deleting persistent data.
+`,
+  uninstall: `Usage: piko uninstall <package>[@exact-version] [--force]
+
+Uninstall a non-default version, or the selected/sole version. Persistent data is retained.
+`,
+  list: `Usage: piko list [query] [--selected] [--verbose] [--json]
+
+List installed packages; query filters by package, source, or version.
+`,
+  search: `Usage: piko search <query> [--refresh] [--json]
+
+Search cached source indexes. --refresh explicitly fetches sources.
+`,
+  info: `Usage: piko info <package>[@version] [--distribution <vendor>]
+
+Show installed and available versions, provenance, and dependency checks.
+`,
+  outdated: `Usage: piko outdated [package] [--json]
+
+Check remote candidates without installing or changing selected versions.
+`,
+  status: `Usage: piko status [package] [--json]
+
+Alias for outdated; show current requests, candidates, and blocked updates.
+`,
+  update: `Usage:
+  piko update <package> [--dry-run]
+  piko update * [--dry-run]
+  piko update [piko] [--dry-run | --yes]
+
+Update selected software while retaining each saved version request. Use piko update piko to update Piko itself.
+`,
+  cleanup: `Usage:
+  piko cleanup * [--keep N] [--dry-run | --yes]
+  piko cleanup <package> --versions [--keep N] [--dry-run | --yes]
+  piko cleanup <package> --data [--dry-run | --yes]
+
+Version cleanup keeps the default plus N other versions (default N=1; cleanup * defaults to N=0). Preview first.
+On an interactive terminal, cleanup * asks you to type yes; non-interactive deletion requires --yes.
+Data cleanup permanently deletes only recorded persistent directories and requires every version to be uninstalled.
+`,
+  source: `Usage:
+  piko source add <alias> <url> [--type http|git] [--ref <ref>]
+  piko source list
+  piko source refresh [alias]
+  piko source remove <alias> [--force]
+
+Manage package catalog sources. Removing a source does not uninstall its packages.
+`,
+  cache: `Usage:
+  piko cache list [--json]
+  piko cache clean [--dry-run | --yes]
+
+Inspect or remove unreferenced caches. Preview before confirming deletion.
+`,
+  integrate: `Usage:
+  piko integrate <package> [--shell powershell|pwsh|bash] [--profile <path>]
   piko integrate <package> --shell powershell|pwsh --dry-run
   piko integrate <package> --shell powershell|pwsh --approve-shell --binding <hash>
-  piko unintegrate <package> --shell powershell|pwsh [--dry-run | --yes --binding <hash>]
+  piko integrate <package> --desktop [--dry-run | --yes --binding <hash>]
 
-Shells: powershell = Windows PowerShell 5.1; pwsh = PowerShell 7; bash requires an explicit UTF-8 profile.
-Without --profile, PowerShell uses the selected shell's CurrentUserAllHosts profile.
-First interactive integration previews changes and asks for confirmation; --yes does not bypass Shell approval.
-For automation, run --dry-run, inspect the preview, then approve with its binding. If anything changes, preview again.
-Without --shell, integrate can reuse an existing integration; ambiguous profiles must be selected explicitly.
-Integrations run with the user's permissions; they are not a sandbox. Piko does not change ExecutionPolicy.
-Run piko setup before using Shell integration.
-`;
+PowerShell defaults to the selected shell's CurrentUserAllHosts profile; Bash requires --profile.
+Interactive Shell integration previews and asks for confirmation. Automation must preview, then use its binding.
+Approvals run with user permissions and are not a sandbox; ExecutionPolicy is not changed.
+`,
+  unintegrate: `Usage:
+  piko unintegrate <package> --shell powershell|pwsh [--dry-run | --yes --binding <hash>]
+  piko unintegrate <package> --desktop [--dry-run | --yes --binding <hash>]
+
+Preview and explicitly confirm removal of a Piko-managed integration.
+`,
+  shell: `Usage:
+  piko shell init --shell powershell|bash --profile <path>
+  piko shell env --shell powershell|pwsh|cmd|bash|json
+
+Initialize supported Shell integration or print the managed environment.
+`,
+  persist: `Usage:
+  piko persist <package> --fresh --dry-run
+  piko persist <package> --fresh --yes --binding <hash>
+  piko persist <package> --remove --dry-run
+  piko persist <package> --remove --yes --binding <hash>
+  piko persist --recover
+
+Preview data-profile changes before approving them with the displayed binding.
+`,
+  reset: `Usage: piko reset <package> | piko reset --all [--dry-run]
+
+Repair selected versions, command shims, shortcuts, and managed data mappings.
+`,
+  command: `Usage:
+  piko command list [--json]
+  piko command claim <command> <package>
+  piko command release <command>
+  piko command alias <name> <package> <provided-command>
+  piko command unalias <name>
+
+Inspect and manage Piko command ownership and aliases.
+`,
+  bootstrap: `Usage: piko bootstrap <package> --dry-run
+       piko bootstrap <package> --approve-exec --binding <hash>
+
+Review and explicitly approve a package bootstrap operation. Approved code runs with user permissions.
+`,
+  system: `Usage:
+  piko system <package> [--remove] [--dry-run | --approve-admin --binding <hash>]
+  piko system <package>@<installed-version> --upgrade --dry-run
+  piko system <package>@<installed-version> --upgrade --approve-admin --binding <hash>
+
+Review administrative integration changes before approving them.
+`,
+  rust: `Usage:
+  piko rust list
+  piko rust install|use|update|remove <toolchain> --dry-run
+  piko rust install|use|update|remove <toolchain> --approve-exec --binding <hash>
+
+Manage Rust toolchains through rustup with explicit execution approval.
+`,
+  export: `Usage: piko export [file.json] [--lock]
+
+Export installed package inventory; --lock includes supported npm dependency locks.
+`,
+  import: `Usage: piko import <file.json> --dry-run
+       piko import <file.json> --yes --binding <hash>
+
+Preview inventory restoration, then confirm using the preview binding.
+`,
+  maintenance: `Usage:
+  piko maintenance orphans
+  piko maintenance quarantine [--dry-run | --yes]
+  piko maintenance layout --dry-run
+  piko maintenance layout --yes --binding <hash>
+  piko maintenance layout --recover
+
+Inspect or repair managed installation layout and orphan state.
+`,
+  scripts: `Usage:
+  piko scripts list <npm:package>@<exact-version>
+  piko scripts approve <spec> [--package-path node_modules/name] [--binding <hash>] [--yes]
+  piko scripts revoke <spec> [--package-path node_modules/name]
+  piko scripts rebuild <spec>
+
+npm lifecycle scripts are disabled unless their exact content is explicitly approved.
+`,
+  self: `Usage:
+  piko self update [latest] [--dry-run | --yes]
+  piko self update <file|https-url> --sha256 <hash> --yes
+  piko self status | rollback --yes | recover [--force]
+
+Inspect, update, roll back, or recover Piko itself.
+`,
+  setup: `Usage: piko setup [--path]
+
+Install this Piko executable for the current user; --path adds its shims to user PATH.
+`,
+  recover: `Usage: piko recover [--force]
+
+Recover interrupted managed operations. --force only removes a stale lock after checking its owner.
+`,
+  doctor: `Usage: piko doctor
+
+Validate managed state, installations, receipts, integrations, and recovery journals.
+`,
+  which: `Usage: piko which <command>
+
+Show the selected managed package that provides a command.
+`,
+  help: `Usage: piko help [command]
+       piko <command> --help
+
+Show concise global help or detailed usage for any top-level command.
+`,
+};
 async function main(): Promise<number> {
   if (process.platform !== "win32") fail("This release only supports Windows");
   const root = home(),
@@ -191,20 +363,20 @@ async function main(): Promise<number> {
     console.log(VERSION);
     return 0;
   }
-  if (args[0] === "help") {
-    if (args.length > 2) fail("Use piko help <command> or piko --help");
-    if (!args[1]) {
+  const helpTopic =
+    args[0] === "help" ? args[1] : values.help ? args[0] : undefined;
+  if (helpTopic || args[0] === "help") {
+    if (args[0] === "help" && args.length > 2)
+      fail("Use piko help <command> or piko --help");
+    if (!helpTopic) {
       console.log(help);
       return 0;
     }
-    if (["integrate", "unintegrate"].includes(args[1])) {
-      console.log(integrationHelp);
-      return 0;
-    }
-    fail(`No detailed help available for ${args[1]}; run piko --help`);
-  }
-  if (values.help && ["integrate", "unintegrate"].includes(args[0] ?? "")) {
-    console.log(integrationHelp);
+    const topic = helpTopic === "i" ? "install" : helpTopic;
+    if (!Object.hasOwn(commandHelp, topic))
+      fail(`No detailed help available for ${helpTopic}; run piko --help`);
+    const details = commandHelp[topic]!;
+    console.log(`Piko ${VERSION} — ${topic}\n\n${details}`);
     return 0;
   }
   if (values.help || !args.length) {
@@ -1161,7 +1333,12 @@ async function main(): Promise<number> {
         if (values.data) fail("Choose --versions or --data, not both");
         if (values.keep !== undefined && !/^\d+$/.test(values.keep))
           fail("--keep must be a nonnegative integer");
-        const keep = values.keep === undefined ? 1 : Number(values.keep);
+        const keep =
+          values.keep === undefined
+            ? allVersions
+              ? 0
+              : 1
+            : Number(values.keep);
         const spec = allVersions ? undefined : args[1];
         const plan = await packages.versionCleanupPlan(spec, keep);
         console.log(
@@ -1180,9 +1357,7 @@ async function main(): Promise<number> {
         if (values["dry-run"]) break;
         if (!values.yes) {
           if (!allVersions || !process.stdin.isTTY || !process.stdout.isTTY)
-            fail(
-              "Version cleanup requires --yes after reviewing --dry-run (interactive piko cleanup * prompts for confirmation)",
-            );
+            fail("Version cleanup requires --yes after reviewing --dry-run");
           const prompt = createInterface({
             input: process.stdin,
             output: process.stdout,
@@ -1190,8 +1365,8 @@ async function main(): Promise<number> {
           try {
             if (
               (await prompt.question(
-                "Remove old versions from all packages? Type CLEANUP: ",
-              )) !== "CLEANUP"
+                "Remove old versions from all packages? Type yes: ",
+              )) !== "yes"
             )
               fail("Version cleanup cancelled");
           } finally {
