@@ -192,8 +192,7 @@ async function main(): Promise<number> {
     return 0;
   }
   if (args[0] === "help") {
-    if (args.length > 2)
-      fail("Use piko help <command> or piko --help");
+    if (args.length > 2) fail("Use piko help <command> or piko --help");
     if (!args[1]) {
       console.log(help);
       return 0;
@@ -204,10 +203,7 @@ async function main(): Promise<number> {
     }
     fail(`No detailed help available for ${args[1]}; run piko --help`);
   }
-  if (
-    values.help &&
-    ["integrate", "unintegrate"].includes(args[0] ?? "")
-  ) {
+  if (values.help && ["integrate", "unintegrate"].includes(args[0] ?? "")) {
     console.log(integrationHelp);
     return 0;
   }
