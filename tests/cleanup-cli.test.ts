@@ -139,6 +139,34 @@ test("compiled cleanup CLI previews and requires --data plus explicit non-intera
   }
   expect((await run(["source", "--help"])).out).toContain("piko source add");
   await run(["setup"]);
+  const lock = join(home, "mutation.lock"),
+    dead = Bun.spawn([process.execPath, "--version"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  await dead.exited;
+  await mkdir(lock);
+  await writeFile(
+    join(lock, "owner.json"),
+    JSON.stringify({ pid: dead.pid, started: new Date().toISOString() }),
+  );
+  expect((await run(["recover", "--force"])).out).toContain(
+    "Recovery completed",
+  );
+  expect(await exists(lock)).toBe(false);
+  await mkdir(lock);
+  await writeFile(
+    join(lock, "owner.json"),
+    JSON.stringify({ pid: process.pid, started: new Date().toISOString() }),
+  );
+  try {
+    expect((await run(["recover", "--force"], 1)).err).toContain(
+      "owner is still running",
+    );
+    expect(await exists(lock)).toBe(true);
+  } finally {
+    await rm(lock, { recursive: true, force: true });
+  }
   await run(["source", "add", "main", `http://127.0.0.1:${server.port}/`]);
   await run(["install", "main/saved@1.0.0"]);
   const stateBeforeDoctor = await readFile(

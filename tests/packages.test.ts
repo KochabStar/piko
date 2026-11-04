@@ -14,7 +14,7 @@ import {
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Packages } from "../src/packages.ts";
-import { Store } from "../src/store.ts";
+import { Store, recoverStaleMutationLock } from "../src/store.ts";
 import { chooseVersion, normalizeManifest } from "../src/catalog.ts";
 import {
   component,
@@ -405,15 +405,75 @@ describe("portable package lifecycle", () => {
     }
   });
   test("a second writer cannot remove an active lock", async () => {
-    const p = await manager("lock");
-    await mkdir(join(p.root, "mutation.lock"));
+    const p = await manager("lock"),
+      lock = join(p.root, "mutation.lock");
+    await mkdir(lock);
+    await writeFile(
+      join(lock, "owner.json"),
+      JSON.stringify({ pid: process.pid, started: new Date().toISOString() }),
+    );
     try {
       await expect(p.install("tool@1.0.0")).rejects.toThrow(
-        "holds mutation.lock",
+        "run piko recover --force",
       );
-      expect(await exists(join(p.root, "mutation.lock"))).toBe(true);
+      expect(await exists(lock)).toBe(true);
     } finally {
-      await rm(join(p.root, "mutation.lock"), { recursive: true });
+      await rm(lock, { recursive: true });
+    }
+  });
+  test("recover --force clears a dead lock and next mutation recovers interrupted selection", async () => {
+    const p = await manager("stale-lock-recovery"),
+      installed = await p.install("tool@1.0.0"),
+      next = await p.install("tool@2.0.0");
+    await p.use("tool@1.0.0");
+    const before = await p.store.read(),
+      after = structuredClone(before);
+    after.revision++;
+    after.defaults[installed.key] = {
+      id: next.id,
+      request: next.version,
+    };
+    await atomicJson(p.store.journalPath, { before, after });
+    const current = join(p.root, "apps", appFolder(installed), "current");
+    await rm(current);
+    await symlink(resolve(join(p.root, next.dir)), current, "junction");
+    const dead = Bun.spawn([process.execPath, "--version"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await dead.exited;
+    const lock = join(p.root, "mutation.lock");
+    await mkdir(lock);
+    await writeFile(
+      join(lock, "owner.json"),
+      JSON.stringify({ pid: dead.pid, started: new Date().toISOString() }),
+    );
+    await expect(recoverStaleMutationLock(p.root)).resolves.toBe(true);
+    expect(await exists(lock)).toBe(false);
+    await p.use("tool@1.0.0");
+    expect(await exists(p.store.journalPath)).toBe(false);
+    expect((await p.store.read()).defaults[installed.key]?.id).toBe(
+      installed.id,
+    );
+    expect(resolve(await readlink(current)).toLowerCase()).toBe(
+      resolve(join(p.root, installed.dir)).toLowerCase(),
+    );
+  });
+  test("recover --force refuses a live lock owner", async () => {
+    const p = await manager("live-lock-owner"),
+      lock = join(p.root, "mutation.lock");
+    await mkdir(lock);
+    await writeFile(
+      join(lock, "owner.json"),
+      JSON.stringify({ pid: process.pid, started: new Date().toISOString() }),
+    );
+    try {
+      await expect(recoverStaleMutationLock(p.root)).rejects.toThrow(
+        "owner is still running",
+      );
+      expect(await exists(lock)).toBe(true);
+    } finally {
+      await rm(lock, { recursive: true });
     }
   });
   test("interrupted junction switch recovers old selection from journal", async () => {

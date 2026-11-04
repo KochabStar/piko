@@ -19,17 +19,10 @@ import { VERSION } from "./version.ts";
 import { createInterface } from "node:readline/promises";
 import { resolveCommand, commandNames } from "./commands.ts";
 import { basename, dirname, join, resolve } from "node:path";
-import {
-  copyFile,
-  mkdir,
-  stat,
-  rm,
-  readFile,
-  writeFile,
-} from "node:fs/promises";
+import { copyFile, mkdir, stat, readFile, writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { parseSpec } from "./catalog.ts";
-import { Store } from "./store.ts";
+import { Store, recoverStaleMutationLock } from "./store.ts";
 import { orphanPlan, quarantineOrphans } from "./maintenance.ts";
 import { cleanCache, cachePlan } from "./cache.ts";
 import {
@@ -40,7 +33,7 @@ import {
   pathDiagnostics,
   powershellExecutable,
 } from "./windows.ts";
-import { noLinks, fail, exists, json, capture } from "./util.ts";
+import { noLinks, fail, exists, capture } from "./util.ts";
 
 const help = `Piko ${VERSION} — Windows package manager (preview)
 
@@ -256,7 +249,7 @@ Install this Piko executable for the current user; --path adds its shims to user
 `,
   recover: `Usage: piko recover [--force]
 
-Recover interrupted managed operations. --force only removes a stale lock after checking its owner.
+Recover interrupted managed operations. --force removes only a mutation lock whose recorded owner has exited.
 `,
   doctor: `Usage: piko doctor
 
@@ -1445,24 +1438,7 @@ async function main(): Promise<number> {
       break;
     }
     case "recover": {
-      const lock = join(root, "mutation.lock");
-      if (await exists(lock)) {
-        const owner = await json(join(lock, "owner.json"));
-        if (!values.force)
-          fail(
-            "Inspect mutation.lock/owner.json, then explicitly use recover --force if its process is no longer running",
-          );
-        if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0)
-          fail("Invalid lock owner; inspect manually");
-        try {
-          process.kill(owner.pid, 0);
-          fail("Lock owner is still running; refusing to remove the lock");
-        } catch (error: any) {
-          if (error.code !== "ESRCH") throw error;
-        }
-        await noLinks(lock);
-        await rm(lock, { recursive: true });
-      }
+      if (values.force) await recoverStaleMutationLock(root);
       await packages.store.mutate(async () => {});
       console.log("Recovery completed");
       break;

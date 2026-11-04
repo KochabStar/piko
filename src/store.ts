@@ -442,6 +442,116 @@ export function validateState(state: any): asserts state is State {
     }
   }
 }
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === code
+  );
+}
+
+async function mutationLockOwner(ownerPath: string) {
+  await noLinks(ownerPath);
+  const value: unknown = await json(ownerPath);
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !("pid" in value) ||
+    typeof value.pid !== "number" ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid <= 0 ||
+    !("started" in value) ||
+    typeof value.started !== "string"
+  )
+    fail(
+      "Invalid mutation lock owner; inspect mutation.lock before removing it",
+    );
+  return { pid: value.pid, started: value.started };
+}
+
+async function assertMutationOwnerExited(pid: number): Promise<void> {
+  try {
+    process.kill(pid, 0);
+  } catch (error: unknown) {
+    if (hasErrorCode(error, "ESRCH")) return;
+    throw error;
+  }
+  fail("Mutation lock owner is still running; refusing to remove the lock");
+}
+
+export async function recoverStaleMutationLock(root: string): Promise<boolean> {
+  root = resolve(root);
+  const lock = join(root, "mutation.lock"),
+    ownerPath = join(lock, "owner.json");
+  await noLinks(lock);
+  if (!(await exists(lock))) return false;
+  if (!(await lstat(lock)).isDirectory())
+    fail("Invalid mutation lock; inspect it before removing it");
+  if (!(await exists(ownerPath)))
+    fail("Mutation lock owner is missing; inspect it before removing it");
+  const owner = await mutationLockOwner(ownerPath);
+  await assertMutationOwnerExited(owner.pid);
+  const abandoned = join(
+    root,
+    `mutation.lock.abandoned-${crypto.randomUUID()}`,
+  );
+  try {
+    await rename(lock, abandoned);
+  } catch (error: unknown) {
+    if (hasErrorCode(error, "ENOENT")) return false;
+    throw error;
+  }
+  try {
+    const movedOwner = await mutationLockOwner(join(abandoned, "owner.json"));
+    if (movedOwner.pid !== owner.pid || movedOwner.started !== owner.started)
+      fail(`Mutation lock changed during recovery; inspect ${abandoned}`);
+    await assertMutationOwnerExited(movedOwner.pid);
+    await rm(abandoned, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    if (await exists(abandoned)) {
+      if (await exists(lock))
+        fail(`Mutation lock changed during recovery; inspect ${abandoned}`);
+      try {
+        await rename(abandoned, lock);
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `Could not restore mutation lock; inspect ${abandoned}`,
+        );
+      }
+    }
+    throw error;
+  }
+}
+
+async function acquireMutationLock(root: string): Promise<string> {
+  const lock = join(root, "mutation.lock"),
+    pending = join(root, `mutation.lock-pending-${crypto.randomUUID()}`);
+  await mkdir(pending);
+  try {
+    await writeFile(
+      join(pending, "owner.json"),
+      JSON.stringify({ pid: process.pid, started: new Date().toISOString() }),
+      { flag: "wx" },
+    );
+    try {
+      await rename(pending, lock);
+    } catch (error: unknown) {
+      if (!(await exists(lock))) throw error;
+      fail(
+        "Another operation or interrupted process holds mutation.lock; if the operation was interrupted, run piko recover --force",
+      );
+    }
+    return lock;
+  } catch (error) {
+    await rm(pending, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 export function upgradeState(state: State): void {
   if (state.schemaVersion === 1) {
     state.schemaVersion = 2;
@@ -1119,22 +1229,8 @@ export class Store {
       );
     await noLinks(this.root);
     await mkdir(this.root, { recursive: true });
-    const lock = join(this.root, "mutation.lock");
+    const lock = await acquireMutationLock(this.root);
     try {
-      await mkdir(lock);
-    } catch (e: any) {
-      if (e.code === "EEXIST")
-        fail(
-          "Another operation or interrupted process holds mutation.lock; inspect it before removing it",
-        );
-      throw e;
-    }
-    try {
-      await writeFile(
-        join(lock, "owner.json"),
-        JSON.stringify({ pid: process.pid, started: new Date().toISOString() }),
-        { flag: "wx" },
-      );
       await this.recoverRebuild();
       await this.recoverDataRemoval();
       await this.recoverRemoval();
