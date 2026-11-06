@@ -42,7 +42,7 @@ export async function withRetries<T>(
       if (!isTransient(error) || attempt >= attempts) throw error;
       report({
         kind: "stage",
-        label: "Retry download",
+        label: "Retry",
         detail: `attempt ${attempt + 1} of ${attempts}`,
       });
       await Bun.sleep(Math.min(1000 * 2 ** (attempt - 1), 4000));

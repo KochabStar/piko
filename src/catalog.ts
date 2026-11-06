@@ -25,6 +25,7 @@ import {
   noLinks,
   atomicJson,
   publicEndpoint,
+  removeTree,
   withRetries,
 } from "./util.ts";
 import { sourceIdentity } from "./store.ts";
@@ -219,17 +220,34 @@ export async function refresh(root: string, s: Source): Promise<Index> {
     GIT_TERMINAL_PROMPT: "0",
     GIT_LFS_SKIP_SMUDGE: "1",
   };
+  // clone and fetch talk to the network; retry transient connection drops.
+  // Other failures retry too — they refail fast and stay loud.
+  const gitNetwork = (operation: string[]) =>
+    withRetries(async () => {
+      try {
+        return await capture("git", operation, { env });
+      } catch (error) {
+        failTransient(error instanceof Error ? error.message : String(error));
+      }
+    });
   if (!(await exists(repo)))
-    await capture(
-      "git",
-      [...args, "clone", "--no-checkout", "--", s.url, repo],
-      { env },
-    );
-  await capture(
-    "git",
-    [...args, "-C", repo, "fetch", "--no-tags", "origin", s.ref ?? "HEAD"],
-    { env },
-  );
+    try {
+      await gitNetwork([...args, "clone", "--no-checkout", "--", s.url, repo]);
+    } catch (error) {
+      // A half-cloned repository makes every later refresh skip the clone
+      // and fail forever; never leave one behind.
+      await removeTree(repo);
+      throw error;
+    }
+  await gitNetwork([
+    ...args,
+    "-C",
+    repo,
+    "fetch",
+    "--no-tags",
+    "origin",
+    s.ref ?? "HEAD",
+  ]);
   const commit = await capture(
     "git",
     [...args, "-C", repo, "rev-parse", "--verify", "FETCH_HEAD^{commit}"],
