@@ -540,8 +540,19 @@ async function desktopPlan(
       await noLinks(cache);
       let value: { hash: string };
       if (await exists(cache)) {
-        value = await json(cache);
-        await effectBytes(root, value);
+        try {
+          value = await json(cache);
+          await effectBytes(root, value);
+        } catch {
+          // Crash or power loss can zero a cache file; derived recipes are
+          // regenerated instead of failing every later integration or update.
+          if (recovery) fail("Desktop recovery shortcut recipe missing");
+          value = await saveEffectBytes(
+            root,
+            await backend.shortcut(target, args),
+          );
+          await atomicJson(cache, value);
+        }
       } else {
         if (recovery) fail("Desktop recovery shortcut recipe missing");
         value = await saveEffectBytes(

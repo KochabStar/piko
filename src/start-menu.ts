@@ -85,8 +85,15 @@ async function shortcutBytes(
     await noLinks(cache);
     let value: { hash: string };
     if (await exists(cache)) {
-      value = await json(cache);
-      await effectBytes(root, value);
+      try {
+        value = await json(cache);
+        await effectBytes(root, value);
+      } catch {
+        // Crash or power loss can zero a cache file; derived recipes are
+        // regenerated instead of failing every later selection or update.
+        value = await saveEffectBytes(root, await backend.shortcut(target, args));
+        await atomicJson(cache, value);
+      }
     } else {
       value = await saveEffectBytes(root, await backend.shortcut(target, args));
       await atomicJson(cache, value);
