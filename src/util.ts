@@ -4,6 +4,7 @@ import {
   QQDownloadSession,
   validateQQDownload,
 } from "./qq-download.ts";
+import { report } from "./progress.ts";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
   lstat,
@@ -17,6 +18,36 @@ import {
 
 export function fail(message: string): never {
   throw new Error(message);
+}
+// Transient failures (connection drops, stalled transfers, proxy error pages)
+// are worth retrying; policy failures stay plain `fail` errors and never are.
+export function failTransient(message: string): never {
+  throw Object.assign(new Error(message), { transient: true });
+}
+export function isTransient(error: unknown): boolean {
+  return (
+    error instanceof Error && "transient" in error && error.transient === true
+  );
+}
+// Retry a flaky network operation with backoff. Non-transient errors and the
+// final attempt rethrow unchanged.
+export async function withRetries<T>(
+  operation: () => Promise<T>,
+  attempts = 3,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isTransient(error) || attempt >= attempts) throw error;
+      report({
+        kind: "stage",
+        label: "Retry download",
+        detail: `attempt ${attempt + 1} of ${attempts}`,
+      });
+      await Bun.sleep(Math.min(1000 * 2 ** (attempt - 1), 4000));
+    }
+  }
 }
 export function record(value: unknown): value is Record<string, any> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -207,7 +238,7 @@ export async function downloadResponse(
           : error instanceof Error
             ? error.name
             : "NetworkError";
-      throw new Error(
+      failTransient(
         `Download connection failed (${code}): ${publicEndpoint(url)}`,
       );
     }
@@ -268,6 +299,10 @@ export async function download(
       chunks.push(value);
       progress?.(total, expected);
     }
+  } catch (error) {
+    // Interrupted body transfers (resets, aborts) are transient; the caller
+    // may retry the whole download.
+    failTransient(error instanceof Error ? error.message : String(error));
   } finally {
     await reader.cancel();
   }

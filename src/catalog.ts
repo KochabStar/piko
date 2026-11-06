@@ -19,10 +19,13 @@ import {
   relativeFile,
   record,
   fail,
+  failTransient,
   capture,
   exists,
   noLinks,
   atomicJson,
+  publicEndpoint,
+  withRetries,
 } from "./util.ts";
 import { sourceIdentity } from "./store.ts";
 import type {
@@ -181,11 +184,18 @@ export async function refresh(root: string, s: Source): Promise<Index> {
   await noLinks(dir);
   await mkdir(dir, { recursive: true });
   if (s.type === "http") {
-    const bytes = await download(
-        new URL("index.json", s.url).href,
-        8 * 1024 * 1024,
-      ),
-      i = normalizeIndex(JSON.parse(Buffer.from(bytes).toString("utf8")));
+    const url = new URL("index.json", s.url).href;
+    // Broken proxies and captive portals can answer 200 with a non-JSON
+    // body; retry fetch and parse together so both recover.
+    const value: unknown = await withRetries(async () => {
+      const bytes = await download(url, 8 * 1024 * 1024);
+      try {
+        return JSON.parse(Buffer.from(bytes).toString("utf8"));
+      } catch {
+        failTransient(`Source index is not valid JSON: ${publicEndpoint(url)}`);
+      }
+    });
+    const i = normalizeIndex(value);
     await atomicJson(join(dir, "index.json"), i);
     return i;
   }
@@ -580,23 +590,34 @@ export async function loadManifest(
   version: string,
 ): Promise<Manifest> {
   relativeFile(path);
-  let text: string;
-  if (s.type === "http")
-    text = Buffer.from(
-      await download(new URL(path, s.url).href, 2 * 1024 * 1024),
-    ).toString("utf8");
-  else
-    text = await capture(
-      "git",
-      [
-        "-c",
-        "core.hooksPath=NUL",
-        "-C",
-        join(root, "sources", s.identity, "repo"),
-        "show",
-        `${s.commit ?? fail("Refresh Git source before reading a manifest")}:${path}`,
-      ],
-      { env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
+  let manifest: unknown;
+  if (s.type === "http") {
+    const url = new URL(path, s.url).href;
+    // Retry fetch and parse together: transient error pages arrive with 200.
+    manifest = await withRetries(async () => {
+      const bytes = await download(url, 2 * 1024 * 1024);
+      try {
+        return JSON.parse(Buffer.from(bytes).toString("utf8"));
+      } catch {
+        failTransient(
+          `Source manifest is not valid JSON: ${publicEndpoint(url)}`,
+        );
+      }
+    });
+  } else
+    manifest = JSON.parse(
+      await capture(
+        "git",
+        [
+          "-c",
+          "core.hooksPath=NUL",
+          "-C",
+          join(root, "sources", s.identity, "repo"),
+          "show",
+          `${s.commit ?? fail("Refresh Git source before reading a manifest")}:${path}`,
+        ],
+        { env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
+      ),
     );
-  return normalizeManifest(JSON.parse(text), name, version);
+  return normalizeManifest(manifest, name, version);
 }
