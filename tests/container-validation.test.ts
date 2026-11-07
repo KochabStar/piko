@@ -49,12 +49,26 @@ test("container metadata rejects unsafe paths, aliasing, streams, links and ambi
   }
   await writeFile(
     join(root, "listing.txt"),
-    "Path = plugin.dll\nSize = \nAttributes = \n\nPath = payload.7z\nSize = 4\nAttributes = \n",
+    "Path = 1025\nSize = \nAttributes = \n\nPath = payload.cab\nSize = 4\nAttributes = \n",
   );
-  expect((await listContainer(fake, "unused", "nsis")).at(-1)?.size).toBe(4);
-  await expect(listContainer(fake, "unused", "Compound")).rejects.toThrow(
+  // MSI compound documents expose sizeless storages (embedded transforms);
+  // they list as directories while sized streams stay selectable payloads.
+  const compound = await listContainer(fake, "unused", "Compound");
+  expect(compound.find((e) => e.path === "payload.cab")?.size).toBe(4);
+  expect(compound.find((e) => e.path === "1025")?.directory).toBe(true);
+  await expect(listContainer(fake, "unused", "Cab")).rejects.toThrow(
     "Missing",
   );
+  await expect(
+    containerFile(
+      fake,
+      "unused",
+      "Compound",
+      { raw: "1025", path: "1025", directory: true },
+      join(root, "storage.bin"),
+      4,
+    ),
+  ).rejects.toThrow("bounded");
   await writeFile(join(root, "payload.txt"), "data");
   const unsized = { raw: "payload", path: "payload", directory: false };
   await containerFile(
