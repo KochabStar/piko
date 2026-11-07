@@ -70,14 +70,18 @@ export async function listContainer(
       (!/^\d+$/.test(sizeText!) || !Number.isSafeInteger(size) || size < 0)
     )
       fail("Invalid container entry size");
-    // NSIS may omit sizes for plugins; only explicit, sized regular payloads may be read.
-    if (type !== "nsis" && size === undefined)
+    // NSIS may omit sizes for plugins, and MSI compound documents expose
+    // sizeless storages (embedded language transforms) that are never
+    // selected for extraction; only explicit, sized payloads may be read.
+    const storage = type === "Compound" && size === undefined;
+    if (type !== "nsis" && !storage && size === undefined)
       fail("Missing container entry size");
     entries.push({
       raw,
       path,
       size,
-      directory: attributes.startsWith("D") || fields.get("Folder") === "+",
+      directory:
+        attributes.startsWith("D") || fields.get("Folder") === "+" || storage,
     });
   }
   if (type !== "nsis" && entries.length === 0)
