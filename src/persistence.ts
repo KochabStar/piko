@@ -1,7 +1,14 @@
 import { persistentFolder } from "./layout.ts";
-import { lstat } from "node:fs/promises";
-import { join } from "node:path";
-import { fail, noLinks, noLinksTree, record, relativeFile } from "./util.ts";
+import { lstat, readlink } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import {
+  exists,
+  fail,
+  noLinks,
+  noLinksTree,
+  record,
+  relativeFile,
+} from "./util.ts";
 import type {
   ConfigTemplate,
   Install,
@@ -125,6 +132,39 @@ export async function checkPersistentFileMappings(
       fail(
         "Persistent file hardlink drift; application may have atomically replaced its configuration. Preserve both files and reconcile manually before retrying.",
       );
+  }
+}
+// Directory mappings must be junctions into the shared persistent tree. An
+// application that recreates its data folder replaces the junction with a
+// plain directory whose contents removal would destroy, so name both copies
+// and refuse instead of failing with no recovery path.
+export async function checkPersistentLinkMappings(
+  root: string,
+  install: Install,
+): Promise<void> {
+  for (const path of install.persist) {
+    if (install.persistFiles?.[path]) continue;
+    const link = join(root, install.dir, path),
+      expected = resolve(
+        join(root, "persist", persistentFolder(install, install.key), path),
+      );
+    if (!(await exists(link))) continue;
+    const info = await lstat(link);
+    const actual = info.isSymbolicLink() ? resolve(await readlink(link)) : null,
+      found =
+        actual !== null
+          ? `a link to ${actual}`
+          : info.isDirectory()
+            ? "a plain directory"
+            : "a plain file";
+    if (actual !== null && actual.toLowerCase() === expected.toLowerCase())
+      continue;
+    fail(
+      "Persistent mapping drift; refusing removal: " +
+        `${link} is ${found}, expected a link to ${expected}. ` +
+        `Reconcile both copies, remove ${link}, then rerun this command ` +
+        `or run piko reset ${install.name} to restore the link`,
+    );
   }
 }
 export async function checkPackagePersistentFiles(

@@ -13,19 +13,13 @@ import {
   renderTemplate,
   checkPackagePersistentFiles,
   checkPersistentFileMappings,
+  checkPersistentLinkMappings,
   noLinksData,
 } from "./persistence.ts";
 import { selectedEnvironment } from "./environment.ts";
 import semver from "semver";
-import {
-  cp,
-  mkdir,
-  writeFile,
-  rename,
-  lstat,
-  readlink,
-} from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { cp, mkdir, writeFile, rename, lstat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { artifactBytes } from "./cache.ts";
 import { chooseLayout, installDirectory, persistentFolder } from "./layout.ts";
 import { Store, packageKey, installId, upgradeState } from "./store.ts";
@@ -1778,6 +1772,8 @@ export class Packages {
             JSON.stringify(i)
           )
             fail("Installation receipt drift; inspect before version cleanup");
+          await checkPersistentFileMappings(this.root, i);
+          await checkPersistentLinkMappings(this.root, i);
         }
         entries.push({
           installation: i,
@@ -1906,24 +1902,7 @@ export class Packages {
       await mkdir(dirname(to), { recursive: true });
       // Only unlink declared mappings after verifying their exact managed target.
       await checkPersistentFileMappings(this.root, installation);
-      for (const path of installation.persist) {
-        if (installation.persistFiles?.[path]) continue;
-        const link = join(from, path),
-          expected = resolve(
-            join(
-              this.root,
-              "persist",
-              persistentFolder(installation, installation.key),
-              path,
-            ),
-          );
-        if (!(await exists(link))) continue;
-        if (
-          !(await lstat(link)).isSymbolicLink() ||
-          resolve(await readlink(link)).toLowerCase() !== expected.toLowerCase()
-        )
-          fail("Persistent mapping drift; refusing removal");
-      }
+      await checkPersistentLinkMappings(this.root, installation);
       if (
         !Object.values(state.installs).some(
           (i) => i.key === installation.key && i.id !== installation.id,

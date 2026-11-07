@@ -2,10 +2,12 @@ import { persistentFolder } from "../src/layout.ts";
 import { afterAll, expect, test } from "bun:test";
 import {
   mkdtemp,
+  mkdir,
   readFile,
   rename,
   rm,
   stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -142,6 +144,38 @@ test("atomic replacement hardlink drift blocks upgrade and uninstall without los
   expect(await readFile(shared, "utf8")).toBe("first-run");
   expect(await readFile(path, "utf8")).toBe("replacement");
   expect((await p.store.read()).defaults[first.key]?.id).toBe(first.id);
+});
+test("recreated data directory blocks cleanup preview and removal with both paths named", async () => {
+  const p = await manager(),
+    first = await p.install("main/linked@1.0.0"),
+    shared = join(
+      p.root,
+      "persist",
+      persistentFolder(first, first.key),
+      "history",
+    ),
+    path = join(p.root, first.dir, "history");
+  await writeFile(join(shared, "keep.hst"), "shared data");
+  await p.install("main/linked@2.0.0");
+  await p.use("main/linked@2.0.0");
+  await unlink(path);
+  await mkdir(path);
+  await writeFile(join(path, "recreated.hst"), "recreated data");
+  await expect(p.versionCleanupPlan("main/linked", 0)).rejects.toThrow(
+    "Persistent mapping drift",
+  );
+  let failure!: Error;
+  await p.uninstall("main/linked@1.0.0").catch((e) => (failure = e));
+  expect(failure.message).toContain("Persistent mapping drift");
+  expect(failure.message).toContain(path);
+  expect(failure.message).toContain(shared);
+  expect(await readFile(join(path, "recreated.hst"), "utf8")).toBe(
+    "recreated data",
+  );
+  expect(await readFile(join(shared, "keep.hst"), "utf8")).toBe("shared data");
+  await rm(path, { recursive: true });
+  await p.uninstall("main/linked@1.0.0");
+  expect(await readFile(join(shared, "keep.hst"), "utf8")).toBe("shared data");
 });
 
 test("source config templates redirect to seeded storage without linking config files", async () => {
