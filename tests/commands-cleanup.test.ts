@@ -12,6 +12,7 @@ import {
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Packages } from "../src/packages.ts";
+import { WindowsEffects } from "../src/windows-effects.ts";
 import { validateState } from "../src/store.ts";
 import { resolveCommand } from "../src/commands.ts";
 import { atomicJson, exists, sha256 } from "../src/util.ts";
@@ -66,8 +67,15 @@ afterAll(async () => {
     retryDelay: 100,
   });
 });
+// Restart Manager queries are exercised in installation-users tests; other
+// suites only need the no-users answer.
+class TestEffects extends WindowsEffects {
+  override async fileUsers() {
+    return [];
+  }
+}
 async function manager(name: string) {
-  const p = new Packages(join(root, name));
+  const p = new Packages(join(root, name), new TestEffects());
   await p.addSource("main", `http://127.0.0.1:${server.port}/`);
   return p;
 }
@@ -267,6 +275,33 @@ test("cleanup journal restores moved data before state commit and deletes only c
   await p.store.mutate(async () => {});
   expect(await exists(stage2)).toBe(false);
   expect(await exists(data)).toBe(false);
+});
+
+test("purge-phase data cleanup journal deletes staging without its proof file", async () => {
+  const p = await manager("data-purge-recovery"),
+    i = await p.install("stored@1.0.0");
+  await p.uninstall("stored@1.0.0");
+  const state = await p.store.read(),
+    proof = state.data![i.key]!,
+    operation = "data-cleanup-" + crypto.randomUUID(),
+    stage = join(p.root, "staging", operation);
+  // A crashed purge left the journal with the purge phase and a partially
+  // deleted staging directory; recovery must finish without the proof file.
+  await mkdir(stage, { recursive: true });
+  await writeFile(join(stage, "0"), "leftover");
+  await atomicJson(p.store.dataRemovalPath, {
+    key: i.key,
+    data: proof,
+    operation,
+    purge: true,
+  });
+  const committed = structuredClone(state);
+  committed.revision++;
+  delete committed.data![i.key];
+  await atomicJson(p.store.statePath, committed);
+  await p.store.mutate(async () => {});
+  expect(await exists(stage)).toBe(false);
+  expect(await exists(p.store.dataRemovalPath)).toBe(false);
 });
 
 test("alias changes recover with default state without writing through current", async () => {

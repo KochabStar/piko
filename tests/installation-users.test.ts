@@ -22,6 +22,22 @@ const server = Bun.serve({
             latest,
             versions: { "1.0.0": "1.json", "2.0.0": "2.json" },
           },
+          portable: { latest: "1.0.0", versions: { "1.0.0": "p1.json" } },
+        },
+      });
+    if (name === "/p1.json")
+      return Response.json({
+        schemaVersion: 1,
+        name: "portable",
+        version: "1.0.0",
+        platforms: {
+          "windows-x64": {
+            url: `http://127.0.0.1:${server.port}/payload`,
+            sha256: sha256(payload),
+            format: "file",
+            file: "portable.exe",
+            bin: { portable: "portable.exe" },
+          },
         },
       });
     if (name === "/payload") return new Response(payload);
@@ -99,6 +115,23 @@ test("package-name uninstall still protects a selected version that is in use", 
   expect(await exists(join(p.root, old.dir, "extension.exe"))).toBe(true);
 });
 
+test("uninstall of an ordinary portable version in use is refused before the rename", async () => {
+  const root = await mkdtemp(join(work, "portable-")),
+    effects = new Effects(join(root, "external")),
+    p = new Packages(root, effects);
+  await p.addSource("main", `http://127.0.0.1:${server.port}/`);
+  const i = await p.install("main/portable@1.0.0");
+  await p.use("main/portable@1.0.0");
+  effects.locked = join(root, i.dir);
+  const before = await readFile(p.store.statePath);
+  await expect(p.uninstall("portable")).rejects.toThrow(
+    "loaded DLLs/processes",
+  );
+  expect(await readFile(p.store.statePath)).toEqual(before);
+  expect(await exists(join(root, i.dir, "portable.exe"))).toBe(true);
+  expect(await exists(p.store.removalPath)).toBe(false);
+});
+
 test("loaded old executable images never block side-by-side update; cleanup defers without rename/delete", async () => {
   const { p, effects, old } = await fixture();
   latest = "2.0.0";
@@ -142,9 +175,10 @@ test("process inspection failure is not treated as permission to remove old Shel
   latest = "2.0.0";
   await p.update("main/extension");
   effects.queryError = true;
-  await expect(p.versionCleanupPlan("main/extension", 0)).rejects.toThrow(
-    "inspection failed",
-  );
+  const plan = await p.versionCleanupPlan("main/extension", 0);
+  const deferred = plan.entries.find((e) => e.version === old.version);
+  expect(deferred?.action).toBe("defer-drift");
+  expect(deferred?.reason).toContain("inspection failed");
   await expect(p.uninstall("main/extension@1.0.0")).rejects.toThrow(
     "inspection failed",
   );

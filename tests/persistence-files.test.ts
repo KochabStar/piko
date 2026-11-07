@@ -13,6 +13,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Packages } from "../src/packages.ts";
+import { WindowsEffects } from "../src/windows-effects.ts";
 import { normalizeManifest } from "../src/catalog.ts";
 import { sha256 } from "../src/util.ts";
 
@@ -80,7 +81,14 @@ function manifest(name = "linked", version = "1.0.0") {
   };
 }
 async function manager() {
-  const p = new Packages(join(work, crypto.randomUUID()));
+  const p = new Packages(
+    join(work, crypto.randomUUID()),
+    new (class extends WindowsEffects {
+      override async fileUsers() {
+        return [];
+      }
+    })(),
+  );
   await p.addSource("main", `http://127.0.0.1:${server.port}/`);
   return p;
 }
@@ -161,9 +169,10 @@ test("recreated data directory blocks cleanup preview and removal with both path
   await unlink(path);
   await mkdir(path);
   await writeFile(join(path, "recreated.hst"), "recreated data");
-  await expect(p.versionCleanupPlan("main/linked", 0)).rejects.toThrow(
-    "Persistent mapping drift",
-  );
+  const plan = await p.versionCleanupPlan("main/linked", 0);
+  const deferred = plan.entries.find((e) => e.version === first.version);
+  expect(deferred?.action).toBe("defer-drift");
+  expect(deferred?.reason).toContain("Persistent mapping drift");
   let failure!: Error;
   await p.uninstall("main/linked@1.0.0").catch((e) => (failure = e));
   expect(failure.message).toContain("Persistent mapping drift");

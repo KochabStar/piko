@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Packages } from "../src/packages.ts";
 import { Store, recoverStaleMutationLock } from "../src/store.ts";
+import { WindowsEffects } from "../src/windows-effects.ts";
 import { chooseVersion, normalizeManifest } from "../src/catalog.ts";
 import {
   component,
@@ -92,9 +93,16 @@ afterAll(async () => {
     retryDelay: 100,
   });
 });
+// Restart Manager queries are exercised in installation-users tests; other
+// suites only need the no-users answer.
+class TestEffects extends WindowsEffects {
+  override async fileUsers() {
+    return [];
+  }
+}
 async function manager(name: string) {
   const root = join(work, name);
-  const p = new Packages(root);
+  const p = new Packages(root, new TestEffects());
   await p.addSource("main", url);
   return p;
 }
@@ -378,6 +386,52 @@ describe("portable package lifecycle", () => {
     await p.store.mutate(async () => {});
     expect(await exists(join(p.root, "staging", trash))).toBe(false);
     expect(Object.keys((await p.store.read()).installs)).toHaveLength(0);
+  });
+
+  test("partially purged uninstall trash completes cleanup without its receipt", async () => {
+    const p = await manager("recover-partial-purge"),
+      i = await p.install("tool@1.0.0");
+    const after = structuredClone(await p.store.read());
+    after.revision++;
+    delete after.installs[i.id];
+    const trash = "uninstall-" + crypto.randomUUID();
+    await mkdir(join(p.root, "staging"), { recursive: true });
+    await rename(join(p.root, i.dir), join(p.root, "staging", trash));
+    // A crashed purge already removed files, including the receipt, but the
+    // journal remains: recovery must finish deleting instead of failing.
+    await rm(join(p.root, "staging", trash, ".piko-install.json"));
+    await atomicJson(p.store.removalPath, { installation: i, trash });
+    await atomicJson(p.store.statePath, after);
+    await p.store.mutate(async () => {});
+    expect(await exists(join(p.root, "staging", trash))).toBe(false);
+    expect(await exists(p.store.removalPath)).toBe(false);
+    expect(Object.keys((await p.store.read()).installs)).toHaveLength(0);
+  });
+
+  test("drifted receipt defers one version without blocking removal of others", async () => {
+    const p = await manager("cleanup-drift"),
+      old = await p.install("tool@1.0.0"),
+      mid = await p.install("tool@1.1.0");
+    await p.install("tool@2.0.0");
+    await p.use("tool@2.0.0");
+    await atomicJson(join(p.root, mid.dir, ".piko-install.json"), {
+      ...mid,
+      checksum: "changed",
+    });
+    const plan = await p.versionCleanupPlan("tool", 0);
+    expect(plan.entries.find((e) => e.version === mid.version)?.action).toBe(
+      "defer-drift",
+    );
+    expect(plan.entries.find((e) => e.version === old.version)?.action).toBe(
+      "remove",
+    );
+    const result = await p.cleanupVersions("tool", 0, { confirmed: true });
+    expect(result).toMatchObject([
+      { version: mid.version, status: "deferred-drift" },
+      { version: old.version, status: "removed" },
+    ]);
+    expect(await exists(join(p.root, mid.dir, "tool.exe"))).toBe(true);
+    expect(await exists(join(p.root, old.dir))).toBe(false);
   });
   test("persistent directories survive uninstall and ordinary data is not followed", async () => {
     const p = await manager("persistent"),

@@ -4,6 +4,7 @@ import { mkdtemp, readFile, writeFile, rm, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Packages } from "../src/packages.ts";
+import { WindowsEffects } from "../src/windows-effects.ts";
 import { chooseVersion, normalizeIndex } from "../src/catalog.ts";
 import {
   exportInventory,
@@ -101,7 +102,14 @@ afterAll(async () => {
   });
 });
 async function manager() {
-  const p = new Packages(join(work, crypto.randomUUID()));
+  const p = new Packages(
+    join(work, crypto.randomUUID()),
+    new (class extends WindowsEffects {
+      override async fileUsers() {
+        return [];
+      }
+    })(),
+  );
   await p.addSource("main", url);
   return p;
 }
@@ -271,7 +279,7 @@ test("version cleanup previews, protects defaults, retains N other versions and 
   expect(await exists(join(p.root, "apps/unknown/9/keep"))).toBe(true);
 });
 
-test("version cleanup rejects invalid keep and altered receipts without deleting files", async () => {
+test("version cleanup rejects invalid keep and defers altered receipts without deleting files", async () => {
   const p = await manager(),
     i = await p.install("tool@1.0.0");
   for (const keep of [-1, 0.5, NaN])
@@ -282,9 +290,13 @@ test("version cleanup rejects invalid keep and altered receipts without deleting
     ...i,
     checksum: "changed",
   });
-  await expect(p.versionCleanupPlan("tool", 0)).rejects.toThrow(
-    "receipt drift",
-  );
+  const plan = await p.versionCleanupPlan("tool", 0);
+  const deferred = plan.entries.find((e) => e.version === i.version);
+  expect(deferred?.action).toBe("defer-drift");
+  expect(deferred?.reason).toContain("receipt drift");
+  expect(
+    (await p.cleanupVersions("tool", 0, { confirmed: true }))[0],
+  ).toMatchObject({ status: "deferred-drift" });
   expect(await exists(join(p.root, i.dir, "tool.exe"))).toBe(true);
 });
 

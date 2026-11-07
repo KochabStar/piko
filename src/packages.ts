@@ -1740,6 +1740,7 @@ export class Packages {
       package: string;
       version: string;
       path: string;
+      reason?: string;
       action: string;
     }[] = [];
     for (const key of [...new Set(installs.map((i) => i.key))].sort()) {
@@ -1753,27 +1754,42 @@ export class Packages {
       let retained = 0;
       for (const i of group) {
         let action =
-          state.defaults[key]?.id === i.id
-            ? "protect-default"
-            : retained++ < keep
-              ? "keep"
-              : "remove";
+            state.defaults[key]?.id === i.id
+              ? "protect-default"
+              : retained++ < keep
+                ? "keep"
+                : "remove",
+          reason: string | undefined;
         const path = join(this.root, i.dir);
-        if (
-          action === "remove" &&
-          (await installationUsers(this.root, i, this.effectsBackend)).length
-        )
-          action = "defer-in-use";
         if (action === "remove") {
-          await noLinks(path);
-          await noLinks(join(path, ".piko-install.json"));
-          if (
-            JSON.stringify(await json(join(path, ".piko-install.json"))) !==
-            JSON.stringify(i)
-          )
-            fail("Installation receipt drift; inspect before version cleanup");
-          await checkPersistentFileMappings(this.root, i);
-          await checkPersistentLinkMappings(this.root, i);
+          // One drifted or unverifiable installation must not block cleanup
+          // of every other package: defer it with the reason instead of
+          // failing the whole plan. Removal never proceeds past these checks.
+          try {
+            await noLinks(path);
+            await noLinks(join(path, ".piko-install.json"));
+            if (
+              JSON.stringify(await json(join(path, ".piko-install.json"))) !==
+              JSON.stringify(i)
+            )
+              fail(
+                "Installation receipt drift; inspect before version cleanup",
+              );
+            await checkPersistentFileMappings(this.root, i);
+            await checkPersistentLinkMappings(this.root, i);
+            const users = await installationUsers(
+              this.root,
+              i,
+              this.effectsBackend,
+            );
+            if (users.length) {
+              action = "defer-in-use";
+              reason = users.map((p) => `${p.name} (${p.pid})`).join(", ");
+            }
+          } catch (error) {
+            action = "defer-drift";
+            reason = error instanceof Error ? error.message : String(error);
+          }
         }
         entries.push({
           installation: i,
@@ -1782,6 +1798,7 @@ export class Packages {
           version: i.version,
           path,
           action,
+          ...(reason === undefined ? {} : { reason }),
         });
       }
     }
@@ -1808,6 +1825,13 @@ export class Packages {
         package: item.package,
         version: item.version,
         status: "deferred-in-use",
+      });
+    for (const item of plan.entries.filter((e) => e.action === "defer-drift"))
+      results.push({
+        package: item.package,
+        version: item.version,
+        status: "deferred-drift",
+        error: item.reason,
       });
     for (const item of plan.entries.filter((e) => e.action === "remove")) {
       try {

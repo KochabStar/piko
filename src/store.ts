@@ -23,6 +23,7 @@ import type { WindowsEffects } from "./windows-effects.ts";
 import { noLinksData, validatePersistentFile } from "./persistence.ts";
 import { validateShell } from "./shell-declarations.ts";
 import { profileKey, recoverProfile } from "./profiles.ts";
+import { directoryUsers } from "./installation-users.ts";
 import {
   mkdir,
   rm,
@@ -839,6 +840,14 @@ export class Store {
         "Data cleanup staging directory is missing; manual inspection required",
       );
     }
+    if (entry.purge === true) {
+      // A previous pass verified the proof and finished moving data; only the
+      // staging directory removal may be left. Finish it without needing the
+      // proof file a partial delete may already have removed.
+      await removeTree(stage);
+      await rm(this.dataRemovalPath);
+      return;
+    }
     await noLinks(join(stage, ".piko-cleanup.json"));
     const proof = await json(join(stage, ".piko-cleanup.json"));
     if (
@@ -880,6 +889,9 @@ export class Store {
         await rename(to, from);
       }
     }
+    // Persist the purge phase BEFORE recursive removal, so a partial delete
+    // after a crash resumes without the staging proof file.
+    await atomicJson(this.dataRemovalPath, { ...entry, purge: true });
     await noLinksTree(stage);
     await removeTree(stage);
     await rm(this.dataRemovalPath);
@@ -989,15 +1001,33 @@ export class Store {
           fail(
             "Both uninstall source and trash exist; manual inspection required",
           );
-        const receipt = await json(join(to, ".piko-install.json"));
+        const receiptPath = join(to, ".piko-install.json");
+        if (!(await exists(receiptPath)))
+          fail(
+            "Uninstall trash is incomplete and cannot be restored; reinstall the package, then remove " +
+              to +
+              " manually",
+          );
+        const receipt = await json(receiptPath);
         if (receipt.id !== i.id || receipt.checksum !== i.checksum)
           fail("Uninstall recovery receipt mismatch");
         await rename(to, from);
       }
     } else if (await exists(to)) {
-      const receipt = await json(join(to, ".piko-install.json"));
-      if (receipt.id !== i.id || receipt.checksum !== i.checksum)
-        fail("Refusing to remove unrecognized uninstall trash");
+      // The installation is gone from state, so this directory is the one our
+      // own rename created and it is ours to delete. A previous pass may have
+      // removed files already - including the receipt - or a live process may
+      // still lock an executable. Persist the purge phase BEFORE deleting, so
+      // partial deletes after a crash do not need the now-missing receipt.
+      if (entry.purge !== true) {
+        const receiptPath = join(to, ".piko-install.json");
+        if (await exists(receiptPath)) {
+          const receipt = await json(receiptPath);
+          if (receipt.id !== i.id || receipt.checksum !== i.checksum)
+            fail("Refusing to remove unrecognized uninstall trash");
+        }
+        await atomicJson(this.removalPath, { ...entry, purge: true });
+      }
       const detach = async (dir: string): Promise<void> => {
         for (const e of await readdir(dir, { withFileTypes: true })) {
           const path = join(dir, e.name),
@@ -1022,7 +1052,22 @@ export class Store {
         }
       };
       await detach(to);
-      await removeTree(to);
+      try {
+        await removeTree(to);
+      } catch (error) {
+        let users: { pid: number; name: string }[] = [];
+        try {
+          users = await directoryUsers(to, i as Install);
+        } catch {
+          // Keep the original deletion failure if inspection fails as well.
+        }
+        if (users.length)
+          fail(
+            "Uninstall trash is in use; close these processes and run piko doctor again: " +
+              users.map((p) => `${p.name} (${p.pid})`).join(", "),
+          );
+        throw error;
+      }
     }
     await rm(this.removalPath);
   }
