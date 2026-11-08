@@ -10,6 +10,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { parseSpec } from "./catalog.ts";
 import { validateState } from "./store.ts";
+import { acquireMutationLock } from "./store.ts";
 import { persistentFolder } from "./layout.ts";
 import {
   atomicJson,
@@ -327,19 +328,12 @@ async function validateProfile(
   }
 }
 async function lock<T>(store: Store, action: () => Promise<T>) {
-  const path = join(store.root, "mutation.lock");
   await noLinks(store.root);
   await mkdir(store.root, { recursive: true });
+  // Reused so an interrupted operation's leftover lock is reclaimed here too,
+  // instead of leaving data-profile commands permanently blocked.
+  const path = await acquireMutationLock(store.root);
   try {
-    await mkdir(path);
-  } catch {
-    fail("Another operation holds mutation.lock");
-  }
-  try {
-    await atomicJson(join(path, "owner.json"), {
-      pid: process.pid,
-      started: new Date().toISOString(),
-    });
     return await action();
   } finally {
     await rm(path, { recursive: true, force: true });

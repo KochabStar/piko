@@ -60,10 +60,12 @@ test("self update preserves lightweight shims and state, supports rollback and r
   });
   await dead.exited;
   const prepared = await prepareSelfUpdate(root, exe, hash, dead.pid);
+  // A pending self-update whose owner is gone no longer blocks unrelated
+  // writes: the next mutation discards the abandoned swap and continues.
+  await expect(manager.store.mutate(async () => {})).resolves.toBeUndefined();
+  expect(await exists(join(root, "operations/self-update.json"))).toBe(false);
+  await prepareSelfUpdate(root, exe, hash, dead.pid);
   const preparedState = await readFile(manager.store.statePath, "utf8");
-  await expect(manager.store.mutate(async () => {})).rejects.toThrow(
-    "self-update",
-  );
   const lock = join(root, "mutation.lock");
   await mkdir(lock);
   await writeFile(

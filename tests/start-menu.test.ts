@@ -155,24 +155,31 @@ test("candidate install preserves selected launcher; switch, rollback and uninst
   await p.uninstall(`test/${name}@1`, true);
   expect(await exists(path)).toBe(false);
 });
-test("same-name foreign files and cross-package names are never overwritten", async () => {
+test("same-name foreign files are skipped without failing the install, and cross-package names are refused", async () => {
   const { p, name, label, path, folder } = await fixture();
   await mkdir(folder, { recursive: true });
   await writeFile(path, "foreign");
-  await expect(p.install(`test/${name}@1`)).rejects.toThrow(
-    "Start Menu resource",
-  );
+  // One occupied launcher path must not fail the whole install: the package is
+  // installed, the foreign file is untouched and no receipt claims it.
+  const i = await p.install(`test/${name}@1`);
   expect(await readFile(path, "utf8")).toBe("foreign");
-  // The failed install is published and journaled, but never reported successful.
+  expect((await p.store.read()).startMenu?.[i.key]).toBeUndefined();
+  expect(await exists(join(p.root, i.dir, "gui.exe"))).toBe(true);
+  // Recovery no longer loops on that conflict either.
+  await p.store.mutate(async () => {});
   await rm(path);
   await p.store.mutate(async () => {});
-  expect(await exists(path)).toBe(true);
+  expect(await exists(path)).toBe(false);
   const other = name + "-other";
   manifest(other, "1", label);
+  await p.use(`test/${name}@1`);
+  // A launcher name another Piko package owns stays a refusal for that package,
+  // but the already installed one keeps working and no state is rewritten.
   await expect(p.install(`test/${other}@1`)).rejects.toThrow(
     "belongs to another package",
   );
   expect(JSON.parse(await readFile(path, "utf8")).target).toContain(name);
+  expect((await p.store.read()).installs[i.id]).toBeDefined();
 });
 test("user-edited launchers block removal and retain both installation and edited shortcut", async () => {
   const { p, name, path } = await fixture();

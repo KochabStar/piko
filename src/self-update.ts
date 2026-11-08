@@ -13,7 +13,7 @@ import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { downloadArtifact } from "./downloader.ts";
-import { Store } from "./store.ts";
+import { Store, acquireMutationLock } from "./store.ts";
 import { commandNames } from "./commands.ts";
 import { inspectShim, writeNativeShim } from "./shims.ts";
 import {
@@ -345,6 +345,90 @@ export async function selfUpdateStatus(root: string) {
     pending: (await exists(pending)) ? await json(pending) : null,
     last: (await exists(result)) ? await json(result) : null,
   };
+}
+// A Ctrl+C, crash or power loss can leave the self-update journal behind after
+// its detached helper died, and the old build then refused every later write
+// until the user found that helper by hand. The journal is reconciled here
+// instead: nothing was swapped yet, or the swap already landed and only its
+// receipt is missing. Nothing is downloaded again.
+export async function resumeSelfUpdate(
+  root: string,
+): Promise<"none" | "discarded" | "finalized"> {
+  const file = journal(root);
+  await noLinks(file);
+  if (!(await exists(file))) return "none";
+  const entry = await json(file);
+  if (
+    !/^self-update-[0-9a-f-]{36}$/.test(entry?.operation) ||
+    !Array.isArray(entry.names) ||
+    !Number.isSafeInteger(entry.parent) ||
+    entry.parent <= 0 ||
+    !["pending", "swapping", "committed", "rolled-back"].includes(
+      entry.phase,
+    ) ||
+    !/^[a-f0-9]{64}$/.test(entry.oldHash) ||
+    !/^[a-f0-9]{64}$/.test(entry.checksum)
+  )
+    fail("Invalid self-update journal; inspect operations/self-update.json");
+  // While its owner lives, the journal belongs to that process and its helper:
+  // swapping piko.exe never touches state.json, so writes keep working and the
+  // journal must stay for the helper.
+  let alive = true;
+  try {
+    process.kill(entry.parent, 0);
+  } catch (error: unknown) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? error.code
+        : undefined;
+    if (code !== "ESRCH") throw error;
+    alive = false;
+  }
+  if (alive) return "none";
+  const target = join(root, "apps", "piko", "piko.exe");
+  await noLinks(target);
+  if (!(await exists(target)))
+    fail(
+      "Installed Piko executable is missing; run piko setup before retrying",
+    );
+  const hash = await executableHash(target);
+  if (hash === entry.oldHash) {
+    // The swap never started, so the prepared update is abandoned. Removing its
+    // journal changes Piko's own state, so hold the writer lock meanwhile; a run
+    // that loses the lock leaves the journal to the winner.
+    let lock: string;
+    try {
+      lock = await acquireMutationLock(root);
+    } catch {
+      return "none";
+    }
+    try {
+      if (await exists(file)) await rm(file);
+    } finally {
+      await rm(lock, { recursive: true, force: true });
+    }
+    return "discarded";
+  }
+  if (hash !== entry.checksum)
+    fail(
+      "Self-update journal does not match the installed Piko; inspect operations/self-update.json",
+    );
+  if (entry.phase === "pending") {
+    // The candidate already replaced the old executable but the phase update was
+    // lost to the crash. Record the swap before finishing it, so completion never
+    // re-checks the pre-update hash.
+    entry.phase = "committed";
+    await atomicJson(file, entry);
+  }
+  // Finishing the receipt needs the mutation lock, which the caller may be
+  // about to take. When another writer owns it, leave the journal for later.
+  const lock = join(root, "mutation.lock");
+  await noLinks(lock);
+  if (await exists(lock)) return "none";
+  // The candidate already replaced the installed executable. Finish the
+  // receipt and backup without touching the running image.
+  await applySelfUpdate(root, false, entry.phase === "rolled-back", true);
+  return "finalized";
 }
 export async function prepareRollback(root: string, parent: number) {
   const status = await selfUpdateStatus(root),

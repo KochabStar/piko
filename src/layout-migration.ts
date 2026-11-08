@@ -18,7 +18,7 @@ import {
   persistentFolder,
 } from "./layout.ts";
 import { atomicJson, exists, fail, json, noLinks, sha256 } from "./util.ts";
-import { Store, validateState } from "./store.ts";
+import { Store, validateState, acquireMutationLock } from "./store.ts";
 import type { Install, State } from "./types.ts";
 
 function targetState(before: State): State {
@@ -92,19 +92,11 @@ export async function planLayout(root: string) {
 }
 async function withoutLock<T>(root: string, fn: () => Promise<T>) {
   await noLinks(root);
-  const lock = join(root, "mutation.lock");
+  await mkdir(root, { recursive: true });
+  // Reused so an interrupted operation's leftover lock is reclaimed here too,
+  // instead of leaving directory migration permanently blocked.
+  const lock = await acquireMutationLock(root);
   try {
-    await mkdir(lock);
-  } catch {
-    fail(
-      "Another operation holds mutation.lock; inspect before directory migration",
-    );
-  }
-  try {
-    await atomicJson(join(lock, "owner.json"), {
-      pid: process.pid,
-      started: new Date().toISOString(),
-    });
     return await fn();
   } finally {
     await rm(lock, { recursive: true, force: true });

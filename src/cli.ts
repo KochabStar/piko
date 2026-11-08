@@ -249,7 +249,7 @@ Install this Piko executable for the current user; --path adds its shims to user
 `,
   recover: `Usage: piko recover [--force]
 
-Recover interrupted managed operations. --force removes only a mutation lock whose recorded owner has exited.
+Recover interrupted managed operations. Write operations already reclaim a lock whose recorded owner has exited and finish or discard their own journals; --force additionally removes that stale lock before recovering.
 `,
   doctor: `Usage: piko doctor
 
@@ -287,25 +287,53 @@ async function main(): Promise<number> {
       launched === "piko"
     )
       fail("Invalid native shim command");
-    if (
-      (await exists(join(root, "operations", "persist.json"))) ||
-      (await exists(join(root, "operations", "layout.json"))) ||
-      (await exists(join(root, "operations", "self-update.json"))) ||
-      (await exists(store.installPath)) ||
-      (await exists(store.journalPath)) ||
-      (await exists(store.removalPath)) ||
-      (await exists(store.dataRemovalPath)) ||
-      (await exists(store.rebuildPath)) ||
-      (await exists(join(root, "operations", "profile.json"))) ||
-      (await exists(join(root, "operations", "desktop.json")))
-    )
-      fail("Interrupted state change; run piko doctor before launching tools");
-    return await dispatch(
-      root,
-      await store.read(),
-      launched,
-      nativeDispatch ? rawArgs.slice(2) : rawArgs,
-    );
+    // One interrupted operation must never disable unrelated installed tools.
+    // Journals that only publish an already-verified commit are read as last
+    // committed; only migrations that can still move committed state block.
+    await store.assertLaunchable();
+    // A pending self-update only concerns Piko's own executable; package
+    // commands keep working, and the next write finishes or discards it.
+    await noLinks(join(root, "operations", "self-update.json"));
+    if (await exists(join(root, "operations", "self-update.json")))
+      console.error(
+        "WARNING: a Piko self-update is pending; run piko self status, then piko recover",
+      );
+    const shimArgs = nativeDispatch ? rawArgs.slice(2) : rawArgs;
+    try {
+      return await dispatch(
+        root,
+        await store.readCommitted(),
+        launched,
+        shimArgs,
+      );
+    } catch (error) {
+      // A launch never changes state itself. If this command has no provider
+      // because the interrupted operation that would have registered it is still
+      // pending, finish those journals now so the next command works, then let
+      // the launch report what is actually missing.
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        !message.startsWith("No default provider for ") ||
+        !(await store.hasPendingJournals())
+      )
+        throw error;
+      try {
+        await store.mutate(async () => {});
+      } catch (recovery) {
+        console.error(
+          `piko: interrupted Piko operation is still pending: ${
+            recovery instanceof Error ? recovery.message : String(recovery)
+          }`,
+        );
+        throw error;
+      }
+      return await dispatch(
+        root,
+        await store.readCommitted(),
+        launched,
+        shimArgs,
+      );
+    }
   }
   const { positionals: args, values } = parseArgs({
     args: process.argv.slice(2),
@@ -1556,7 +1584,7 @@ async function main(): Promise<number> {
             limits: [
               "npm install/update scripts disabled; rebuild requires content-bound approval and npm 11.20.0",
               "Approved scripts are not sandboxed; external effects cannot be rolled back",
-              "No automatic stale-lock removal",
+              "A writer lock whose owner exited is reclaimed automatically; a live owner is never preempted",
               "Self-update requires an explicitly trusted checksum; executables are unsigned",
               "Windows 10 and full interactive agent workflows are not independently certified",
             ],

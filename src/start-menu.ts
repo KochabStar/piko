@@ -91,7 +91,10 @@ async function shortcutBytes(
       } catch {
         // Crash or power loss can zero a cache file; derived recipes are
         // regenerated instead of failing every later selection or update.
-        value = await saveEffectBytes(root, await backend.shortcut(target, args));
+        value = await saveEffectBytes(
+          root,
+          await backend.shortcut(target, args),
+        );
         await atomicJson(cache, value);
       }
     } else {
@@ -117,8 +120,53 @@ export async function enrollStartMenu(
   const selected = state.defaults[install.key];
   if (selected && selected.id !== install.id) return;
   state.startMenu ??= {};
-  state.startMenu[install.key] = await shortcutBytes(root, install, backend);
+  const receipt = await claimStartMenu(
+    root,
+    install,
+    backend,
+    launcherOwners(state),
+  );
+  if (receipt) state.startMenu[install.key] = receipt;
+  else delete state.startMenu[install.key];
   state.schemaVersion = 8;
+}
+// A launcher path already occupied by a file Piko cannot prove it wrote is left
+// untouched. Refusing the whole transaction because of one stale Start Menu
+// entry used to fail the install and then block recovery of that same install
+// forever; skipping just this launcher keeps the package usable and the foreign
+// file intact. Piko-owned launchers edited by hand still refuse to be replaced.
+async function claimStartMenu(
+  root: string,
+  install: Install,
+  backend: WindowsEffects,
+  ownerOf: Map<string, string>,
+) {
+  const receipt = await shortcutBytes(root, install, backend);
+  for (const entry of receipt.entries) {
+    const owner = ownerOf.get(entry.name.toLowerCase());
+    if (owner !== undefined && owner !== install.key)
+      fail("Start Menu shortcut name belongs to another package");
+  }
+  for (const entry of receipt.entries) {
+    const { startMenu } = await backend.folders(),
+      path = join(startMenu, "Piko Apps", entry.name + ".lnk"),
+      target: Effect["target"] = { kind: "file", path };
+    await noLinks(path);
+    const current = await backend.read(target);
+    if (current === null || equalValue(current, { hash: entry.hash })) continue;
+    console.error(
+      `WARNING: ${path} exists and does not belong to Piko; its launcher was skipped and the file was left as is. Remove or rename it to let Piko create the shortcut.`,
+    );
+    return undefined;
+  }
+  return receipt;
+}
+function launcherOwners(state: State) {
+  const owners = new Map<string, string>();
+  for (const [key, receipt] of Object.entries(state.startMenu ?? {}))
+    for (const entry of receipt.entries)
+      owners.set(entry.name.toLowerCase(), key);
+  return owners;
 }
 async function resources(state: State, backend: WindowsEffects) {
   const map = new Map<string, { key: string; hash: string; path: string }>();
@@ -164,7 +212,15 @@ export async function planStartMenu(
     ) {
       validateDesktop(install.desktop);
       after.startMenu ??= {};
-      after.startMenu[key] = await shortcutBytes(root, install, backend);
+      // An unowned file already at this launcher path is skipped rather than
+      // failing the whole transaction, so one stale .lnk can no longer block an
+      // install and then its own recovery. A receipt Piko already published for
+      // this package still fails on drift instead of being silently dropped.
+      const receipt = before.startMenu?.[key]
+        ? await shortcutBytes(root, install, backend)
+        : await claimStartMenu(root, install, backend, launcherOwners(before));
+      if (receipt) after.startMenu[key] = receipt;
+      else delete after.startMenu[key];
       after.schemaVersion = 8;
     } else if (after.startMenu) delete after.startMenu[key];
   }

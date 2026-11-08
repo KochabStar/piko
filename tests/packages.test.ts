@@ -468,12 +468,30 @@ describe("portable package lifecycle", () => {
     );
     try {
       await expect(p.install("tool@1.0.0")).rejects.toThrow(
-        "run piko recover --force",
+        "operation is still running",
       );
       expect(await exists(lock)).toBe(true);
     } finally {
       await rm(lock, { recursive: true });
     }
+  });
+  test("an interrupted writer lock is reclaimed by the next mutation without a recovery command", async () => {
+    const p = await manager("dead-lock-reclaim"),
+      lock = join(p.root, "mutation.lock"),
+      dead = Bun.spawn([process.execPath, "--version"], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+    await dead.exited;
+    await mkdir(lock);
+    await writeFile(
+      join(lock, "owner.json"),
+      JSON.stringify({ pid: dead.pid, started: new Date().toISOString() }),
+    );
+    // Ctrl+C during an earlier command must not need `piko recover --force`.
+    const installed = await p.install("tool@1.0.0");
+    expect(installed.version).toBe("1.0.0");
+    expect(await exists(lock)).toBe(false);
   });
   test("recover --force clears a dead lock and next mutation recovers interrupted selection", async () => {
     const p = await manager("stale-lock-recovery"),

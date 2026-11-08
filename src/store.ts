@@ -55,6 +55,10 @@ import { selectedEnvironment, validateEnv } from "./environment.ts";
 import { npmTreeHash } from "./scripts.ts";
 import { commandNames } from "./commands.ts";
 import { setCurrent, ensureShim, removeShim } from "./windows.ts";
+// store.ts and self-update.ts reference each other only inside function bodies
+// (Store methods here, prepareSelfUpdate/applySelfUpdate there), so the module
+// cycle is resolved before either is called.
+import { resumeSelfUpdate } from "./self-update.ts";
 import type { State, Source, Install, PersistentData } from "./types.ts";
 
 export function emptyState(): State {
@@ -528,7 +532,7 @@ export async function recoverStaleMutationLock(root: string): Promise<boolean> {
   }
 }
 
-async function acquireMutationLock(root: string): Promise<string> {
+async function createMutationLock(root: string): Promise<string> {
   const lock = join(root, "mutation.lock"),
     pending = join(root, `mutation.lock-pending-${crypto.randomUUID()}`);
   await mkdir(pending);
@@ -538,18 +542,39 @@ async function acquireMutationLock(root: string): Promise<string> {
       JSON.stringify({ pid: process.pid, started: new Date().toISOString() }),
       { flag: "wx" },
     );
-    try {
-      await rename(pending, lock);
-    } catch (error: unknown) {
-      if (!(await exists(lock))) throw error;
-      fail(
-        "Another operation or interrupted process holds mutation.lock; if the operation was interrupted, run piko recover --force",
-      );
-    }
+    await rename(pending, lock);
     return lock;
   } catch (error) {
     await rm(pending, { recursive: true, force: true });
     throw error;
+  }
+}
+// Ctrl+C, a crash or a power loss can end a writer before its finally block
+// releases the lock. The next operation reclaims such a lock itself when the
+// recorded owner has exited, so no separate `piko recover --force` step is
+// needed; a lock whose owner is still running is never stolen.
+export async function acquireMutationLock(root: string): Promise<string> {
+  root = resolve(root);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await createMutationLock(root);
+    } catch (error) {
+      if (!(await exists(join(root, "mutation.lock")))) throw error;
+      if (attempt > 0) throw error;
+      try {
+        if (await recoverStaleMutationLock(root)) continue;
+      } catch (recovery: unknown) {
+        if (
+          recovery instanceof Error &&
+          /owner is still running/.test(recovery.message)
+        )
+          fail(
+            "Another Piko operation is still running; retry after it finishes",
+          );
+        throw recovery;
+      }
+      throw error;
+    }
   }
 }
 
@@ -598,6 +623,48 @@ export class Store {
     this.removalPath = join(root, "operations", "removal.json");
     this.rebuildPath = join(root, "operations", "npm-rebuild.json");
     this.dataRemovalPath = join(root, "operations", "data-removal.json");
+  }
+  // Launching an installed command must not depend on unrelated recovery.
+  // Finishing a pending install/selection/removal/rebuild/desktop/data journal
+  // only publishes commits the interrupted run had already verified, and the
+  // state file is replaced atomically, so dispatch reads the last committed
+  // state and leaves those journals to the next write or `piko doctor`.
+  async readCommitted(): Promise<State> {
+    await noLinks(this.statePath);
+    if (!(await exists(this.statePath))) return emptyState();
+    const s = await json(this.statePath);
+    validateState(s);
+    return s;
+  }
+  // Data-profile and directory migrations do park committed state, so a launch
+  // blocks until they are resumed instead of resolving stale paths.
+  async assertLaunchable(): Promise<void> {
+    for (const [name, advice] of [
+      ["persist", "run piko persist --recover"],
+      ["layout", "run piko maintenance layout --recover"],
+    ] as const) {
+      const path = join(this.root, "operations", name + ".json");
+      await noLinks(path);
+      if (await exists(path))
+        fail(`Interrupted ${name} operation; ${advice} before launching tools`);
+    }
+  }
+  // Journals that a later write can finish on its own, possibly registering the
+  // command a shim was asked to launch.
+  async hasPendingJournals(): Promise<boolean> {
+    for (const path of [
+      this.installPath,
+      this.journalPath,
+      this.removalPath,
+      this.rebuildPath,
+      this.dataRemovalPath,
+      join(this.root, "operations", "profile.json"),
+      join(this.root, "operations", "desktop.json"),
+    ]) {
+      await noLinks(path);
+      if (await exists(path)) return true;
+    }
+    return false;
   }
   async read(): Promise<State> {
     if (await exists(join(this.root, "operations", "persist.json")))
@@ -1267,11 +1334,10 @@ export class Store {
       startMenuRepairKeys?: string[];
     } = {},
   ): Promise<T> {
-    await noLinks(join(this.root, "operations", "self-update.json"));
-    if (await exists(join(this.root, "operations", "self-update.json")))
-      fail(
-        "Piko self-update is pending; run the staged candidate with self recover before other mutations",
-      );
+    // A pending self-update journal used to block every later write until the
+    // user found the staged helper by hand. Reconcile it here instead, and keep
+    // going while its owner is gone or the swap already landed.
+    await resumeSelfUpdate(this.root);
     await noLinks(this.root);
     await mkdir(this.root, { recursive: true });
     const lock = await acquireMutationLock(this.root);
