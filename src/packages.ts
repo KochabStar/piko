@@ -1776,7 +1776,11 @@ export class Packages {
                 "Installation receipt drift; inspect before version cleanup",
               );
             await checkPersistentFileMappings(this.root, i);
-            await checkPersistentLinkMappings(this.root, i);
+            // Directory drift is reconciled by uninstall during execution;
+            // planning only reports shapes that still refuse.
+            await checkPersistentLinkMappings(this.root, i, {
+              reconcile: false,
+            });
             const users = await installationUsers(
               this.root,
               i,

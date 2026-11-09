@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { parseSpec } from "./catalog.ts";
 import { commandNames, resolveCommand } from "./commands.ts";
 import { appFolder, persistentFolder } from "./layout.ts";
+import { reconcileDrift } from "./persistence.ts";
 import { profileRepairPlan, restoreProfileSettings } from "./data-profiles.ts";
 import type { Context } from "./data-profiles.ts";
 import {
@@ -26,7 +27,7 @@ type Mapping = {
 const same = (a: unknown, b: unknown) =>
   JSON.stringify(a) === JSON.stringify(b);
 const normalized = (p: string) => resolve(p).toLowerCase();
-async function checkMapping(m: Mapping) {
+async function checkMapping(m: Mapping, reconcile = true) {
   await noLinks(m.target);
   const target = await lstat(m.target).catch(() =>
     fail(
@@ -40,10 +41,22 @@ async function checkMapping(m: Mapping) {
   if (!(await exists(m.source))) return true;
   const source = await lstat(m.source);
   if (m.kind === "junction") {
-    if (
-      !source.isSymbolicLink() ||
-      normalized(await readlink(m.source)) !== normalized(m.target)
-    )
+    if (!source.isSymbolicLink()) {
+      if (source.isDirectory() && m.category === "data") {
+        // The application recreated its data folder; merge the newer copy
+        // back and restore the link instead of preserving both paths. A
+        // read-only planning pass only names the reconciliation.
+        if (!reconcile)
+          fail(
+            "Reset would reconcile a drifted mapping; rerun without --dry-run: " +
+              m.source,
+          );
+        await reconcileDrift(m.source, m.target);
+        return false;
+      }
+      fail("Reset mapping conflicts; preserve both paths: " + m.source);
+    }
+    if (normalized(await readlink(m.source)) !== normalized(m.target))
       fail("Reset mapping conflicts; preserve both paths: " + m.source);
   } else if (
     !source.isFile() ||
@@ -91,6 +104,7 @@ async function plan(
   state: State,
   spec?: string,
   context: Context = {},
+  reconcile = true,
 ) {
   const root = packages.root,
     backend = packages.effectsBackend ?? new WindowsEffects();
@@ -140,7 +154,8 @@ async function plan(
   for (const m of profiles.links)
     mappings.push({ ...m, kind: "junction", category: "data" });
   const missing: Mapping[] = [];
-  for (const m of mappings) if (await checkMapping(m)) missing.push(m);
+  for (const m of mappings)
+    if (await checkMapping(m, reconcile)) missing.push(m);
   const names = commandNames(state).filter((n) =>
     keys.includes(resolveCommand(state, n).install.key),
   );
@@ -203,6 +218,7 @@ export async function resetPackages(
           await packages.store.read(),
           spec,
           options.context,
+          false,
         ),
       ),
       status: "preview",

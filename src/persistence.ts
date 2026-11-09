@@ -1,5 +1,16 @@
 import { persistentFolder } from "./layout.ts";
-import { lstat, readlink } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  readdir,
+  readlink,
+  rename,
+  rm,
+  symlink,
+  utimes,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   exists,
@@ -8,6 +19,7 @@ import {
   noLinksTree,
   record,
   relativeFile,
+  removeTree,
 } from "./util.ts";
 import type {
   ConfigTemplate,
@@ -136,11 +148,12 @@ export async function checkPersistentFileMappings(
 }
 // Directory mappings must be junctions into the shared persistent tree. An
 // application that recreates its data folder replaces the junction with a
-// plain directory whose contents removal would destroy, so name both copies
-// and refuse instead of failing with no recovery path.
+// plain directory holding the newer data. Reconcile it automatically: merge
+// the newer files back and restore the link instead of refusing removal.
 export async function checkPersistentLinkMappings(
   root: string,
   install: Install,
+  options: { reconcile?: boolean } = {},
 ): Promise<void> {
   for (const path of install.persist) {
     if (install.persistFiles?.[path]) continue;
@@ -159,6 +172,14 @@ export async function checkPersistentLinkMappings(
             : "a plain file";
     if (actual !== null && actual.toLowerCase() === expected.toLowerCase())
       continue;
+    if (actual === null && info.isDirectory()) {
+      // The application recreated its data folder: the plain directory now
+      // holds the newer copy while the persist tree keeps the snapshot.
+      // Merge the newer files back and restore the junction; a read-only
+      // planning pass tolerates the shape and lets execution reconcile.
+      if (options.reconcile !== false) await reconcileDrift(link, expected);
+      continue;
+    }
     fail(
       "Persistent mapping drift; refusing removal: " +
         `${link} is ${found}, expected a link to ${expected}. ` +
@@ -166,6 +187,107 @@ export async function checkPersistentLinkMappings(
         `or run piko reset ${install.name} to restore the link`,
     );
   }
+}
+// Reconcile a drifted mapping: copy every file the plain copy holds newer
+// than the persist tree (keeping timestamps so reruns are idempotent), drop
+// leftovers from an interrupted pass, then restore the junction. Safe to
+// rerun at any interruption point; a locked file fails with the owning path.
+export async function reconcileDrift(
+  source: string,
+  target: string,
+): Promise<void> {
+  await noLinksTree(source);
+  if (!(await exists(target)))
+    fail(
+      "Persistent data or application target missing; reset never recreates lost data: " +
+        target,
+    );
+  await noLinksTree(target);
+  const temp = ".piko-reconcile-" + crypto.randomUUID();
+  const merge = async (from: string, into: string): Promise<void> => {
+    for (const entry of await readdir(from, { withFileTypes: true })) {
+      if (entry.name === temp) continue;
+      const src = join(from, entry.name),
+        dest = join(into, entry.name);
+      if (entry.isDirectory()) {
+        if (await exists(dest)) {
+          if (!(await lstat(dest)).isDirectory())
+            fail("Reconcile target conflicts; inspect manually: " + dest);
+        } else await mkdir(dest, { recursive: true });
+        await merge(src, dest);
+      } else if (entry.isFile()) {
+        const srcInfo = await lstat(src),
+          destInfo = await lstat(dest).catch(() => null);
+        if (destInfo?.isFile() && destInfo.mtimeMs >= srcInfo.mtimeMs)
+          continue;
+        if (destInfo?.isDirectory())
+          fail("Reconcile target conflicts; inspect manually: " + dest);
+        const stage = join(into, temp);
+        try {
+          try {
+            await copyFile(src, stage);
+          } catch (error: any) {
+            if (error && ["EBUSY", "EPERM", "EACCES"].includes(error.code))
+              fail(
+                "Reconcile source file is locked by a running application; " +
+                  "stop it and rerun: " +
+                  src,
+              );
+            throw error;
+          }
+          await utimes(stage, srcInfo.atime, srcInfo.mtime);
+          try {
+            await rename(stage, dest);
+          } catch (error: any) {
+            if (!error || !["EBUSY", "EPERM", "EACCES"].includes(error.code))
+              throw error;
+            // Replacing a read-only archive file fails until the attribute
+            // is cleared; the newer copy is supposed to win, so clear it.
+            await chmod(dest, 0o666);
+            try {
+              await rename(stage, dest);
+            } catch {
+              fail(
+                "Reconcile target file is locked or read-only; stop the " +
+                  "application and rerun: " +
+                  dest,
+              );
+            }
+          }
+        } finally {
+          await rm(stage, { force: true, maxRetries: 8, retryDelay: 100 });
+        }
+      } else
+        fail(
+          "Reconcile source holds an irregular entry; inspect manually: " + src,
+        );
+    }
+  };
+  const sweep = async (dir: string): Promise<void> => {
+    if (!(await exists(dir))) return;
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const child = join(dir, entry.name);
+      if (entry.name.startsWith(".piko-reconcile-")) {
+        await rm(child, { force: true, maxRetries: 8, retryDelay: 100 });
+        continue;
+      }
+      if (entry.isDirectory()) await sweep(child);
+    }
+  };
+  await sweep(target);
+  await merge(source, target);
+  try {
+    await removeTree(source);
+  } catch (error: any) {
+    if (error && ["EBUSY", "EPERM", "EACCES"].includes(error.code))
+      fail(
+        "Reconcile source is locked by a running application; stop it and " +
+          "rerun: " +
+          source,
+      );
+    throw error;
+  }
+  await symlink(resolve(target), source, "junction");
 }
 export async function checkPackagePersistentFiles(
   root: string,

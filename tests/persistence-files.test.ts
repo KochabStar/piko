@@ -1,13 +1,17 @@
 import { persistentFolder } from "../src/layout.ts";
 import { afterAll, expect, test } from "bun:test";
 import {
+  chmod,
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
   rename,
   rm,
   stat,
+  symlink,
   unlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -15,7 +19,7 @@ import { tmpdir } from "node:os";
 import { Packages } from "../src/packages.ts";
 import { WindowsEffects } from "../src/windows-effects.ts";
 import { normalizeManifest } from "../src/catalog.ts";
-import { sha256 } from "../src/util.ts";
+import { exists, sha256 } from "../src/util.ts";
 
 const work = await mkdtemp(join(tmpdir(), "piko-file-persist-"));
 const bytes = Buffer.from("fixture executable");
@@ -153,7 +157,7 @@ test("atomic replacement hardlink drift blocks upgrade and uninstall without los
   expect(await readFile(path, "utf8")).toBe("replacement");
   expect((await p.store.read()).defaults[first.key]?.id).toBe(first.id);
 });
-test("recreated data directory blocks cleanup preview and removal with both paths named", async () => {
+test("recreated data directory reconciles into the persist tree during removal", async () => {
   const p = await manager(),
     first = await p.install("main/linked@1.0.0"),
     shared = join(
@@ -170,23 +174,99 @@ test("recreated data directory blocks cleanup preview and removal with both path
   await mkdir(path);
   await writeFile(join(path, "recreated.hst"), "recreated data");
   const plan = await p.versionCleanupPlan("main/linked", 0);
-  const deferred = plan.entries.find((e) => e.version === first.version);
-  expect(deferred?.action).toBe("defer-drift");
-  expect(deferred?.reason).toContain("Persistent mapping drift");
-  let failure!: Error;
-  await p.uninstall("main/linked@1.0.0").catch((e) => (failure = e));
-  expect(failure.message).toContain("Persistent mapping drift");
-  expect(failure.message).toContain(path);
-  expect(failure.message).toContain(shared);
-  expect(await readFile(join(path, "recreated.hst"), "utf8")).toBe(
+  const planned = plan.entries.find((e) => e.version === first.version);
+  expect(planned?.action).toBe("remove");
+  await p.uninstall("main/linked@1.0.0");
+  // The recreated file merged into the persist tree, the shared snapshot
+  // kept its data, and the version directory went away with its restored
+  // junction riding along into staging.
+  expect(await readFile(join(shared, "recreated.hst"), "utf8")).toBe(
     "recreated data",
   );
   expect(await readFile(join(shared, "keep.hst"), "utf8")).toBe("shared data");
-  await rm(path, { recursive: true });
+  expect(await exists(path)).toBe(false);
+});
+test("drift reconcile prefers newer files, keeps timestamps and preserves the snapshot", async () => {
+  const p = await manager(),
+    first = await p.install("main/linked@1.0.0"),
+    shared = join(
+      p.root,
+      "persist",
+      persistentFolder(first, first.key),
+      "history",
+    ),
+    path = join(p.root, first.dir, "history");
+  await writeFile(join(shared, "keep.hst"), "shared data");
+  await writeFile(join(shared, "stale.hst"), "old copy");
+  const older = new Date("2026-01-01T00:00:00.000Z"),
+    newer = new Date("2026-01-02T03:04:05.678Z");
+  await utimes(join(shared, "stale.hst"), older, older);
+  await p.install("main/linked@2.0.0");
+  await p.use("main/linked@2.0.0");
+  await unlink(path);
+  await mkdir(path);
+  await writeFile(join(path, "stale.hst"), "new copy");
+  await utimes(join(path, "stale.hst"), newer, newer);
   await p.uninstall("main/linked@1.0.0");
+  expect(await readFile(join(shared, "stale.hst"), "utf8")).toBe("new copy");
   expect(await readFile(join(shared, "keep.hst"), "utf8")).toBe("shared data");
+  expect((await stat(join(shared, "stale.hst"))).mtimeMs).toBe(
+    newer.getTime(),
+  );
 });
 
+test("reconcile clears read-only targets and sweeps interrupted leftovers", async () => {
+  const p = await manager(),
+    first = await p.install("main/linked@1.0.0"),
+    shared = join(
+      p.root,
+      "persist",
+      persistentFolder(first, first.key),
+      "history",
+    ),
+    path = join(p.root, first.dir, "history");
+  await writeFile(join(shared, ".piko-reconcile-stale"), "leftover");
+  await writeFile(join(shared, "archive.hst"), "old archive");
+  const older = new Date("2026-02-01T00:00:00.000Z"),
+    newer = new Date("2026-02-02T00:00:00.000Z");
+  await utimes(join(shared, "archive.hst"), older, older);
+  await chmod(join(shared, "archive.hst"), 0o444);
+  await p.install("main/linked@2.0.0");
+  await p.use("main/linked@2.0.0");
+  await unlink(path);
+  await mkdir(path);
+  await writeFile(join(path, "archive.hst"), "new archive");
+  await utimes(join(path, "archive.hst"), newer, newer);
+  await p.uninstall("main/linked@1.0.0");
+  expect(await readFile(join(shared, "archive.hst"), "utf8")).toBe(
+    "new archive",
+  );
+  await chmod(join(shared, "archive.hst"), 0o666);
+  expect(await exists(join(shared, ".piko-reconcile-stale"))).toBe(false);
+});
+test("wrong-direction mapping links still refuse removal", async () => {
+  const p = await manager(),
+    first = await p.install("main/linked@1.0.0"),
+    shared = join(
+      p.root,
+      "persist",
+      persistentFolder(first, first.key),
+      "history",
+    ),
+    path = join(p.root, first.dir, "history");
+  await writeFile(join(shared, "keep.hst"), "shared data");
+  await p.install("main/linked@2.0.0");
+  await p.use("main/linked@2.0.0");
+  await unlink(path);
+  const foreign = join(work, "foreign-" + crypto.randomUUID());
+  await mkdir(foreign);
+  await symlink(foreign, path, "junction");
+  await expect(p.uninstall("main/linked@1.0.0")).rejects.toThrow(
+    "Persistent mapping drift",
+  );
+  expect((await lstat(path)).isSymbolicLink()).toBe(true);
+  expect(await readFile(join(shared, "keep.hst"), "utf8")).toBe("shared data");
+});
 test("source config templates redirect to seeded storage without linking config files", async () => {
   const p = await manager(),
     first = await p.install("main/redirected@1.0.0"),

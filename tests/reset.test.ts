@@ -215,6 +215,16 @@ test("preflight refuses modified shortcuts, external shims, changed data links a
       await unlink(join(app, "settings.ini"));
       await writeFile(join(app, "settings.ini"), "atomic replaced config");
     }
+    if (kind === "data") {
+      // A recreated data folder reconciles instead of refusing: the newer
+      // file merges into the persist tree and the junction is restored.
+      await resetPackages(p, "test/app");
+      expect((await lstat(join(app, "data"))).isSymbolicLink()).toBe(true);
+      expect(await readFile(join(shared, "data/user"), "utf8")).toBe(
+        "preserve",
+      );
+      continue;
+    }
     const state = await readFile(p.store.statePath, "utf8");
     await expect(resetPackages(p, "test/app")).rejects.toThrow();
     expect(await exists(current)).toBe(false);
@@ -223,6 +233,19 @@ test("preflight refuses modified shortcuts, external shims, changed data links a
       "first-run",
     );
   }
+});
+test("reset dry-run names a drifted mapping without writing anything", async () => {
+  const { p, app, shared } = await fixture();
+  await unlink(join(app, "data"));
+  await mkdir(join(app, "data"));
+  await writeFile(join(app, "data/user"), "preserve");
+  const state = await readFile(p.store.statePath, "utf8");
+  await expect(
+    resetPackages(p, "test/app", { dryRun: true }),
+  ).rejects.toThrow("rerun without --dry-run");
+  expect(await readFile(p.store.statePath, "utf8")).toBe(state);
+  expect((await lstat(join(app, "data"))).isDirectory()).toBe(true);
+  expect(await exists(join(shared, "data/user"))).toBe(false);
 });
 test("missing actual data is not recreated from empty defaults, and foreign junctions are not replaced", async () => {
   const { p, app, shared, current } = await fixture();
