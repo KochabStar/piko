@@ -340,6 +340,7 @@ export function normalizeManifest(
     "nested",
     "maxBytes",
     "cabinets",
+    "payload",
   ];
   let downloads: unknown[];
   if (p.downloads !== undefined) {
@@ -365,6 +366,7 @@ export function normalizeManifest(
         "tar.xz",
         "inno",
         "msi",
+        "burn",
         "nsis",
         "pe",
       ].includes(download.format)
@@ -425,7 +427,7 @@ export function normalizeManifest(
     }
     if (download.files !== undefined) {
       if (
-        !["inno", "msi", "nsis"].includes(download.format) ||
+        !["inno", "msi", "burn", "nsis"].includes(download.format) ||
         !record(download.files) ||
         !Object.keys(download.files).length ||
         Object.keys(download.files).length > 100000
@@ -478,6 +480,20 @@ export function normalizeManifest(
     }
     if (download.format === "pe" && !download.nested)
       fail("PE requires explicit nested resource selection");
+    if (download.payload !== undefined) {
+      // A Burn bundle chains WinFsp, the application MSI and possibly more.
+      // Only one manifest-declared payload is selected, and the explicit file
+      // map still applies to the MSI it resolves to, so no rule can silently
+      // extract a driver or an unrelated package.
+      if (
+        download.format !== "burn" ||
+        typeof download.payload !== "string" ||
+        !/^[A-Za-z0-9._+-]{1,128}$/.test(download.payload) ||
+        download.nested !== undefined
+      )
+        fail("Invalid Burn payload selection");
+    } else if (download.format === "burn")
+      fail("Burn extraction requires an explicit payload selection");
     if (download.format === "file") {
       relativeFile(download.file);
       if (download.stripPrefix !== undefined)
@@ -580,6 +596,7 @@ export function normalizeManifest(
     "nested",
     "maxBytes",
     "cabinets",
+    "payload",
     "downloads",
     "maxExpandedBytes",
     "configTemplates",

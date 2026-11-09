@@ -14,6 +14,7 @@ import yauzl from "yauzl";
 import { fail, inside, noLinks, relativeFile, removeTree } from "./util.ts";
 import { helperFile, helperFiles, helperOutput } from "./helpers-process.ts";
 import { containerFile, listContainer, withScratch } from "./containers.ts";
+import { extractBurnPayload } from "./burn.ts";
 import { readMsiPlan } from "./msi.ts";
 import type { Download } from "./types.ts";
 
@@ -462,6 +463,7 @@ export async function extractArchive(
     nested?: Download["nested"];
     lessMsi?: string;
     cabinets?: Record<string, string>;
+    payload?: string;
   } = {},
 ): Promise<void> {
   await noLinks(archivePath);
@@ -507,6 +509,34 @@ export async function extractArchive(
     );
   }
   if (format === "pe") fail("PE requires explicit nested resource selection");
+  if (format === "burn") {
+    if (!sevenZip || !options.lessMsi)
+      fail("Burn extraction requires verified full 7-Zip and lessmsi");
+    if (!options.payload) fail("Burn extraction requires an explicit payload");
+    await noLinks(archivePath);
+    return await withScratch(archivePath, async (scratch) => {
+      const payload = join(scratch, "payload.msi");
+      await extractBurnPayload(
+        sevenZip,
+        archivePath,
+        options.payload!,
+        payload,
+        totalLimit,
+      );
+      // The chained payload is an MSI; run the same guarded extraction as a
+      // direct MSI download, including its explicit file mapping.
+      await extractMsi(
+        payload,
+        destination,
+        stripPrefix,
+        state,
+        into,
+        sevenZip,
+        options.lessMsi!,
+        options.files,
+      );
+    });
+  }
   if (format === "inno") {
     if (!inno) fail("Inno extraction requires the verified innounp helper");
     await noLinks(archivePath);

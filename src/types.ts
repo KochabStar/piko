@@ -159,7 +159,16 @@ export type Dependency = {
   commands?: string[];
 };
 export type ArchiveFormat =
-  "zip" | "7z" | "tar" | "tar.gz" | "tar.xz" | "inno" | "msi" | "nsis" | "pe";
+  | "zip"
+  | "7z"
+  | "tar"
+  | "tar.gz"
+  | "tar.xz"
+  | "inno"
+  | "msi"
+  | "burn"
+  | "nsis"
+  | "pe";
 export type NestedArchive = {
   path: string;
   format: "zip" | "7z";
@@ -168,6 +177,9 @@ export type NestedArchive = {
 export type Download = {
   url: string;
   cabinets?: Record<string, { url: string; sha256: string; maxBytes?: number }>;
+  // WiX Burn bundles chain several packages; only this manifest-declared
+  // payload id is extracted, and it must be an MSI.
+  payload?: string;
   sha256?: string;
   format: "file" | ArchiveFormat;
   files?: Record<string, string>;

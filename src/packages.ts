@@ -858,11 +858,14 @@ export class Packages {
         if (
           downloads.some(
             (d) =>
-              d.format === "msi" || d.format === "nsis" || d.format === "pe",
+              d.format === "msi" ||
+              d.format === "burn" ||
+              d.format === "nsis" ||
+              d.format === "pe",
           )
         )
           sevenZip = await ensureInstallerTool(this.root, state, "full7zip");
-        if (downloads.some((d) => d.format === "msi"))
+        if (downloads.some((d) => d.format === "msi" || d.format === "burn"))
           lessMsi = await ensureInstallerTool(this.root, state, "lessmsi");
         if (
           !sevenZip &&
@@ -958,6 +961,7 @@ export class Packages {
                 nested: download.nested,
                 lessMsi,
                 cabinets,
+                payload: download.payload,
               },
             );
           }
