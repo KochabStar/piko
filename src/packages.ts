@@ -1876,9 +1876,17 @@ export class Packages {
               ))
           : match.installs.find((i) => i.version === match.request);
       if (!installation) fail("Exact installed version not found");
-      await (
-        await import("./data-profiles.ts")
-      ).assertNoDataProfile(this.root, installation.key);
+      // Data-profile integrations map external paths into the shared persist
+      // tree rather than version directories, so removing a superseded version
+      // leaves them intact; only the final version must revoke them first.
+      if (
+        !Object.values(state.installs).some(
+          (i) => i.key === installation.key && i.id !== installation.id,
+        )
+      )
+        await (
+          await import("./data-profiles.ts")
+        ).assertNoDataProfile(this.root, installation.key);
       if (state.bootstraps?.[installation.id]?.status === "running")
         fail(
           "Bootstrap may be interrupted or running; explicitly retry/inspect it before uninstall",
@@ -1897,7 +1905,23 @@ export class Packages {
           fail(
             "Cannot uninstall the default version; switch or unuse it first, or explicitly use --force",
           );
-        delete state.defaults[match.key];
+        // Removing the selected default migrates the selection to the newest
+        // remaining install (as use <package>@<version> would pin it); the
+        // no-default state dead-ends piko persist <package> --remove.
+        const next = Object.values(state.installs)
+          .filter(
+            (i) => i.key === installation.key && i.id !== installation.id,
+          )
+          .sort((a, b) =>
+            semver.valid(a.version) && semver.valid(b.version)
+              ? semver.rcompare(a.version, b.version)
+              : b.version.localeCompare(a.version, undefined, { numeric: true }),
+          )[0];
+        if (next) {
+          state.defaults[match.key] = { id: next.id, request: next.version };
+        } else {
+          delete state.defaults[match.key];
+        }
         this.clearCommands(state, match.key);
       }
       const from = join(this.root, installation.dir),

@@ -36,15 +36,20 @@ const server = Bun.serve({
         packages: Object.fromEntries(
           ["dingtalk", "wechat", "wecom", "tabbit"].map((name) => [
             name,
-            { latest: "1", versions: { "1": name + ".json" } },
+            {
+              latest: "1",
+              versions: { "1": name + ".json", "2": name + "-2.json" },
+            },
           ]),
         ),
       });
     if (path === "/file") return new Response(bytes);
+    const stem = path.slice(1).replace(/\.json$/, ""),
+      versioned = /^(.*)-(\d+)$/.exec(stem);
     return Response.json({
       schemaVersion: 1,
-      name: path.slice(1).replace(/\.json$/, ""),
-      version: "1",
+      name: versioned?.[1] ?? stem,
+      version: versioned?.[2] ?? "1",
       platforms: {
         "windows-x64": {
           url: `http://127.0.0.1:${server.port}/file`,
@@ -195,6 +200,33 @@ test("fresh data preview is inert; apply archives but does not import originals,
   expect(await readFile(join(m.target, "new-chat"), "utf8")).toBe("new-data");
   expect(await readFile(p.store.statePath, "utf8")).toBe(snapshot);
   expect(await exists(persistJournal(p.root))).toBe(false);
+});
+
+test("superseded version removal keeps external data profiles and migrates the default selection", async () => {
+  const { p, context } = await fixture("dingtalk");
+  const plan = await planPersist(p.store, "main/dingtalk", false, context);
+  await applyPersist(p.store, "main/dingtalk", plan.binding, false, context);
+  await p.install("main/dingtalk@2");
+  await p.uninstall("main/dingtalk@1", true);
+  const receipt = JSON.parse(
+    await readFile(join(p.root, "apps/piko/data-profiles.json"), "utf8"),
+  );
+  expect(Object.keys(receipt.profiles)).toHaveLength(1);
+  await expect(p.uninstall("main/dingtalk@2", true)).rejects.toThrow(
+    "data-profile",
+  );
+  // The default migrated to the remaining version, so the guided remediation
+  // (piko persist <package> --remove) no longer dead-ends without a default.
+  const remove = await planPersist(p.store, "main/dingtalk", true, context);
+  await applyPersist(p.store, "main/dingtalk", remove.binding, true, context);
+  await p.uninstall("main/dingtalk@2", true);
+  expect(
+    Object.keys(
+      JSON.parse(
+        await readFile(join(p.root, "apps/piko/data-profiles.json"), "utf8"),
+      ).profiles,
+    ),
+  ).toHaveLength(0);
 });
 
 test("running processes fail closed before mutation, including an app starting after preview", async () => {
