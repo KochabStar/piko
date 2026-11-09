@@ -132,7 +132,7 @@ piko source remove tools --force  # 只移除配置，软件与来源记录保�
 
 ## 分发格式与声明式安装
 
-平台分发项的 `format` 支持 `file`、`zip`、`7z`、`tar`、`tar.gz`、`tar.xz`、`inno`、`msi` 和 `nsis`。后三者均只解包；`nsis` 必须明确选择内层归档，不执行安装器。单文件／单归档继续沿用现有 `url`、`sha256`、`format` 写法；`.tgz` 可声明为 `tar.gz`。
+平台分发项的 `format` 支持 `file`、`zip`、`7z`、`tar`、`tar.gz`、`tar.xz`、`inno`、`msi`、`burn` 和 `nsis`。它们都只解包，不执行安装器；`nsis` 必须明确选择内层归档，`burn` 必须用 `payload` 指定捆绑链里唯一要解出的 MSI（驱动等其余载荷一律不碰），随后仍按该 MSI 的显式 `files` 映射提取。单文件／单归档继续沿用现有 `url`、`sha256`、`format` 写法；`.tgz` 可声明为 `tar.gz`。
 
 ZIP 不依赖外部解压程序。**7z、tar、tar.gz、tar.xz 统一使用真正的 7-Zip**：优先复用 Piko 已安装且校验通过、提供 `7z` 原生命令的 `7zip` 包；有默认版本优先使用默认，否则使用同一来源中已安装的最高数字排序版本。多个来源均可提供时拒绝歧义，不从 PATH 随意调用外部 7z。
 
