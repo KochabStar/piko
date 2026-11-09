@@ -192,7 +192,7 @@ describe("version selection and hostile paths", () => {
 });
 
 describe("portable package lifecycle", () => {
-  test("install never selects; use switches junction; uninstall retains safety", async () => {
+  test("install never selects; use switches junction; forced uninstall migrates the selection", async () => {
     const p = await manager("lifecycle");
     const a = await p.install("main/tool@1.0.0"),
       b = await p.install("main/tool@2.0.0");
@@ -216,9 +216,17 @@ describe("portable package lifecycle", () => {
       "default version",
     );
     await p.uninstall("main/tool@2.0.0", true);
-    expect(await exists(current)).toBe(false);
+    // The selection migrates to the remaining install: the package junction
+    // follows it instead of being removed.
+    expect(await exists(current)).toBe(true);
+    expect(resolve(await readlink(current)).toLowerCase()).toBe(
+      resolve(join(p.root, a.dir)).toLowerCase(),
+    );
     expect(await exists(join(p.root, a.dir, "tool.exe"))).toBe(true);
-    expect((await p.store.read()).defaults).toEqual({});
+    expect((await p.store.read()).defaults[a.key]).toMatchObject({
+      id: a.id,
+      request: "1.0.0",
+    });
   });
   test("package-name uninstall removes the sole inactive version without a source prefix", async () => {
     const p = await manager("uninstall-sole"),
@@ -246,7 +254,7 @@ describe("portable package lifecycle", () => {
       await exists(join(p.root, "apps", appFolder(installed), "current")),
     ).toBe(false);
   });
-  test("package-name uninstall removes only the selected version without activating another copy", async () => {
+  test("package-name uninstall removes only the selected version and migrates the selection", async () => {
     const p = await manager("uninstall-selected-multiple"),
       selected = await p.install("main/tool@1.0.0"),
       other = await p.install("main/tool@2.0.0");
@@ -255,12 +263,20 @@ describe("portable package lifecycle", () => {
     const state = await p.store.read();
     expect(state.installs[selected.id]).toBeUndefined();
     expect(state.installs[other.id]).toBeDefined();
-    expect(state.defaults[selected.key]).toBeUndefined();
+    expect(state.defaults[selected.key]).toMatchObject({
+      id: other.id,
+      request: "2.0.0",
+    });
     expect(await exists(join(p.root, selected.dir))).toBe(false);
     expect(await exists(join(p.root, other.dir))).toBe(true);
     expect(
       await exists(join(p.root, "apps", appFolder(selected), "current")),
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      resolve(
+        await readlink(join(p.root, "apps", appFolder(selected), "current")),
+      ).toLowerCase(),
+    ).toBe(resolve(join(p.root, other.dir)).toLowerCase());
   });
   test("package-name uninstall refuses multiple inactive versions and non-exact requests", async () => {
     const p = await manager("uninstall-ambiguous"),
