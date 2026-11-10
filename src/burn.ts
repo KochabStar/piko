@@ -87,7 +87,7 @@ async function scanCabinets(
         { bytesRead } = await handle.read(buffer, 0, length, position);
       if (!bytesRead) break;
       const window = buffer.subarray(0, bytesRead);
-      for (let index = window.indexOf(signature); index >= 0; ) {
+      for (let index = window.indexOf(signature); index >= 0;) {
         const offset = position + index,
           size = index + 36 <= bytesRead ? window.readUInt32LE(index + 8) : 0;
         // A real cabinet declares its own bounded size; compressed payload
@@ -325,7 +325,14 @@ export async function extractBurnPayload(
     if (member.size !== payload.size)
       fail("Burn attached container size disagrees with its manifest");
     await noLinks(target);
-    await containerFile(sevenZip, layout.attached, "Cab", member, target, limit);
+    await containerFile(
+      sevenZip,
+      layout.attached,
+      "Cab",
+      member,
+      target,
+      limit,
+    );
     if ((await sha512File(target)) !== payload.sha512.toLowerCase())
       fail("Burn attached payload does not match its declared digest");
     return payload;

@@ -1,16 +1,15 @@
 import { afterAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { burnPayloads, extractBurnPayload, parseBurnManifest, peOverlayOffset } from "../src/burn.ts";
+import {
+  burnPayloads,
+  extractBurnPayload,
+  parseBurnManifest,
+  peOverlayOffset,
+} from "../src/burn.ts";
 import { ensureInstallerTool } from "../src/installer-tools.ts";
 import { seedInstallerTools } from "./helper-fixtures.ts";
 import { emptyState } from "../src/store.ts";
@@ -35,7 +34,12 @@ function syntheticPe(): Buffer {
   image.writeUInt16LE(optionalSize, 0x94);
   image.writeUInt16LE(0x20b, optional);
   // .text at 0x200 for 0x100 bytes, .rsrc at 0x300 for 0x100 bytes.
-  const section = (index: number, name: string, size: number, offset: number) => {
+  const section = (
+    index: number,
+    name: string,
+    size: number,
+    offset: number,
+  ) => {
     const entry = sectionTable + index * 40;
     image.write(name, entry, "ascii");
     image.writeUInt32LE(size, entry + 16);
@@ -74,7 +78,7 @@ const sha512 = (bytes: Buffer) =>
 
 async function bundle(
   root: string,
-  members = { "a0": Buffer.from("MSI-A"), "a1": Buffer.from("MSI-B") },
+  members = { a0: Buffer.from("MSI-A"), a1: Buffer.from("MSI-B") },
   payloadHash?: string,
 ) {
   const uxFiles: Record<string, Buffer> = {};
@@ -140,9 +144,7 @@ test("Burn manifests reject unsigned shapes, undeclared containers and non-conta
     ),
   ).toThrow("Unsafe relative path");
   expect(() =>
-    parseBurnManifest(
-      payload(`SourcePath="a0" FileSize="4" Container="C"`),
-    ),
+    parseBurnManifest(payload(`SourcePath="a0" FileSize="4" Container="C"`)),
   ).toThrow("digest is missing");
 });
 
@@ -150,7 +152,11 @@ test("Burn extraction validates the declared container digest and payload identi
   const helperRoot = join(work, "helpers");
   await mkdir(helperRoot);
   await seedInstallerTools(helperRoot);
-  const sevenZip = await ensureInstallerTool(helperRoot, emptyState(), "full7zip");
+  const sevenZip = await ensureInstallerTool(
+    helperRoot,
+    emptyState(),
+    "full7zip",
+  );
   const root = join(work, "case");
   await mkdir(root);
   const built = await bundle(root);
@@ -171,10 +177,22 @@ test("Burn extraction validates the declared container digest and payload identi
   expect((await readFile(target)).toString()).toBe("MSI-B");
 
   await expect(
-    extractBurnPayload(sevenZip, built.path, "Missing", join(root, "x.bin"), 1024),
+    extractBurnPayload(
+      sevenZip,
+      built.path,
+      "Missing",
+      join(root, "x.bin"),
+      1024,
+    ),
   ).rejects.toThrow("no chained payload");
   await expect(
-    extractBurnPayload(sevenZip, built.path, "Package1", join(root, "y.bin"), 3),
+    extractBurnPayload(
+      sevenZip,
+      built.path,
+      "Package1",
+      join(root, "y.bin"),
+      3,
+    ),
   ).rejects.toThrow("expanded size limit");
 
   // A payload digest that disagrees with the bytes must fail closed.
@@ -196,7 +214,11 @@ test("Burn extraction refuses a bundle whose attached container digest is not de
   const helperRoot = join(work, "helpers2");
   await mkdir(helperRoot);
   await seedInstallerTools(helperRoot);
-  const sevenZip = await ensureInstallerTool(helperRoot, emptyState(), "full7zip");
+  const sevenZip = await ensureInstallerTool(
+    helperRoot,
+    emptyState(),
+    "full7zip",
+  );
   const root = join(work, "case2");
   await mkdir(root);
   const built = await bundle(root);
