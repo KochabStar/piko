@@ -359,24 +359,40 @@ export function planSummary(value: unknown): string {
 const countList = (items: [string, number][]): string =>
   items.map(([label, count]) => `${count} ${label}`).join(", ") + ".";
 
-export function cleanupPlanSummary(plan: {
-  keep: number;
-  binding: string;
-  entries: {
-    package: string;
-    version: string;
-    action: string;
-    reason?: string;
-  }[];
-}): string {
+export function cleanupPlanSummary(
+  plan: {
+    keep: number;
+    binding: string;
+    entries: {
+      package: string;
+      version: string;
+      action: string;
+      reason?: string;
+    }[];
+  },
+  verbose = false,
+): string {
   if (!plan.entries.length) return "No installed versions to clean up.";
   const counts = new Map<string, number>();
   for (const entry of plan.entries)
     counts.set(entry.action, (counts.get(entry.action) ?? 0) + 1);
+  // Like update --all, the default view shows only entries piko will act on;
+  // retained versions stay out of the way until --verbose.
+  const visible = verbose
+    ? plan.entries
+    : plan.entries.filter(
+        (entry) =>
+          entry.action !== "keep" && entry.action !== "protect-default",
+      );
+  if (!visible.length)
+    return (
+      `Nothing to clean up; every version is retained ` +
+      `(each default plus ${plan.keep} other).\nBinding: ${plan.binding}`
+    );
   return (
     table(
       ["PACKAGE", "VERSION", "ACTION", "REASON"],
-      plan.entries.map((entry) => [
+      visible.map((entry) => [
         entry.package,
         entry.version,
         entry.action,

@@ -1379,7 +1379,7 @@ async function main(): Promise<number> {
                 null,
                 2,
               )
-            : cleanupPlanSummary(plan),
+            : cleanupPlanSummary(plan, values.verbose),
         );
         if (values["dry-run"]) break;
         if (!values.yes) {
