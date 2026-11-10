@@ -7,7 +7,7 @@ import {
   rename,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { installedHelper } from "./helpers-process.ts";
 import { nativeShimBase64, nativeShimSha256 } from "./generated/shim.ts";
 import {
@@ -125,6 +125,20 @@ type Aria2Attempt = {
   offset: number;
 };
 
+// An external aria2c found on PATH may be another Piko root's shim. Its
+// dispatcher resolves its root from PIKO_HOME in its environment, so
+// inheriting this root's PIKO_HOME would send it to a state that has no
+// provider for it. Keep PIKO_HOME only for helpers inside this root (where
+// the real executable ignores it anyway); strip it for external ones.
+function aria2Env(root: string, executable: string): NodeJS.ProcessEnv {
+  const insideRoot = resolve(executable)
+    .toLowerCase()
+    .startsWith(resolve(root).toLowerCase() + sep);
+  if (insideRoot) return { ...process.env, PIKO_HOME: root };
+  const environment = { ...process.env };
+  delete environment.PIKO_HOME;
+  return environment;
+}
 export async function downloadWithAria2(
   root: string,
   value: string,
@@ -328,7 +342,7 @@ export async function downloadWithAria2(
           stdout: "ignore",
           stderr: "ignore",
           timeout: 3605000,
-          env: { ...process.env, PIKO_HOME: root },
+          env: aria2Env(root, executable),
         },
       );
       const code = await child.exited;
