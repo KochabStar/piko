@@ -108,24 +108,25 @@ export function progressBar(
   percent: number,
   width: number,
   style: TerminalStyle,
+  frame = 0,
 ): string {
   const count = Math.max(0, width),
     value = Math.max(0, Math.min(100, percent));
   const filled = Math.floor((value / 100) * count);
   const head = value > 0 && value < 100 && filled < count;
-  const solid = style.unicode !== false ? "━" : "=";
-  const empty = style.unicode !== false ? "─" : "-";
-  const cursor = style.unicode !== false ? "╸" : ">";
-  let out = accentGradient(solid.repeat(filled), style);
-  if (head) out += tint(cursor, "cyan", style);
-  return (
-    out +
-    tint(
-      empty.repeat(Math.max(0, count - filled - Number(head))),
-      "muted",
-      style,
-    )
-  );
+  // The head replaces the last filled cell instead of occupying an extra
+  // one, so the bar can never look complete while the percent is below 100.
+  const covered = head ? Math.max(1, filled) : filled;
+  const unicode = style.unicode !== false;
+  const block = unicode ? "█" : "=";
+  const rest = unicode ? "░" : "-";
+  // A spinning braille head keeps the frontier alive even when the transfer
+  // briefly stalls; ASCII keeps the static > pointer.
+  const heads = unicode ? ["⣷", "⣯", "⣟", "⣿", "⣽", "⣻", "⢿", "⡫"] : [">"];
+  const solid = head ? covered - 1 : filled;
+  let out = accentGradient(block.repeat(Math.max(0, solid)), style);
+  if (head) out += tint(heads[Math.abs(frame) % heads.length]!, "cyan", style);
+  return out + tint(rest.repeat(Math.max(0, count - covered)), "muted", style);
 }
 export type ActivityView = {
   stage: string;
@@ -176,7 +177,7 @@ export function activityLine(
       if (barWidth)
         parts.push({
           text: "-".repeat(barWidth),
-          raw: progressBar(state.percent!, barWidth, style),
+          raw: progressBar(state.percent!, barWidth, style, state.frame),
         });
       parts.push({ text: pct, tone: "cyan" });
     }

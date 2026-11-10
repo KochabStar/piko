@@ -23,10 +23,10 @@ const view = {
   frame: 2,
 };
 
-test("Gemini-inspired activity uses a dot spinner, thin bar and semantic blue/purple accents", () => {
+test("Gemini-inspired activity uses a dot spinner, block bar with a spinning braille head and semantic blue/purple accents", () => {
   const plain = activityLine(view, 140, { color: false, unicode: true });
   expect(plain).toBe(
-    "  ⠹  2/3  main/llvm  Download  ━━━━━━━╸──────────  42%  42.0 MiB / 100.0 MiB  10.0 MiB/s  · ETA 6s",
+    "  ⠹  2/3  main/llvm  Download  ██████⣟░░░░░░░░░░░  42%  42.0 MiB / 100.0 MiB  10.0 MiB/s  · ETA 6s",
   );
   const rgb = activityLine(view, 140, {
     color: true,
@@ -134,8 +134,20 @@ test("unknown totals remain indeterminate and ASCII fallback retains useful prog
   expect(ascii).toMatch(/^[\x20-\x7e]+$/);
   expect(ascii).toContain("42%");
   expect(ascii).toContain("10.0 MiB/s");
-  expect(strip(progressBar(0, 10, { color: true }))).toBe("──────────");
-  expect(strip(progressBar(100, 10, { color: true }))).toBe("━━━━━━━━━━");
+  expect(strip(progressBar(0, 10, { color: true }))).toBe("░░░░░░░░░░");
+  expect(strip(progressBar(100, 10, { color: true }))).toBe("██████████");
+  // The head replaces the last filled cell, so a sub-100 percent can never
+  // render a visually complete bar.
+  for (const [percent, frame] of [
+    [91, 0],
+    [96, 5],
+    [99, 7],
+  ] as const) {
+    const bar = strip(progressBar(percent, 12, { color: false }, frame));
+    expect(bar).toContain("░");
+    expect(bar).toHaveLength(12);
+  }
+  expect(strip(progressBar(1, 12, { color: false }, 0))).toBe("⣷░░░░░░░░░░░");
 });
 
 test("visual decoration cannot inject terminal commands; no-color output and JSON stay literal", () => {
