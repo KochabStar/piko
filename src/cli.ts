@@ -5,7 +5,12 @@ import {
   selfUpdateStatus,
   launchSelfUpdater,
 } from "./self-update.ts";
-import { ProgressRenderer, report, withProgress } from "./progress.ts";
+import {
+  ProgressRenderer,
+  report,
+  withProgress,
+  formatBytes,
+} from "./progress.ts";
 import {
   humanOutput,
   installedRows,
@@ -24,6 +29,7 @@ import {
   doctorSummary,
   selfStatusSummary,
   importPlanSummary,
+  installResultsSummary,
 } from "./display.ts";
 import { VERSION } from "./version.ts";
 import { createInterface } from "node:readline/promises";
@@ -89,6 +95,7 @@ See README for detailed options and confirmation requirements.
 const commandHelp: Record<string, string> = {
   install: `Usage:
   piko install <source/package>[@version] [--skip-checksum]
+  piko install <spec>... (up to 16 packages; failures do not stop the rest)
   piko install <spec> --with-deps --dry-run
   piko install <spec> --with-deps --yes --binding <hash>
 
@@ -455,6 +462,7 @@ async function main(): Promise<number> {
         process.stderr.write(text);
       },
       tty,
+      taskbar: !!process.env.WT_SESSION,
       color:
         tty &&
         !values["no-color"] &&
@@ -1007,19 +1015,25 @@ async function main(): Promise<number> {
           result.length
             ? values.verbose
               ? table(
-                  ["KIND", "REMOVABLE", "PATH"],
+                  ["KIND", "SIZE", "REMOVABLE", "PATH"],
                   result.map((entry) => [
                     entry.kind,
+                    formatBytes(entry.size),
                     entry.removable ? "yes" : "no",
                     entry.path,
                   ]),
                 )
               : table(
-                  ["KIND", "ENTRIES", "REMOVABLE"],
+                  ["KIND", "ENTRIES", "SIZE", "REMOVABLE"],
                   kinds.map((kind) => [
                     kind,
                     String(
                       result.filter((entry) => entry.kind === kind).length,
+                    ),
+                    formatBytes(
+                      result
+                        .filter((entry) => entry.kind === kind)
+                        .reduce((total, entry) => total + entry.size, 0),
                     ),
                     String(
                       result.filter(
@@ -1058,6 +1072,7 @@ async function main(): Promise<number> {
       if (values["with-deps"]) {
         if (values["skip-checksum"])
           fail("Dependency plans require verified manifests and downloads");
+        if (args.length > 2) fail("--with-deps plans one package at a time");
         const { planDependencies, installWithDependencies } =
           await import("./dependency-install.ts");
         const spec = await packages.runtimeSpec(
@@ -1077,27 +1092,65 @@ async function main(): Promise<number> {
         break;
       }
       if (values["dry-run"]) fail("Install preview requires --with-deps");
-      const i = await task(async () =>
-        packages.install(
-          await packages.runtimeSpec(required(1), values.distribution),
-          values["skip-checksum"],
-        ),
-      );
+      const specs = args.slice(1);
+      if (!specs.length) fail("Missing argument; run piko --help");
+      if (specs.length > 16) fail("Install at most 16 packages per command");
+      const installOne = async (spec: string) =>
+        await task(async () =>
+          packages.install(
+            await packages.runtimeSpec(spec, values.distribution),
+            values["skip-checksum"],
+          ),
+        );
+      if (specs.length === 1) {
+        const i = await installOne(specs[0]!);
+        show(
+          values.json
+            ? JSON.stringify(
+                {
+                  package: `${i.source.alias}/${i.name}`,
+                  version: i.version,
+                  verified: i.verified,
+                  path: join(root, i.dir),
+                  defaultUnchanged: true,
+                },
+                null,
+                2,
+              )
+            : `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Next: piko use ${i.source.alias}/${i.name}@${i.version}`,
+        );
+        break;
+      }
+      // Batch installs continue past a failed package (like update --all) so
+      // one bad spec never blocks the rest; the exit code reports the failure.
+      const results: {
+        spec: string;
+        status: string;
+        version?: string;
+        error?: string;
+      }[] = [];
+      for (const spec of specs) {
+        try {
+          const i = await installOne(spec);
+          results.push({
+            spec,
+            status: "installed",
+            version: `${i.source.alias}/${i.name}@${i.version}`,
+          });
+        } catch (error) {
+          results.push({
+            spec,
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
       show(
         values.json
-          ? JSON.stringify(
-              {
-                package: `${i.source.alias}/${i.name}`,
-                version: i.version,
-                verified: i.verified,
-                path: join(root, i.dir),
-                defaultUnchanged: true,
-              },
-              null,
-              2,
-            )
-          : `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Select explicitly with piko use.`,
+          ? JSON.stringify(results, null, 2)
+          : installResultsSummary(results),
       );
+      if (results.some((r) => r.status === "failed")) return 1;
       break;
     }
     case "use":

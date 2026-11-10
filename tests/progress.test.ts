@@ -434,6 +434,7 @@ test("compiled CLI progress stays on stderr; JSON, pipes, CI and no-progress rem
       .latest,
   ).toBe("1.0.0");
   expect((await run(["cache", "list"])).out).toContain("REMOVABLE");
+  expect((await run(["cache", "list"])).out).toContain("SIZE");
   const updateJson = await run(["update", "--all", "--json"]);
   expect(JSON.parse(updateJson.out)[0].status).toBe("unchanged");
   expect(updateJson.err).toBe("");

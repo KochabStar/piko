@@ -48,6 +48,12 @@ export class ProgressRenderer {
   private frame = 0;
   private last = -Infinity;
   private started = 0;
+  private lastLabel = "";
+  // Recent (time, received) samples for a windowed transfer speed. The
+  // whole-run average keeps falling as a long download progresses and makes
+  // healthy transfers look slower and slower; the window shows what happens
+  // now and keeps the ETA honest.
+  private samples: { at: number; received: number }[] = [];
   private clock: ReturnType<typeof setInterval> | undefined;
   private closed = false;
   private seen = false;
@@ -62,6 +68,10 @@ export class ProgressRenderer {
       trueColor?: boolean;
       verbose?: boolean;
       now?: () => number;
+      // Windows Terminal / ConEmu consume OSC 9;4 (taskbar progress) and
+      // OSC 9;9 (toast) sequences; other terminals discard them. Only emit
+      // them where they are known to work, gated by WT_SESSION.
+      taskbar?: boolean;
     },
   ) {}
   private now() {
@@ -119,7 +129,13 @@ export class ProgressRenderer {
         ),
         this.style(),
       );
-      this.options.write("\r\x1b[2K" + line);
+      this.options.write(
+        "\r\x1b[2K" +
+          line +
+          (this.options.taskbar && this.transfer?.percent !== undefined
+            ? `\x1b]9;4;1;${this.transfer.percent}\x07`
+            : ""),
+      );
     }
   }
   readonly event = (event: ProgressEvent) => {
@@ -129,6 +145,7 @@ export class ProgressRenderer {
       if (event.label === "Resolve package" && !this.position)
         this.packageName = cleanText(event.detail ?? "");
       this.transfer = undefined;
+      this.samples = [];
       this.finishStage();
       this.active = cleanText(event.label);
       this.detail = cleanText(event.detail ?? "");
@@ -149,6 +166,7 @@ export class ProgressRenderer {
       this.position = `${event.index}/${event.total}`;
       this.packageName = cleanText(event.package);
     } else if (event.kind === "result") {
+      this.lastLabel = cleanText(event.label);
       if (this.options.tty) {
         if (!event.failed) this.finishStage();
         this.options.write("\r\x1b[2K");
@@ -162,8 +180,16 @@ export class ProgressRenderer {
         );
       this.active = "";
     } else {
-      const seconds = Math.max(0.001, (this.now() - this.started) / 1000);
-      const speed = event.received / seconds;
+      const now = this.now();
+      this.samples.push({ at: now, received: event.received });
+      while (this.samples.length > 2 && now - this.samples[0]!.at > 3000)
+        this.samples.shift();
+      const window = this.samples;
+      const elapsed = (window.at(-1)!.at - window[0]!.at) / 1000;
+      const speed =
+        window.length > 1 && elapsed >= 0.5
+          ? (window.at(-1)!.received - window[0]!.received) / elapsed
+          : event.received / Math.max(0.001, (now - this.started) / 1000);
       const total =
         event.total && event.total >= event.received ? event.total : undefined;
       const percent = total
@@ -201,6 +227,15 @@ export class ProgressRenderer {
     this.closed = true;
     if (this.clock) clearInterval(this.clock);
     if (!this.seen) return;
+    if (this.options.taskbar) {
+      // Clear the taskbar indicator and toast the outcome so a long download
+      // can finish while the user works in another window.
+      this.options.write("\x1b]9;4;0;\x07");
+      if (this.lastLabel)
+        this.options.write(
+          `\x1b]9;9;Piko: ${this.lastLabel}${success ? "" : " (failed)"}\x07`,
+        );
+    }
     if (success) this.finishStage();
     if (this.options.tty) this.options.write("\r\x1b[2K");
     if (this.options.verbose)

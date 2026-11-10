@@ -53,6 +53,7 @@ import {
   inside,
   json,
   publicEndpoint,
+  searchScore,
 } from "./util.ts";
 import {
   saveNpmSnapshot,
@@ -162,7 +163,10 @@ export class Packages {
     options: { refresh?: boolean } = {},
   ): Promise<{ source: string; name: string; latest: string }[]> {
     if (options.refresh) await this.refreshSources();
-    const results: { source: string; name: string; latest: string }[] = [];
+    const matches: {
+      result: { source: string; name: string; latest: string };
+      score: number;
+    }[] = [];
     const state = await this.store.read();
     for (const s of Object.values(state.sources)) {
       const path = join(this.root, "sources", s.identity, "index.json");
@@ -172,13 +176,24 @@ export class Packages {
           `Source ${s.alias} has no cached index; run piko source refresh ${s.alias}`,
         );
       const index = normalizeIndex(await json(path));
-      for (const [name, p] of Object.entries(index.packages))
-        if (`${s.alias}/${name}`.toLowerCase().includes(query.toLowerCase()))
-          results.push({ source: s.alias, name, latest: p.latest });
+      for (const [name, p] of Object.entries(index.packages)) {
+        const score = searchScore(`${s.alias}/${name}`, query);
+        if (score !== undefined)
+          matches.push({
+            result: { source: s.alias, name, latest: p.latest },
+            score,
+          });
+      }
     }
-    return results.sort((a, b) =>
-      `${a.source}/${a.name}`.localeCompare(`${b.source}/${b.name}`),
-    );
+    return matches
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          `${a.result.source}/${a.result.name}`.localeCompare(
+            `${b.result.source}/${b.result.name}`,
+          ),
+      )
+      .map((match) => match.result);
   }
   private installed(
     state: State,

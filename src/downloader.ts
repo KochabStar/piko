@@ -22,6 +22,7 @@ import {
   removeTree,
   sha256,
   withRetries,
+  assertDiskSpace,
 } from "./util.ts";
 import { report, progressSink, TransferRanges } from "./progress.ts";
 import { isQQDownload, QQDownloadSession } from "./qq-download.ts";
@@ -226,6 +227,9 @@ export async function downloadWithAria2(
           if (expected === undefined) {
             expected = known;
             await writeTotal(stage, known);
+            // Check once per download, before aria2 buffers any payload:
+            // running out of space here fails fast with a clear message.
+            await assertDiskSpace(staging, known);
           } else if (expected !== known)
             fail("Download total changed between requests");
         }

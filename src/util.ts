@@ -13,6 +13,7 @@ import {
   readFile,
   rename,
   rm,
+  statfs,
   writeFile,
 } from "node:fs/promises";
 
@@ -327,4 +328,58 @@ export async function capture(
   ]);
   if (code !== 0) fail(`Subprocess failed (${code}): ${err.slice(-2000)}`);
   return out.trim();
+}
+
+// Rank a search candidate: exact substrings first (earliest hit wins), then
+// ordered subsequence matches with contiguity and word-start bonuses, so
+// "nvim" still finds "neovim". Case-insensitive; undefined means no match.
+export function searchScore(
+  candidate: string,
+  query: string,
+): number | undefined {
+  if (!query) return 0;
+  const haystack = candidate.toLowerCase(),
+    needle = query.toLowerCase();
+  const exact = haystack.indexOf(needle);
+  if (exact >= 0) return 1000;
+  let at = 0,
+    score = 0,
+    streak = 0;
+  for (const char of needle) {
+    const found = haystack.indexOf(char, at);
+    if (found < 0) return undefined;
+    if (found === at) score += 4 + streak++;
+    else {
+      streak = 0;
+      score += 1;
+    }
+    if (found === 0 || "/-_.".includes(haystack[found - 1]!)) score += 3;
+    score -= Math.min(6, Math.floor((found - at) / 4));
+    at = found + 1;
+  }
+  return score + needle.length;
+}
+
+// Fail before the first byte is buffered when the target volume cannot hold
+// the announced download, instead of dying with ENOSPC halfway through.
+// statfs is best-effort: unsupported filesystems keep the old behavior.
+export async function assertDiskSpace(
+  directory: string,
+  bytes: number,
+): Promise<void> {
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) return;
+  try {
+    const info = await statfs(directory);
+    const available = info.bsize * info.bavail;
+    if (available < bytes) {
+      const show = (value: number) =>
+        `${(value / 1024 / 1024 / 1024).toFixed(1)} GiB`;
+      fail(
+        `Not enough disk space for ${directory}: need ${show(bytes)}, have ${show(available)}`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Not enough disk"))
+      throw error;
+  }
 }

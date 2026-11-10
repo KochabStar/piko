@@ -233,3 +233,60 @@ test("tables escape terminal controls while retaining readable Unicode", () => {
     "NAME\n中文?[2J?next?line",
   );
 });
+
+test("search matches ordered subsequences when no substring matches", async () => {
+  const root = join(work, "fuzzy-" + crypto.randomUUID()),
+    p = new Packages(root);
+  await p.addSource("main", `http://127.0.0.1:${server.port}/`);
+  await p.refreshSources();
+  // "tl" is not a substring of tool/alpha, but it is an ordered subsequence
+  // of "main/tool"; alpha has no t at all.
+  expect((await p.search("tl")).map((r) => r.name)).toEqual(["tool"]);
+  expect((await p.search("tool")).map((r) => r.name)).toEqual(["tool"]);
+  expect(await p.search("zzz")).toEqual([]);
+});
+
+test("multi-package install continues past failures and reports per package", async () => {
+  const root = join(work, "multi-" + crypto.randomUUID());
+  await cli(root, [
+    "source",
+    "add",
+    "main",
+    `http://127.0.0.1:${server.port}/`,
+  ]);
+  const results = JSON.parse(
+    (
+      await cli(
+        root,
+        [
+          "install",
+          "main/tool@1.0.0",
+          "main/absent",
+          "main/alpha@1.0.0",
+          "--json",
+        ],
+        1,
+      )
+    ).out,
+  );
+  expect(results).toHaveLength(3);
+  expect(results[0]).toMatchObject({
+    spec: "main/tool@1.0.0",
+    status: "installed",
+  });
+  expect(results[1]).toMatchObject({ spec: "main/absent", status: "failed" });
+  expect(results[2]).toMatchObject({
+    spec: "main/alpha@1.0.0",
+    status: "installed",
+  });
+  // Successful packages stay installed despite the failing spec.
+  const listed = JSON.parse((await cli(root, ["list", "--json"])).out);
+  expect(listed.map((row: { package: string }) => row.package).sort()).toEqual([
+    "main/alpha",
+    "main/tool",
+  ]);
+  // A single-package install keeps suggesting the exact use command.
+  expect((await cli(root, ["install", "main/tool@2.0.0"])).out).toContain(
+    "piko use main/tool@2.0.0",
+  );
+});

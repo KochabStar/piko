@@ -1,5 +1,5 @@
 import type { UpdateRow } from "./update-display-types.ts";
-import { cleanText } from "./progress.ts";
+import { cleanText, formatBytes } from "./progress.ts";
 import {
   tint,
   accentGradient,
@@ -463,15 +463,44 @@ export function orphansSummary(
   );
 }
 
+export function installResultsSummary(
+  results: { spec: string; status: string; version?: string; error?: string }[],
+): string {
+  if (!results.length) return "Nothing installed.";
+  const counts = new Map<string, number>();
+  for (const result of results)
+    counts.set(result.status, (counts.get(result.status) ?? 0) + 1);
+  return (
+    table(
+      ["PACKAGE", "STATUS", "DETAIL"],
+      results.map((result) => [
+        result.spec,
+        result.status,
+        result.status === "failed"
+          ? (result.error ?? "-")
+          : (result.version ?? "-"),
+      ]),
+    ) +
+    `\n\n${countList([...counts])}\nDefaults unchanged; select with piko use.`
+  );
+}
+
 export function cacheCleanSummary(
-  entries: { kind: string; removable: boolean; path: string }[],
+  entries: {
+    kind: string;
+    removable: boolean;
+    path: string;
+    size?: number;
+  }[],
   verbose = false,
 ): string {
   const removed = entries.filter((entry) => entry.removable);
+  const bytes = (list: { size?: number }[]) =>
+    formatBytes(list.reduce((total, entry) => total + (entry.size ?? 0), 0));
   if (!entries.length) return "Cache is empty.";
   return (
-    `Removed ${removed.length} cache entr${removed.length === 1 ? "y" : "ies"}; ` +
-    `${entries.length - removed.length} retained (still referenced or not managed).` +
+    `Removed ${removed.length} cache entr${removed.length === 1 ? "y" : "ies"} (${bytes(removed)}); ` +
+    `${entries.length - removed.length} retained (${bytes(entries.filter((entry) => !entry.removable))}).` +
     (verbose && removed.length
       ? "\n" +
         removed.map((entry) => `  ${entry.kind}: ${entry.path}`).join("\n")

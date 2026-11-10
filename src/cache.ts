@@ -85,7 +85,12 @@ export async function cachePlan(root: string, state: State) {
         i.npmBuild ? [i.npmBuild.inputHash] : [],
       ),
     ),
-    entries: { path: string; kind: string; removable: boolean }[] = [];
+    entries: {
+      path: string;
+      kind: string;
+      removable: boolean;
+      size: number;
+    }[] = [];
   for (const kind of ["artifacts", "npm-input"]) {
     const dir = join(root, "cache", kind);
     await noLinks(dir);
@@ -94,10 +99,12 @@ export async function cachePlan(root: string, state: State) {
       if (!/^[a-f0-9]{64}$/.test(name)) continue;
       const path = join(dir, name);
       await noLinks(path);
+      const info = await lstat(path);
       entries.push({
         path,
         kind,
         removable: kind !== "npm-input" || !used.has(name),
+        size: info.isFile() ? info.size : 0,
       });
     }
   }
