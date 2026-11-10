@@ -11,7 +11,7 @@ import {
   rename,
   symlink,
 } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { packageKey, installId, validateState } from "../src/store.ts";
@@ -33,7 +33,28 @@ import type { Install } from "../src/types.ts";
 const root = await mkdtemp(join(tmpdir(), "piko npm tests-"));
 const manager = new Packages(root),
   oldRegistry = process.env.PIKO_NPM_REGISTRY;
-const node = Bun.which("node.exe") ?? Bun.which("node");
+// Managed Piko shims (a node.exe with a companion node.shim) have no real
+// Node layout next to them; the fixtures need an actual development Node
+// installation whose adjacent node_modules/npm can be copied. When PATH only
+// offers a shim, ask the dispatched Node where its real executable lives.
+const node = await (async () => {
+  for (const directory of (process.env.PATH ?? process.env.Path ?? "")
+    .split(";")
+    .map((entry) => entry.replace(/^"|"$/g, ""))
+    .filter((entry) => entry && isAbsolute(entry))) {
+    if (await exists(join(directory, "node.shim"))) continue;
+    const candidate = join(directory, "node.exe");
+    if (await exists(candidate)) return candidate;
+  }
+  const shim = Bun.which("node.exe") ?? Bun.which("node");
+  if (!shim) return undefined;
+  const real = (
+    await capture(shim, ["-e", "process.stdout.write(process.execPath)"])
+  ).trim();
+  if (real && (await exists(join(dirname(real), "node_modules", "npm"))))
+    return real;
+  return shim;
+})();
 if (!node)
   throw new Error(
     "Integration tests require a development Node/npm installation",
@@ -376,8 +397,11 @@ test("compiled EXE supports native and npm commands from direct spawn, PowerShel
     batch,
     `@echo off\r\n"${shim}" "CMD spaces"\r\nexit /b %errorlevel%\r\n`,
   );
+  // An explicit .\ path: NoDefaultCurrentDirectoryInExePath (common on
+  // managed machines) stops cmd from resolving bare names from the current
+  // directory.
   expect(
-    JSON.parse(await run("cmd.exe", ["/d", "/c", "invoke.cmd"])).args,
+    JSON.parse(await run("cmd.exe", ["/d", "/c", ".\\invoke.cmd"])).args,
   ).toEqual(["CMD spaces"]);
   const mainExe = join(root, "shims", "piko.exe");
   const cleanEnv = { ...env };
