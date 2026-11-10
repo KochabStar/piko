@@ -533,7 +533,12 @@ test("compiled P1 CLI exposes read-only status, runtime distribution, cleanup an
   const missingConfirmation = await run(p.root, ["cleanup", "*"]);
   expect(missingConfirmation.code).toBe(1);
   expect(missingConfirmation.err).toContain("--yes");
-  const cleanupPreview = await run(p.root, ["cleanup", "*", "--dry-run"]);
+  const cleanupPreview = await run(p.root, [
+    "cleanup",
+    "*",
+    "--dry-run",
+    "--json",
+  ]);
   expect(cleanupPreview.code).toBe(0);
   expect(JSON.parse(cleanupPreview.out).keep).toBe(0);
   expect(
@@ -576,7 +581,12 @@ test("compiled P1 CLI exposes read-only status, runtime distribution, cleanup an
   expect((await run(p.root, ["export", file])).code).toBe(0);
   expect((await run(p.root, ["export", file])).code).toBe(1);
   const target = new Packages(join(work, crypto.randomUUID()));
-  const preview = await run(target.root, ["import", file, "--dry-run"]);
+  const preview = await run(target.root, [
+    "import",
+    file,
+    "--dry-run",
+    "--json",
+  ]);
   expect(preview.code).toBe(0);
   expect((await run(target.root, ["import", file])).code).toBe(1);
   const restored = await run(target.root, [

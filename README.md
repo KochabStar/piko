@@ -303,12 +303,13 @@ Shell 初始化读取最近已提交并经过内容审批的快照，不因 `mut
 
 默认使用精简输出：`update --all` 只在一行动态显示当前包／阶段，真正更新或失败的包各显示一条最终结果；未变化、已固定和已是最新的包不显示、不计入默认摘要；没有实际更新或错误时仅输出 `All packages are up to date.`，不再重复打印结果表格或 Completed。`outdated`、`status` 和更新预览同样只展开有变化／受阻的条目。`--verbose` 才保留全部阶段日志、完整包表和原因。精确版本请求仍保持固定，不因界面改动自动升级。
 
-`info` 默认显示来源、最新／请求版本、依赖问题和已安装版本，不输出完整收据；`source list`、`command list` 使用精简表格，`cache list` 按缓存类别汇总数量，`--verbose` 再展开路径／版本明细。搜索和列表不再重复打印每次相同的使用提示。执行代码、数据删除、系统集成等审批预览和恢复协议保持原样，安全警告及失败原因不省略。
+`info` 默认显示来源、最新／请求版本、依赖问题和已安装版本，不输出完整收据；`source list`、`command list` 使用精简表格，`cache list` 按缓存类别汇总数量，`--verbose` 再展开路径／版本明细。搜索和列表不再重复打印每次相同的使用提示。执行代码、数据删除、系统集成等审批预览同样默认使用人类可读输出：完整脚本正文、参数、内容摘要、binding 与安全警告不省略。
 
 - 进度写 stderr，最终结果写 stdout。默认在管道、重定向、CI 或 `TERM=dumb` 环境中关闭动态进度，避免转义字符污染日志。
 - `--progress always` 可在重定向环境输出纯文本下载进度；配合 `--verbose` 输出全部阶段日志。`--progress never`／`--no-progress` 关闭进度。
 - `--color auto|always|never` 控制交互终端配色；`--no-color` 和 `NO_COLOR` 优先禁用颜色，关闭颜色不影响进度信息。
-- `install`、`update`、`outdated`、`status`、`list`、`search`、`info`、`source list`、`command list`、`cache list` 支持 `--json`。该选项关闭进度，在 stdout 保留原始结构化数据（含未变化的包）；安全警告与错误仍会写 stderr。解析列表的脚本必须使用 `--json`，新机引导脚本已同步。其他审批／恢复命令保留既有输出协议。
+- 所有命令默认输出人类可读文本：`list`／`search`／`info`／表格类命令使用精简表格；`cleanup`、`doctor`、`reset`、`maintenance`、`cache`、`import` 等计划与结果使用表格或逐行摘要；`bootstrap`、`system`、`integrate`、`persist`、`rust`、`scripts` 等审批预览使用缩进键值文本，脚本正文按原样完整展示，binding 单独成行。
+- 上述命令均支持 `--json`，该选项关闭进度，在 stdout 保留原始结构化数据（含未变化的包）；安全警告与错误仍会写 stderr。解析任何输出的脚本必须使用 `--json`；审批自动化从 `--json` 输出读取 binding。`self check` 是机器协议，固定输出单行 JSON。
 
 ```powershell
 piko install main/node@latest
@@ -383,7 +384,7 @@ piko cleanup main/node --versions --keep 0 --yes --binding <hash>
 
 `--keep N` 表示除默认版本外再保留 N 个版本；单包 `--versions` 和 `cleanup --versions` 默认 N=1，`cleanup *` 默认 N=0，只保留默认版本。显式传 `--keep N` 可覆盖默认值，默认版本始终保护。标准语义版本按版本从高到低排序，其他版本标识按数字感知的字符串排序（不代表上游发布时间），请核对预览。只卸载已登记且收据一致的版本，保留 persist 数据，不清理缓存，也不扫描未知目录；不与 `--data` 混用。
 
-执行前和每次卸载持锁时重新检查目标，默认、收据或持久化链接漂移都会拒绝；链接漂移时报错指明包内路径、当前形态与 persist 目标，人工核对合并后删除包内副本再重试，或用 `piko reset` 重建链接。逐项沿用已有卸载日志恢复，不是全包原子操作；失败项列明错误，其他项继续。交互终端运行 `cleanup *` 时按提示输入 `yes` 确认；非交互脚本须先检查预览再传 `--yes`。
+执行前和每次卸载持锁时重新检查目标，默认、收据或持久化链接漂移都会拒绝；链接漂移时报错指明包内路径、当前形态与 persist 目标，人工核对合并后删除包内副本再重试，或用 `piko reset` 重建链接。逐项沿用已有卸载日志恢复，不是全包原子操作；失败项列明错误，其他项继续。删除被 Windows 拒绝（EPERM／EACCES／EBUSY）时错误附加上下文提示：当前未提升会建议在管理员终端重试（Piko 从不自动提权），已提升则提示文件可能被服务或系统 ACL 占用；带系统集成的版本被进程占用时预览为 `defer-in-use`，并提示先用管理员终端执行 `piko system <包> --remove` 撤销集成或注销／重启后重试。交互终端运行 `cleanup *` 时按提示输入 `yes` 确认；非交互脚本须先检查预览再传 `--yes`。
 
 ## 整机软件清单导出／恢复
 

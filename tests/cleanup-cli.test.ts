@@ -174,7 +174,7 @@ test("compiled cleanup CLI previews and requires --data plus explicit non-intera
     "utf8",
   );
   for (let attempt = 0; attempt < 2; attempt++) {
-    const diagnostics = JSON.parse((await run(["doctor"])).out);
+    const diagnostics = JSON.parse((await run(["doctor", "--json"])).out);
     expect(diagnostics.installs).toBe(1);
     expect(diagnostics.orphans).toEqual([]);
     expect(diagnostics.revision).toBe(JSON.parse(stateBeforeDoctor).revision);
@@ -211,7 +211,13 @@ test("compiled cleanup CLI previews and requires --data plus explicit non-intera
   await run(["cache", "clean", "--yes"]);
   await run(["uninstall", "main/saved@1.0.0"]);
   expect((await run(["cleanup", "main/saved"], 1)).err).toContain("--data");
-  const preview = await run(["cleanup", "main/saved", "--data", "--dry-run"]);
+  const preview = await run([
+    "cleanup",
+    "main/saved",
+    "--data",
+    "--dry-run",
+    "--json",
+  ]);
   expect(JSON.parse(preview.out).paths).toEqual([data]);
   expect((await run(["cleanup", "main/saved", "--data"], 1)).err).toContain(
     "--yes",

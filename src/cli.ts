@@ -14,6 +14,16 @@ import {
   infoSummary,
   table,
   updateTable,
+  planSummary,
+  cleanupPlanSummary,
+  cleanupResultSummary,
+  cleanupDataSummary,
+  orphansSummary,
+  cacheCleanSummary,
+  resetSummary,
+  doctorSummary,
+  selfStatusSummary,
+  importPlanSummary,
 } from "./display.ts";
 import { VERSION } from "./version.ts";
 import { createInterface } from "node:readline/promises";
@@ -535,9 +545,15 @@ async function main(): Promise<number> {
             }),
           );
           break;
-        case "status":
-          console.log(JSON.stringify(await selfUpdateStatus(root), null, 2));
+        case "status": {
+          const status = await selfUpdateStatus(root);
+          show(
+            values.json
+              ? JSON.stringify(status, null, 2)
+              : selfStatusSummary(status),
+          );
           break;
+        }
         case "apply":
           await applySelfUpdate(root);
           console.log("Piko upgraded; state preserved");
@@ -552,9 +568,12 @@ async function main(): Promise<number> {
               "Rollback requires --yes and must remain compatible with current state",
             );
           const plan = await prepareRollback(root, process.pid),
-            log = await launchSelfUpdater(root, plan.candidate);
-          console.log(
-            JSON.stringify({ ...plan, log, status: "pending" }, null, 2),
+            log = await launchSelfUpdater(root, plan.candidate),
+            pending = { ...plan, log, status: "pending" };
+          show(
+            values.json
+              ? JSON.stringify(pending, null, 2)
+              : planSummary(pending),
           );
           break;
         }
@@ -578,19 +597,18 @@ async function main(): Promise<number> {
               process.pid,
             ),
           );
-          const log = await launchSelfUpdater(root, planned.candidate);
-          console.log(
-            JSON.stringify(
-              {
-                ...planned,
-                log,
-                status: "pending",
-                message:
-                  "Updater will replace Piko after this process exits. Check piko self status; use staged candidate self recover if interrupted.",
-              },
-              null,
-              2,
-            ),
+          const log = await launchSelfUpdater(root, planned.candidate),
+            pending = {
+              ...planned,
+              log,
+              status: "pending",
+              message:
+                "Updater will replace Piko after this process exits. Check piko self status; use staged candidate self recover if interrupted.",
+            };
+          show(
+            values.json
+              ? JSON.stringify(pending, null, 2)
+              : planSummary(pending),
           );
           break;
         }
@@ -699,19 +717,15 @@ async function main(): Promise<number> {
     case "rust": {
       const { inspectRust, runRust } = await import("./rust.ts");
       const action = required(1);
-      if (values["dry-run"])
-        console.log(
-          JSON.stringify(await inspectRust(store, action, args[2]), null, 2),
-        );
-      else {
+      if (values["dry-run"]) {
+        const plan = await inspectRust(store, action, args[2]);
+        show(values.json ? JSON.stringify(plan, null, 2) : planSummary(plan));
+      } else {
         if (action !== "list" && !values["approve-exec"])
           fail("Rust changes need --approve-exec and preview --binding");
-        console.log(
-          JSON.stringify(
-            await runRust(store, action, args[2], values.binding),
-            null,
-            2,
-          ),
+        const result = await runRust(store, action, args[2], values.binding);
+        show(
+          values.json ? JSON.stringify(result, null, 2) : planSummary(result),
         );
       }
       break;
@@ -724,22 +738,19 @@ async function main(): Promise<number> {
         const { inspectSystemUpgrade, applySystemUpgrade } =
           await import("./integration-upgrade.ts");
         const plan = await inspectSystemUpgrade(packages, required(1));
-        console.log(JSON.stringify(plan, null, 2));
+        show(values.json ? JSON.stringify(plan, null, 2) : planSummary(plan));
         if (!values["dry-run"]) {
           if (!values["approve-admin"])
             fail(
               "System upgrade needs --approve-admin and the combined --binding",
             );
-          console.log(
-            JSON.stringify(
-              await applySystemUpgrade(
-                packages,
-                required(1),
-                values.binding ?? "",
-              ),
-              null,
-              2,
-            ),
+          const result = await applySystemUpgrade(
+            packages,
+            required(1),
+            values.binding ?? "",
+          );
+          show(
+            values.json ? JSON.stringify(result, null, 2) : planSummary(result),
           );
         }
         break;
@@ -754,7 +765,7 @@ async function main(): Promise<number> {
         remove = !!values.remove;
       if (remove && !admin) fail("--remove is only for system integration");
       const plan = await inspectExecution(store, spec, admin, remove);
-      console.log(JSON.stringify(plan, null, 2));
+      show(values.json ? JSON.stringify(plan, null, 2) : planSummary(plan));
       if (values["dry-run"]) break;
       if (admin ? !values["approve-admin"] : !values["approve-exec"])
         fail(
@@ -762,18 +773,13 @@ async function main(): Promise<number> {
             ? "System integration requires --approve-admin and preview --binding"
             : "Bootstrap requires --approve-exec and preview --binding; --yes is insufficient",
         );
-      console.log(
-        JSON.stringify(
-          await runExecution(store, spec, {
-            confirmed: true,
-            binding: values.binding,
-            admin,
-            remove,
-          }),
-          null,
-          2,
-        ),
-      );
+      const result = await runExecution(store, spec, {
+        confirmed: true,
+        binding: values.binding,
+        admin,
+        remove,
+      });
+      show(values.json ? JSON.stringify(result, null, 2) : planSummary(result));
       break;
     }
     case "integrate":
@@ -787,9 +793,8 @@ async function main(): Promise<number> {
         if (values.upgrade) {
           if (remove) fail("Use integrate --desktop --upgrade");
           const { inspectDesktopUpgrade } = await import("./desktop.ts");
-          console.log(
-            JSON.stringify(await inspectDesktopUpgrade(store, spec), null, 2),
-          );
+          const plan = await inspectDesktopUpgrade(store, spec);
+          show(values.json ? JSON.stringify(plan, null, 2) : planSummary(plan));
           if (!values["dry-run"]) {
             if (!values.yes)
               fail("Desktop upgrade needs --yes and preview --binding");
@@ -798,18 +803,15 @@ async function main(): Promise<number> {
           break;
         }
         const plan = await inspectDesktop(store, spec, remove);
-        console.log(JSON.stringify(plan, null, 2));
+        show(values.json ? JSON.stringify(plan, null, 2) : planSummary(plan));
         if (values["dry-run"]) break;
-        console.log(
-          JSON.stringify(
-            await applyDesktop(store, spec, {
-              confirmed: !!values.yes,
-              binding: values.binding,
-              remove,
-            }),
-            null,
-            2,
-          ),
+        const result = await applyDesktop(store, spec, {
+          confirmed: !!values.yes,
+          binding: values.binding,
+          remove,
+        });
+        show(
+          values.json ? JSON.stringify(result, null, 2) : planSummary(result),
         );
         break;
       }
@@ -857,7 +859,7 @@ async function main(): Promise<number> {
         remove,
         shell === "bash" ? "bash" : "powershell",
       );
-      console.log(JSON.stringify(plan, null, 2));
+      show(values.json ? JSON.stringify(plan, null, 2) : planSummary(plan));
       if (values["dry-run"]) break;
       let binding = values.binding;
       if (remove) {
@@ -887,18 +889,13 @@ async function main(): Promise<number> {
         }
         binding = plan.binding;
       }
-      console.log(
-        JSON.stringify(
-          await integrate(store, spec, profile, {
-            confirmed: true,
-            binding,
-            remove,
-            shell: shell === "bash" ? "bash" : "powershell",
-          }),
-          null,
-          2,
-        ),
-      );
+      const result = await integrate(store, spec, profile, {
+        confirmed: true,
+        binding,
+        remove,
+        shell: shell === "bash" ? "bash" : "powershell",
+      });
+      show(values.json ? JSON.stringify(result, null, 2) : planSummary(result));
       break;
     }
     case "info": {
@@ -918,7 +915,10 @@ async function main(): Promise<number> {
       const { planPersist, applyPersist, recoverPersist } =
         await import("./data-profiles.ts");
       if (values.recover) {
-        console.log(JSON.stringify(await recoverPersist(store), null, 2));
+        const result = await recoverPersist(store);
+        show(
+          values.json ? JSON.stringify(result, null, 2) : planSummary(result),
+        );
         break;
       }
       if (!!values.fresh === !!values.remove)
@@ -926,18 +926,18 @@ async function main(): Promise<number> {
       const spec = required(1),
         plan = await planPersist(store, spec, !!values.remove);
       if (values["dry-run"]) {
-        console.log(JSON.stringify(plan, null, 2));
+        show(values.json ? JSON.stringify(plan, null, 2) : planSummary(plan));
         break;
       }
       if (!values.yes || !values.binding)
         fail("Profile redirection needs --dry-run then --yes --binding");
-      console.log(
-        JSON.stringify(
-          await applyPersist(store, spec, values.binding, !!values.remove),
-          null,
-          2,
-        ),
+      const result = await applyPersist(
+        store,
+        spec,
+        values.binding,
+        !!values.remove,
       );
+      show(values.json ? JSON.stringify(result, null, 2) : planSummary(result));
       break;
     }
     case "maintenance": {
@@ -945,20 +945,24 @@ async function main(): Promise<number> {
         const { planLayout, migrateLayout, recoverLayout } =
           await import("./layout-migration.ts");
         if (values.recover) {
-          console.log(JSON.stringify(await recoverLayout(root), null, 2));
+          const result = await recoverLayout(root);
+          show(
+            values.json ? JSON.stringify(result, null, 2) : planSummary(result),
+          );
           break;
         }
         const plan = await planLayout(root);
         if (values["dry-run"]) {
-          console.log(JSON.stringify(plan, null, 2));
+          show(values.json ? JSON.stringify(plan, null, 2) : planSummary(plan));
           break;
         }
         if (!values.yes || !values.binding)
           fail(
             "Directory migration requires --dry-run then --yes --binding <hash>",
           );
-        console.log(
-          JSON.stringify(await migrateLayout(root, values.binding), null, 2),
+        const result = await migrateLayout(root, values.binding);
+        show(
+          values.json ? JSON.stringify(result, null, 2) : planSummary(result),
         );
         break;
       }
@@ -978,7 +982,9 @@ async function main(): Promise<number> {
                 !values["dry-run"] && !!values.yes,
               ),
             );
-      console.log(JSON.stringify(result, null, 2));
+      show(
+        values.json ? JSON.stringify(result, null, 2) : orphansSummary(result),
+      );
       break;
     }
     case "cache": {
@@ -1024,7 +1030,8 @@ async function main(): Promise<number> {
                 )
             : "Cache is empty.",
         );
-      } else console.log(JSON.stringify(result, null, 2));
+      } else if (!values.json) show(cacheCleanSummary(result, values.verbose));
+      else console.log(JSON.stringify(result, null, 2));
       break;
     }
     case "search": {
@@ -1057,16 +1064,15 @@ async function main(): Promise<number> {
           required(1),
           values.distribution,
         );
-        console.log(
-          JSON.stringify(
-            values["dry-run"] || !values.yes
-              ? await planDependencies(packages, spec)
-              : await task(() =>
-                  installWithDependencies(packages, spec, values.binding ?? ""),
-                ),
-            null,
-            2,
-          ),
+        const outcome = values["dry-run"]
+          ? await planDependencies(packages, spec)
+          : !values.yes
+            ? await planDependencies(packages, spec)
+            : await task(() =>
+                installWithDependencies(packages, spec, values.binding ?? ""),
+              );
+        show(
+          values.json ? JSON.stringify(outcome, null, 2) : planSummary(outcome),
         );
         break;
       }
@@ -1134,14 +1140,15 @@ async function main(): Promise<number> {
           "Reset repairs missing resources only; it does not delete data or force overwrites",
         );
       const { resetPackages } = await import("./reset.ts");
-      console.log(
-        JSON.stringify(
-          await resetPackages(packages, values.all ? undefined : required(1), {
-            dryRun: values["dry-run"],
-          }),
-          null,
-          2,
-        ),
+      const result = await resetPackages(
+        packages,
+        values.all ? undefined : required(1),
+        {
+          dryRun: values["dry-run"],
+        },
+      );
+      show(
+        values.json ? JSON.stringify(result, null, 2) : resetSummary(result),
       );
       break;
     }
@@ -1209,22 +1216,19 @@ async function main(): Promise<number> {
       const value = JSON.parse(await readFile(path, "utf8")),
         plan = await planInventory(packages, value);
       if (values["dry-run"] || !values.yes) {
-        console.log(JSON.stringify(plan, null, 2));
+        show(
+          values.json ? JSON.stringify(plan, null, 2) : importPlanSummary(plan),
+        );
         if (!values["dry-run"])
           fail("Inventory restore requires --yes after reviewing --dry-run");
         if (plan.conflicts.length) return 1;
         break;
       }
-      console.log(
-        JSON.stringify(
-          await importInventory(packages, value, {
-            confirmed: true,
-            binding: values.binding ?? plan.binding,
-          }),
-          null,
-          2,
-        ),
-      );
+      const result = await importInventory(packages, value, {
+        confirmed: true,
+        binding: values.binding ?? plan.binding,
+      });
+      show(values.json ? JSON.stringify(result, null, 2) : planSummary(result));
       break;
     }
     case "update": {
@@ -1362,18 +1366,20 @@ async function main(): Promise<number> {
             : Number(values.keep);
         const spec = allVersions ? undefined : args[1];
         const plan = await packages.versionCleanupPlan(spec, keep);
-        console.log(
-          JSON.stringify(
-            {
-              keep: plan.keep,
-              binding: plan.binding,
-              entries: plan.entries.map(
-                ({ installation: _installation, ...entry }) => entry,
-              ),
-            },
-            null,
-            2,
-          ),
+        show(
+          values.json
+            ? JSON.stringify(
+                {
+                  keep: plan.keep,
+                  binding: plan.binding,
+                  entries: plan.entries.map(
+                    ({ installation: _installation, ...entry }) => entry,
+                  ),
+                },
+                null,
+                2,
+              )
+            : cleanupPlanSummary(plan),
         );
         if (values["dry-run"]) break;
         if (!values.yes) {
@@ -1398,7 +1404,11 @@ async function main(): Promise<number> {
           confirmed: true,
           binding: values.binding ?? plan.binding,
         });
-        console.log(JSON.stringify(result, null, 2));
+        show(
+          values.json
+            ? JSON.stringify(result, null, 2)
+            : cleanupResultSummary(result),
+        );
         if (result.some((r) => r.status === "failed")) return 1;
         break;
       }
@@ -1409,12 +1419,14 @@ async function main(): Promise<number> {
         );
       const spec = required(1),
         preview = await packages.cleanupData(spec, { dryRun: true });
-      console.log(
-        JSON.stringify(
-          { package: spec, paths: preview.paths, dryRun: true },
-          null,
-          2,
-        ),
+      show(
+        values.json
+          ? JSON.stringify(
+              { package: spec, paths: preview.paths, dryRun: true },
+              null,
+              2,
+            )
+          : cleanupDataSummary(spec, preview.paths),
       );
       if (values["dry-run"]) break;
       if (!values.yes) {
@@ -1484,22 +1496,21 @@ async function main(): Promise<number> {
             i.name === parsed.name &&
             i.version === parsed.request,
         );
-        if (install?.npmBuild)
-          console.log(
-            JSON.stringify(await packages.inspectScripts(spec), null, 2),
+        if (install?.npmBuild) {
+          const result = await packages.inspectScripts(spec);
+          show(
+            values.json ? JSON.stringify(result, null, 2) : planSummary(result),
           );
-        else
-          console.log(
-            JSON.stringify(
-              {
-                scripts: inventory,
-                warning:
-                  "Legacy installation has no verified content snapshot; reinstall before approval.",
-              },
-              null,
-              2,
-            ),
+        } else {
+          const legacy = {
+            scripts: inventory,
+            warning:
+              "Legacy installation has no verified content snapshot; reinstall before approval.",
+          };
+          show(
+            values.json ? JSON.stringify(legacy, null, 2) : planSummary(legacy),
           );
+        }
       } else if (action === "approve") {
         const plan = await packages.inspectScripts(spec),
           path =
@@ -1509,8 +1520,11 @@ async function main(): Promise<number> {
           fail("No lifecycle script at this exact package path");
         if (values.binding && values.binding !== script.binding)
           fail("Approval binding changed; inspect scripts again");
-        console.log(
-          JSON.stringify({ warning: plan.warning, ...script }, null, 2),
+        const approval = { warning: plan.warning, ...script };
+        show(
+          values.json
+            ? JSON.stringify(approval, null, 2)
+            : planSummary(approval),
         );
         if (!values.yes) {
           if (!process.stdin.isTTY || !process.stdout.isTTY)
@@ -1560,38 +1574,35 @@ async function main(): Promise<number> {
       await packages.store.mutate(async () => {}, { skipUnchanged: true });
       const s = await packages.store.read();
       const { shellDiagnostics } = await import("./shell.ts");
-      console.log(
-        JSON.stringify(
-          {
-            root,
-            state: packages.store.statePath,
-            revision: s.revision,
-            bun: Bun.version,
-            platform: process.platform,
-            arch: process.arch,
-            orphans: await orphanPlan(root, s),
-            pathDiagnostics: await pathDiagnostics(root, s),
-            installs: Object.keys(s.installs).length,
-            shellIntegrations: await shellDiagnostics(store),
-            dataProfiles: await (
-              await import("./data-profiles.ts")
-            ).dataProfileStatus(store),
-            desktopIntegrations: s.desktop ?? {},
-            executions: {
-              bootstraps: s.bootstraps ?? {},
-              system: s.admin ?? {},
-            },
-            limits: [
-              "npm install/update scripts disabled; rebuild requires content-bound approval and npm 11.20.0",
-              "Approved scripts are not sandboxed; external effects cannot be rolled back",
-              "A writer lock whose owner exited is reclaimed automatically; a live owner is never preempted",
-              "Self-update requires an explicitly trusted checksum; executables are unsigned",
-              "Windows 10 and full interactive agent workflows are not independently certified",
-            ],
-          },
-          null,
-          2,
-        ),
+      const report = {
+        root,
+        state: packages.store.statePath,
+        revision: s.revision,
+        bun: Bun.version,
+        platform: process.platform,
+        arch: process.arch,
+        orphans: await orphanPlan(root, s),
+        pathDiagnostics: await pathDiagnostics(root, s),
+        installs: Object.keys(s.installs).length,
+        shellIntegrations: await shellDiagnostics(store),
+        dataProfiles: await (
+          await import("./data-profiles.ts")
+        ).dataProfileStatus(store),
+        desktopIntegrations: s.desktop ?? {},
+        executions: {
+          bootstraps: s.bootstraps ?? {},
+          system: s.admin ?? {},
+        },
+        limits: [
+          "npm install/update scripts disabled; rebuild requires content-bound approval and npm 11.20.0",
+          "Approved scripts are not sandboxed; external effects cannot be rolled back",
+          "A writer lock whose owner exited is reclaimed automatically; a live owner is never preempted",
+          "Self-update requires an explicitly trusted checksum; executables are unsigned",
+          "Windows 10 and full interactive agent workflows are not independently certified",
+        ],
+      };
+      show(
+        values.json ? JSON.stringify(report, null, 2) : doctorSummary(report),
       );
       break;
     }

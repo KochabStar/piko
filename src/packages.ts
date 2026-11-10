@@ -1730,6 +1730,28 @@ export class Packages {
       await this.select(state, match.key, target.id, request);
     });
   }
+  // Windows reports deletion of ACL-protected or system-held files with the
+  // same opaque EPERM/EACCES/EBUSY codes as any other failure. Instead of a
+  // bare error, tell the user whether an elevated terminal would help; Piko
+  // itself never auto-elevates.
+  private async elevationHint(error: unknown): Promise<string | undefined> {
+    const code = (error as { code?: string } | null)?.code;
+    const message = error instanceof Error ? error.message : String(error);
+    const denied =
+      code === "EPERM" ||
+      code === "EACCES" ||
+      code === "EBUSY" ||
+      /access is denied|requires elevation/i.test(message);
+    if (!denied) return undefined;
+    try {
+      const { nativeRequest } = await import("./windows-effects.ts");
+      if (await nativeRequest({ op: "elevated" }))
+        return "access denied even when elevated; a running service or system ACL may be holding the files";
+      return "access denied; retry from an elevated (administrator) terminal — Piko never auto-elevates";
+    } catch {
+      return "access denied; retry from an elevated (administrator) terminal";
+    }
+  }
   async versionCleanupPlan(spec?: string, keep = 1) {
     if (!Number.isSafeInteger(keep) || keep < 0 || keep > 10000)
       fail("--keep must be an integer from 0 to 10000");
@@ -1792,11 +1814,17 @@ export class Packages {
             );
             if (users.length) {
               action = "defer-in-use";
-              reason = users.map((p) => `${p.name} (${p.pid})`).join(", ");
+              reason =
+                users.map((p) => `${p.name} (${p.pid})`).join(", ") +
+                (i.admin
+                  ? "; system-integrated files are loaded — revoke with piko system <package> --remove in an elevated terminal, or retry after sign-out/restart"
+                  : "");
             }
           } catch (error) {
             action = "defer-drift";
             reason = error instanceof Error ? error.message : String(error);
+            const hint = await this.elevationHint(error);
+            if (hint) reason += ` (${hint})`;
           }
         }
         entries.push({
@@ -1854,11 +1882,13 @@ export class Packages {
           status: "removed",
         });
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error),
+          hint = await this.elevationHint(error);
         results.push({
           package: item.package,
           version: item.version,
           status: "failed",
-          error: error instanceof Error ? error.message : String(error),
+          error: hint ? `${message} (${hint})` : message,
         });
       }
     }
@@ -1917,13 +1947,13 @@ export class Packages {
         // remaining install (as use <package>@<version> would pin it); the
         // no-default state dead-ends piko persist <package> --remove.
         const next = Object.values(state.installs)
-          .filter(
-            (i) => i.key === installation.key && i.id !== installation.id,
-          )
+          .filter((i) => i.key === installation.key && i.id !== installation.id)
           .sort((a, b) =>
             semver.valid(a.version) && semver.valid(b.version)
               ? semver.rcompare(a.version, b.version)
-              : b.version.localeCompare(a.version, undefined, { numeric: true }),
+              : b.version.localeCompare(a.version, undefined, {
+                  numeric: true,
+                }),
           )[0];
         if (next) {
           state.defaults[match.key] = { id: next.id, request: next.version };

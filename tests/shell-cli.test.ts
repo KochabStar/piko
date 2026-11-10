@@ -206,7 +206,9 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
     "--profile",
     profile,
   ];
-  const plan = JSON.parse(await run(["integrate", ...common, "--dry-run"]));
+  const plan = JSON.parse(
+    await run(["integrate", ...common, "--dry-run", "--json"]),
+  );
   expect(
     await deniedCommand([
       "integrate",
@@ -227,7 +229,7 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
     plan.binding,
   ]);
   const shortPlan = JSON.parse(
-    await run(["integrate", "initializer", "--dry-run"]),
+    await run(["integrate", "initializer", "--dry-run", "--json"]),
   );
   expect(shortPlan.profile).toBe(resolve(profile));
   const statePath = join(home, "apps", "piko", "state.json"),
@@ -264,7 +266,7 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
   const approved = await runInteractive(["integrate", "initializer"], "y");
   expect(approved.code).toBe(0);
   expect(approved.err).toBe("");
-  expect(approved.out).toContain('"status": "completed"');
+  expect(approved.out).toContain("status: completed");
   const installedState: State = JSON.parse(await readFile(statePath, "utf8"));
   const initializer = Object.values(installedState.installs).find(
     (install) => install.name === "initializer",
@@ -313,6 +315,7 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
         "--profile",
         profile,
         "--dry-run",
+        "--json",
       ]),
     ).profile,
   ).toBe(resolve(profile));
@@ -358,7 +361,7 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
     bashProfile,
   ];
   const bashPlan = JSON.parse(
-    await run(["integrate", ...bashCommon, "--dry-run"]),
+    await run(["integrate", ...bashCommon, "--dry-run", "--json"]),
   );
   await run([
     "integrate",
@@ -393,6 +396,7 @@ test("compiled CLI explicitly approves Profile code; fresh 5.1/7 sessions load t
         "--profile",
         bashProfile,
         "--dry-run",
+        "--json",
       ]),
     ).initializer,
   ).toContain("PikoBashFixture");

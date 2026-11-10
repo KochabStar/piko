@@ -90,7 +90,7 @@ test("compiled bootstrap separates download, code approval and default selection
   await run(["source", "add", "main", `http://127.0.0.1:${server.port}/`]);
   await run(["install", "main/bootstrap@1"]);
   const plan = JSON.parse(
-    (await run(["bootstrap", "main/bootstrap", "--dry-run"])).out,
+    (await run(["bootstrap", "main/bootstrap", "--dry-run", "--json"])).out,
   );
   expect(plan.script).toContain("WriteAllText");
   const denied = await run(
@@ -113,7 +113,7 @@ test("compiled bootstrap separates download, code approval and default selection
     Object.values(state.bootstraps).some((r: any) => r.status === "completed"),
   ).toBe(true);
   const admin = JSON.parse(
-    (await run(["system", "main/bootstrap", "--dry-run"])).out,
+    (await run(["system", "main/bootstrap", "--dry-run", "--json"])).out,
   );
   expect(admin.warning).toContain("ADMINISTRATOR");
   const noAdminFlag = await run(

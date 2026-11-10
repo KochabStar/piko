@@ -228,7 +228,15 @@ test("compiled self update runs after initiating process exits and reports compl
   const target = join(root, "apps/piko/piko.exe"),
     hash = await executableHash(exe);
   const response = JSON.parse(
-    await run(root, target, ["self", "update", exe, "--sha256", hash, "--yes"]),
+    await run(root, target, [
+      "self",
+      "update",
+      exe,
+      "--sha256",
+      hash,
+      "--yes",
+      "--json",
+    ]),
   );
   expect(response.status).toBe("pending");
   const started = Date.now();

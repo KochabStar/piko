@@ -141,7 +141,7 @@ test("fresh root installs a batch through public CLI then verifies bootstrap, de
     await cli(["use", "main/" + name + "@1"]);
   }
   const approval = JSON.parse(
-    (await cli(["bootstrap", "main/bootstrap", "--dry-run"])).out,
+    (await cli(["bootstrap", "main/bootstrap", "--dry-run", "--json"])).out,
   );
   await cli([
     "bootstrap",
@@ -160,7 +160,7 @@ test("fresh root installs a batch through public CLI then verifies bootstrap, de
     profile,
   ];
   const integration = JSON.parse(
-    (await cli(["integrate", ...common, "--dry-run"])).out,
+    (await cli(["integrate", ...common, "--dry-run", "--json"])).out,
   );
   await cli([
     "integrate",
@@ -171,7 +171,7 @@ test("fresh root installs a batch through public CLI then verifies bootstrap, de
   ]);
   const statePath = join(home, "apps/piko/state.json");
   const snapshot = await readFile(statePath, "utf8");
-  const diagnostic = JSON.parse((await cli(["doctor"])).out);
+  const diagnostic = JSON.parse((await cli(["doctor", "--json"])).out);
   expect(diagnostic.installs).toBe(3);
   expect(diagnostic.orphans).toEqual([]);
   expect(diagnostic.shellIntegrations).toMatchObject([{ status: "ready" }]);
@@ -216,7 +216,7 @@ test("fresh root installs a batch through public CLI then verifies bootstrap, de
   await rm(join(home, "shims/fixture-runtime.shim"));
   const beforeReset = await readFile(statePath, "utf8");
   const preview = JSON.parse(
-    (await cli(["reset", "main/runtime", "--dry-run"])).out,
+    (await cli(["reset", "main/runtime", "--dry-run", "--json"])).out,
   );
   expect(preview.status).toBe("preview");
   expect(preview.shims).toContain("fixture-runtime");
@@ -224,7 +224,7 @@ test("fresh root installs a batch through public CLI then verifies bootstrap, de
   expect(preview.current).toHaveLength(1);
   expect(preview.shortcuts).toHaveLength(1);
   expect(await readFile(statePath, "utf8")).toBe(beforeReset);
-  const repaired = JSON.parse((await cli(["reset", "--all"])).out);
+  const repaired = JSON.parse((await cli(["reset", "--all", "--json"])).out);
   expect(repaired.status).toBe("completed");
   expect(await readFile(join(mapping, "keep.txt"), "utf8")).toBe(
     "native-data-kept",
