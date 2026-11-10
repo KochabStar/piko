@@ -240,9 +240,9 @@ test("reset dry-run names a drifted mapping without writing anything", async () 
   await mkdir(join(app, "data"));
   await writeFile(join(app, "data/user"), "preserve");
   const state = await readFile(p.store.statePath, "utf8");
-  await expect(
-    resetPackages(p, "test/app", { dryRun: true }),
-  ).rejects.toThrow("rerun without --dry-run");
+  await expect(resetPackages(p, "test/app", { dryRun: true })).rejects.toThrow(
+    "rerun without --dry-run",
+  );
   expect(await readFile(p.store.statePath, "utf8")).toBe(state);
   expect((await lstat(join(app, "data"))).isDirectory()).toBe(true);
   expect(await exists(join(shared, "data/user"))).toBe(false);

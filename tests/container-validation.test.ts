@@ -56,9 +56,7 @@ test("container metadata rejects unsafe paths, aliasing, streams, links and ambi
   const compound = await listContainer(fake, "unused", "Compound");
   expect(compound.find((e) => e.path === "payload.cab")?.size).toBe(4);
   expect(compound.find((e) => e.path === "1025")?.directory).toBe(true);
-  await expect(listContainer(fake, "unused", "Cab")).rejects.toThrow(
-    "Missing",
-  );
+  await expect(listContainer(fake, "unused", "Cab")).rejects.toThrow("Missing");
   await expect(
     containerFile(
       fake,

@@ -210,9 +210,7 @@ test("drift reconcile prefers newer files, keeps timestamps and preserves the sn
   await p.uninstall("main/linked@1.0.0");
   expect(await readFile(join(shared, "stale.hst"), "utf8")).toBe("new copy");
   expect(await readFile(join(shared, "keep.hst"), "utf8")).toBe("shared data");
-  expect((await stat(join(shared, "stale.hst"))).mtimeMs).toBe(
-    newer.getTime(),
-  );
+  expect((await stat(join(shared, "stale.hst"))).mtimeMs).toBe(newer.getTime());
 });
 
 test("reconcile clears read-only targets and sweeps interrupted leftovers", async () => {

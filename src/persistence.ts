@@ -218,8 +218,7 @@ export async function reconcileDrift(
       } else if (entry.isFile()) {
         const srcInfo = await lstat(src),
           destInfo = await lstat(dest).catch(() => null);
-        if (destInfo?.isFile() && destInfo.mtimeMs >= srcInfo.mtimeMs)
-          continue;
+        if (destInfo?.isFile() && destInfo.mtimeMs >= srcInfo.mtimeMs) continue;
         if (destInfo?.isDirectory())
           fail("Reconcile target conflicts; inspect manually: " + dest);
         const stage = join(into, temp);
