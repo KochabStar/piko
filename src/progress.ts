@@ -54,6 +54,9 @@ export class ProgressRenderer {
   // healthy transfers look slower and slower; the window shows what happens
   // now and keeps the ETA honest.
   private samples: { at: number; received: number }[] = [];
+  // Transfers render two rows (identity + transfer detail); remember that so
+  // redraws and the final clear also erase the second row.
+  private multiRow = false;
   private clock: ReturnType<typeof setInterval> | undefined;
   private closed = false;
   private seen = false;
@@ -87,16 +90,23 @@ export class ProgressRenderer {
   private color(value: string, code: number) {
     return tint(value, code === 31 ? "error" : "success", this.style());
   }
-  private finishStage() {
-    if (!this.options.verbose || !this.options.tty || !this.active) return;
+  private finishStage(clear = "\r\x1b[2K"): boolean {
+    if (!this.options.verbose || !this.options.tty || !this.active)
+      return false;
     this.options.write(
-      "\r\x1b[2K" +
+      clear +
         this.color(
           `  ${symbol("success", this.style().unicode)} ${this.active}`,
           32,
         ) +
         `  ${((this.now() - this.started) / 1000).toFixed(1)}s\n`,
     );
+    return true;
+  }
+  private erase(): string {
+    const clear = this.multiRow ? "\r\x1b[2K\x1b[1A\r\x1b[2K" : "\r\x1b[2K";
+    this.multiRow = false;
+    return clear;
   }
   private draw(force = false) {
     if (!this.active) return;
@@ -129,8 +139,10 @@ export class ProgressRenderer {
         ),
         this.style(),
       );
+      const clear = this.erase();
+      this.multiRow = line.includes("\n");
       this.options.write(
-        "\r\x1b[2K" +
+        clear +
           line +
           (this.options.taskbar && this.transfer?.percent !== undefined
             ? `\x1b]9;4;1;${this.transfer.percent}\x07`
@@ -168,8 +180,9 @@ export class ProgressRenderer {
     } else if (event.kind === "result") {
       this.lastLabel = cleanText(event.label);
       if (this.options.tty) {
-        if (!event.failed) this.finishStage();
-        this.options.write("\r\x1b[2K");
+        const clear = this.erase();
+        if (!event.failed) this.finishStage(clear);
+        else this.options.write(clear);
       }
       if (this.options.verbose)
         this.options.write(
@@ -236,8 +249,10 @@ export class ProgressRenderer {
           `\x1b]9;9;Piko: ${this.lastLabel}${success ? "" : " (failed)"}\x07`,
         );
     }
-    if (success) this.finishStage();
-    if (this.options.tty) this.options.write("\r\x1b[2K");
+    const clear = this.erase();
+    if (success && !this.finishStage(clear) && this.options.tty)
+      this.options.write(clear);
+    else if (!success && this.options.tty) this.options.write(clear);
     if (this.options.verbose)
       this.options.write(
         this.color(

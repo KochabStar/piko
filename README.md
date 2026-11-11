@@ -284,7 +284,7 @@ piko unuse main/node
 piko uninstall main/node@26.12.1
 ```
 
-`search` 默认只读取已验证的本地源索引（离线可用），不会刷新远端、修改状态或争用 mutation.lock。使用 `source refresh [alias]` 或 `search <query> --refresh` 更新索引；本地索引缺失／损坏时明确报错，不隐式联网。`search` 与 `list` 默认使用按包排序的表格；原 JSON 字段保留在 `--json` 输出中，脚本调用需显式添加该参数。搜索支持大小写不敏感的子串与有序子序列模糊匹配（`tl` 也能找到 `main/tool`），完整子串命中始终排在模糊命中之前。
+`search` 默认只读取已验证的本地源索引（离线可用），不会刷新远端、修改状态或争用 mutation.lock。使用 `source refresh [alias]` 或 `search <query> --refresh` 更新索引；本地索引缺失／损坏时明确报错，不隐式联网。`search` 与 `list` 默认使用按包排序的表格；原 JSON 字段保留在 `--json` 输出中，脚本调用需显式添加该参数。搜索支持大小写不敏感的子串与有序子序列模糊匹配（`tl` 也能找到 `main/tool`），完整子串命中始终排在模糊命中之前。上游源仓库的自动更新见其自身 `update-source` 工作流（每天上海时间 07:50）。
 
 ### 命令行进度与输出
 

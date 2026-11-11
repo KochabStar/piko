@@ -11,7 +11,7 @@ import { humanOutput, table } from "../src/display.ts";
 import { ProgressRenderer } from "../src/progress.ts";
 
 const strip = (text: string) =>
-  text.replace(/\x1b\[[0-9;]*[mKG]/g, "").replace(/\r/g, "");
+  text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "");
 const view = {
   stage: "Download",
   package: "main/llvm",
@@ -26,7 +26,7 @@ const view = {
 test("Gemini-inspired activity uses a dot spinner, block bar with a spinning braille head and semantic blue/purple accents", () => {
   const plain = activityLine(view, 140, { color: false, unicode: true });
   expect(plain).toBe(
-    "  ⠹  2/3  main/llvm  Download  ██████⣟░░░░░░░░░░░  42%  42.0 MiB / 100.0 MiB  10.0 MiB/s  · ETA 6s",
+    "  ⠹  2/3  main/llvm  Download\n  ██████████████⣟░░░░░░░░░░░░░░░░░░░░░  42%  42.0 MiB / 100.0 MiB  10.0 MiB/s  · ETA 6s",
   );
   const rgb = activityLine(view, 140, {
     color: true,
@@ -77,8 +77,9 @@ test("live layout stays within one row at narrow widths, with CJK, emoji and ter
         width,
         { color, unicode: true },
       );
-      expect(textWidth(strip(out))).toBeLessThanOrEqual(width);
-      expect(strip(out)).not.toContain("\n");
+      // Transfers use two rows; every row must fit the terminal width.
+      for (const row of strip(out).split("\n"))
+        expect(textWidth(row)).toBeLessThanOrEqual(width);
     }
   }
   expect(textWidth("e\u0301中文⠹━")).toBe(7);
@@ -131,7 +132,7 @@ test("unknown totals remain indeterminate and ASCII fallback retains useful prog
   expect(strip(unknown)).not.toContain("%");
   expect(strip(unknown)).not.toContain("ETA");
   const ascii = activityLine(view, 140, { color: false, unicode: false });
-  expect(ascii).toMatch(/^[\x20-\x7e]+$/);
+  for (const row of ascii.split("\n")) expect(row).toMatch(/^[\x20-\x7e]+$/);
   expect(ascii).toContain("42%");
   expect(ascii).toContain("10.0 MiB/s");
   expect(strip(progressBar(0, 10, { color: true }))).toBe("░░░░░░░░░░");
@@ -156,7 +157,9 @@ test("visual decoration cannot inject terminal commands; no-color output and JSO
     140,
     { color: false },
   );
-  expect(unsafe).not.toMatch(/[\x00-\x1f]/);
+  // Newline is legitimate two-row layout; every other control character,
+  // including injected escapes, must have been neutralized.
+  expect(unsafe).not.toMatch(/[\x00-\x09\x0b-\x1f]/);
   const literal = "All packages are up to date.";
   expect(humanOutput(literal, false)).toBe(literal);
   expect(strip(humanOutput(literal, true))).toBe(

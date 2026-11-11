@@ -139,59 +139,12 @@ export type ActivityView = {
   eta?: string;
   frame: number;
 };
-export function activityLine(
-  view: ActivityView,
-  width: number,
+type Part = { text: string; tone?: Tone; raw?: string };
+function renderParts(
+  parts: Part[],
+  limit: number,
   style: TerminalStyle,
 ): string {
-  const limit = Math.max(1, Math.floor(width));
-  const state: ActivityView = {
-    ...view,
-    stage: plainText(view.stage),
-    package: plainText(view.package ?? ""),
-    position: plainText(view.position ?? ""),
-    detail: plainText(view.detail ?? ""),
-  };
-  const progress = state.transferred !== undefined;
-  const pct = state.percent === undefined ? "" : `${state.percent}%`;
-  const sep = symbol("separator", style.unicode !== false);
-  type Part = { text: string; tone?: Tone; raw?: string };
-  const parts: Part[] = [{ text: "*", raw: spinner(state.frame, style) }];
-  if (state.position && limit >= 100)
-    parts.push({ text: state.position, tone: "muted" });
-  const packageLimit =
-    limit < 50
-      ? Math.max(5, Math.floor(limit / 3))
-      : Math.min(30, Math.floor(limit / 3));
-  if (state.package)
-    parts.push({ text: fitText(state.package, packageLimit), tone: "strong" });
-  if (!progress || limit >= 90)
-    parts.push({
-      text: fitText(state.stage, Math.max(4, Math.min(24, limit / 3))),
-      tone: "accent",
-    });
-  if (progress) {
-    if (pct) {
-      const barWidth =
-        limit >= 110 ? 18 : limit >= 75 ? 12 : limit >= 45 ? 8 : 0;
-      if (barWidth)
-        parts.push({
-          text: "-".repeat(barWidth),
-          raw: progressBar(state.percent!, barWidth, style, state.frame),
-        });
-      parts.push({ text: pct, tone: "cyan" });
-    }
-    if (limit >= 105 || !pct)
-      parts.push({ text: plainText(state.transferred!), tone: "muted" });
-    if (state.speed && limit >= 60)
-      parts.push({ text: plainText(state.speed), tone: "muted" });
-    if (state.eta && pct && limit >= 120)
-      parts.push({ text: `${sep} ${plainText(state.eta)}`, tone: "muted" });
-  } else if (state.detail && limit >= 60)
-    parts.push({
-      text: fitText(state.detail, Math.floor(limit / 3)),
-      tone: "muted",
-    });
   const indent = limit >= 24 ? "  " : "";
   let used = textWidth(indent),
     out = indent;
@@ -208,6 +161,88 @@ export function activityLine(
     used += gap.length + textWidth(text);
   }
   return out;
+}
+export function activityLine(
+  view: ActivityView,
+  width: number,
+  style: TerminalStyle,
+): string {
+  const limit = Math.max(1, Math.floor(width));
+  const state: ActivityView = {
+    ...view,
+    stage: plainText(view.stage),
+    package: plainText(view.package ?? ""),
+    position: plainText(view.position ?? ""),
+    detail: plainText(view.detail ?? ""),
+  };
+  const progress = state.transferred !== undefined;
+  const pct = state.percent === undefined ? "" : `${state.percent}%`;
+  const sep = symbol("separator", style.unicode !== false);
+  // Transfers use their own second row, so the identity row never gets
+  // crowded and the bar can span far more cells for a smooth gradient.
+  if (progress && pct && limit >= 45) {
+    const identity: Part[] = [{ text: "*", raw: spinner(state.frame, style) }];
+    if (state.position) identity.push({ text: state.position, tone: "muted" });
+    if (state.package)
+      identity.push({
+        text: fitText(state.package, Math.min(40, Math.floor(limit / 2))),
+        tone: "strong",
+      });
+    identity.push({
+      text: fitText(state.stage, Math.max(4, Math.min(30, limit / 3))),
+      tone: "accent",
+    });
+    const barWidth = Math.max(8, Math.min(36, Math.floor((limit - 40) / 1.6)));
+    const transfer: Part[] = [
+      {
+        // A long second row keeps the per-cell gradient steps from showing
+        // as visible color bands.
+        text: "-".repeat(barWidth),
+        raw: progressBar(state.percent!, barWidth, style, state.frame),
+      },
+      { text: pct, tone: "cyan" },
+      { text: plainText(state.transferred!), tone: "muted" },
+    ];
+    if (state.speed)
+      transfer.push({ text: plainText(state.speed), tone: "muted" });
+    if (state.eta)
+      transfer.push({
+        text: `${sep} ${plainText(state.eta)}`,
+        tone: "muted",
+      });
+    return (
+      renderParts(identity, limit, style) +
+      "\n" +
+      renderParts(transfer, limit, style)
+    );
+  }
+  const parts: Part[] = [{ text: "*", raw: spinner(state.frame, style) }];
+  if (state.position && limit >= 100)
+    parts.push({ text: state.position, tone: "muted" });
+  const packageLimit =
+    limit < 50
+      ? Math.max(5, Math.floor(limit / 3))
+      : Math.min(30, Math.floor(limit / 3));
+  if (state.package)
+    parts.push({ text: fitText(state.package, packageLimit), tone: "strong" });
+  if (!progress || limit >= 90)
+    parts.push({
+      text: fitText(state.stage, Math.max(4, Math.min(24, limit / 3))),
+      tone: "accent",
+    });
+  if (progress) {
+    if (limit >= 105 || !pct)
+      parts.push({ text: plainText(state.transferred!), tone: "muted" });
+    if (state.speed && limit >= 60)
+      parts.push({ text: plainText(state.speed), tone: "muted" });
+    if (state.eta && pct && limit >= 120)
+      parts.push({ text: `${sep} ${plainText(state.eta)}`, tone: "muted" });
+  } else if (state.detail && limit >= 60)
+    parts.push({
+      text: fitText(state.detail, Math.floor(limit / 3)),
+      tone: "muted",
+    });
+  return renderParts(parts, limit, style);
 }
 
 export function spinner(frame: number, style: TerminalStyle): string {
