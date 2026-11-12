@@ -1182,8 +1182,6 @@ export class Store {
     const keys = new Set([
       ...Object.keys(before.defaults),
       ...Object.keys(after.defaults),
-      ...Object.values(before.installs).map((i) => i.key),
-      ...Object.values(after.installs).map((i) => i.key),
     ]);
     for (const key of keys) {
       const allowed = [
@@ -1192,14 +1190,8 @@ export class Store {
       ]
         .filter((i) => i.key === key)
         .map((i) => join(this.root, i.dir));
-      const selection = target.defaults[key];
-      // Start Menu launchers target the current junction, so it must resolve
-      // even without an explicit selection: the most recently installed
-      // version — the same owner planStartMenu gives the launchers — takes
-      // over. Only removing every version of the package clears the link.
-      const install =
-        (selection && target.installs[selection.id]) ||
-        Object.values(target.installs).filter((i) => i.key === key).at(-1);
+      const selection = target.defaults[key],
+        install = selection && target.installs[selection.id];
       await setCurrent(
         this.root,
         appFolder(

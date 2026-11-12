@@ -66,6 +66,7 @@ async function shortcutBytes(
   root: string,
   install: Install,
   backend: WindowsEffects,
+  viaCurrent: boolean,
 ) {
   const result: StartMenuReceipt = { id: install.id, entries: [] };
   await noLinks(join(root, install.dir, ".piko-install.json"));
@@ -75,10 +76,14 @@ async function shortcutBytes(
     const live = join(root, install.dir, entry.path);
     await noLinks(live);
     if (!(await lstat(live)).isFile()) fail("Start Menu executable missing");
-    // Like desktop integration targets, launchers point through the package's
-    // current junction instead of the version directory, so upgrades and
-    // version switches redirect them without rewriting the .lnk files.
-    const target = join(root, "apps", appFolder(install), "current", entry.path);
+    // Like desktop integration targets, a selected package's launchers point
+    // through its current junction, so upgrades and version switches redirect
+    // them without rewriting the .lnk files. An unselected newest install
+    // owns its launchers while no junction exists, so it keeps pointing at
+    // the version directory until a use switches the target shape.
+    const target = viaCurrent
+      ? join(root, "apps", appFolder(install), "current", entry.path)
+      : live;
     const args = (entry.args ?? [])
       .map((a) => quoteArgument(integrationText(root, install, a)))
       .join(" ");
@@ -130,6 +135,7 @@ export async function enrollStartMenu(
     install,
     backend,
     launcherOwners(state),
+    state.defaults[install.key] !== undefined,
   );
   if (receipt) state.startMenu[install.key] = receipt;
   else delete state.startMenu[install.key];
@@ -145,8 +151,9 @@ async function claimStartMenu(
   install: Install,
   backend: WindowsEffects,
   ownerOf: Map<string, string>,
+  viaCurrent: boolean,
 ) {
-  const receipt = await shortcutBytes(root, install, backend);
+  const receipt = await shortcutBytes(root, install, backend, viaCurrent);
   for (const entry of receipt.entries) {
     const owner = ownerOf.get(entry.name.toLowerCase());
     if (owner !== undefined && owner !== install.key)
@@ -222,8 +229,14 @@ export async function planStartMenu(
       // install and then its own recovery. A receipt Piko already published for
       // this package still fails on drift instead of being silently dropped.
       const receipt = before.startMenu?.[key]
-        ? await shortcutBytes(root, install, backend)
-        : await claimStartMenu(root, install, backend, launcherOwners(before));
+        ? await shortcutBytes(root, install, backend, !!selected)
+        : await claimStartMenu(
+            root,
+            install,
+            backend,
+            launcherOwners(before),
+            !!selected,
+          );
       if (receipt) after.startMenu[key] = receipt;
       else delete after.startMenu[key];
       after.schemaVersion = 8;

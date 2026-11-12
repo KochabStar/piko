@@ -128,18 +128,25 @@ test("install creates real launcher metadata without selecting commands or enabl
   const i = await p.install(`test/${name}@1`);
   const s = await p.store.read(),
     shortcut = JSON.parse(await readFile(path, "utf8"));
-  expect(shortcut.target).toBe(join(currentLink(p, i), "gui.exe"));
+  // Without a selection no junction exists, so the launcher keeps pointing
+  // at the version directory of the newest install.
+  expect(shortcut.target).toBe(join(p.root, i.dir, "gui.exe"));
   expect(shortcut.args).toContain("space here");
   expect(shortcut.target.endsWith(".shim")).toBe(false);
-  // Without an explicit selection the junction follows the newest install.
-  expect(resolve(await readlink(currentLink(p, i))).toLowerCase()).toBe(
-    resolve(join(p.root, i.dir)).toLowerCase(),
-  );
+  expect(await exists(currentLink(p, i))).toBe(false);
   expect(s.defaults).toEqual({});
   expect(s.commands).toEqual({});
   expect(s.desktop).toBeUndefined();
   expect(s.startMenu![i.key]!.entries[0]!.name).toBe(label);
-  await p.uninstall(`test/${name}@1`);
+  // Selecting rewrites the launcher once to target the current junction.
+  await p.use(`test/${name}@1`);
+  expect(JSON.parse(await readFile(path, "utf8")).target).toBe(
+    join(currentLink(p, i), "gui.exe"),
+  );
+  expect(resolve(await readlink(currentLink(p, i))).toLowerCase()).toBe(
+    resolve(join(p.root, i.dir)).toLowerCase(),
+  );
+  await p.uninstall(`test/${name}@1`, true);
   expect(await exists(path)).toBe(false);
   expect(await exists(currentLink(p, i))).toBe(false);
 });
