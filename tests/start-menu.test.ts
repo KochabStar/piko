@@ -208,7 +208,7 @@ test("user-edited launchers block removal and retain both installation and edite
 });
 test("selection journal repairs partial shortcut writes on either side of state commit and rejects forged targets", async () => {
   for (const committed of [false, true]) {
-    const { p, backend, name, label, path } = await fixture();
+    const { p, backend, name, path } = await fixture();
     // First installation is the transaction that writes the launcher; version
     // switches now only redirect the current junction and rewrite nothing.
     const before = await p.store.read();
