@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdtemp, readFile, readlink, rm, writeFile, mkdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Packages } from "../src/packages.ts";
 import { WindowsEffects } from "../src/windows-effects.ts";
@@ -119,20 +119,29 @@ async function fixture() {
     folder,
   };
 }
+// The launcher targets the package's current junction; the version directory
+// holding the live executable sits right beside it.
+const currentLink = (p: { root: string }, i: { dir: string }) =>
+  join(dirname(join(p.root, i.dir)), "current");
 test("install creates real launcher metadata without selecting commands or enabling other desktop effects", async () => {
   const { p, name, label, path } = await fixture();
   const i = await p.install(`test/${name}@1`);
   const s = await p.store.read(),
     shortcut = JSON.parse(await readFile(path, "utf8"));
-  expect(shortcut.target).toBe(join(p.root, i.dir, "gui.exe"));
+  expect(shortcut.target).toBe(join(currentLink(p, i), "gui.exe"));
   expect(shortcut.args).toContain("space here");
   expect(shortcut.target.endsWith(".shim")).toBe(false);
+  // Without an explicit selection the junction follows the newest install.
+  expect(resolve(await readlink(currentLink(p, i))).toLowerCase()).toBe(
+    resolve(join(p.root, i.dir)).toLowerCase(),
+  );
   expect(s.defaults).toEqual({});
   expect(s.commands).toEqual({});
   expect(s.desktop).toBeUndefined();
   expect(s.startMenu![i.key]!.entries[0]!.name).toBe(label);
   await p.uninstall(`test/${name}@1`);
   expect(await exists(path)).toBe(false);
+  expect(await exists(currentLink(p, i))).toBe(false);
 });
 test("candidate install preserves selected launcher; switch, rollback and uninstall keep ownership in sync", async () => {
   const { p, name, label, path } = await fixture();
@@ -142,13 +151,17 @@ test("candidate install preserves selected launcher; switch, rollback and uninst
   manifest(name, "2", label);
   const v2 = await p.install(`test/${name}@2`);
   expect(await readFile(path, "utf8")).toBe(first);
+  // Selection switches only redirect the current junction; the .lnk bytes
+  // keep targeting it, so no Start Menu entry is rewritten.
   await p.use(`test/${name}@2`);
-  expect(JSON.parse(await readFile(path, "utf8")).target).toBe(
-    join(p.root, v2.dir, "gui.exe"),
+  expect(await readFile(path, "utf8")).toBe(first);
+  expect(resolve(await readlink(currentLink(p, v2))).toLowerCase()).toBe(
+    resolve(join(p.root, v2.dir)).toLowerCase(),
   );
   await p.use(`test/${name}@1`);
-  expect(JSON.parse(await readFile(path, "utf8")).target).toBe(
-    join(p.root, v1.dir, "gui.exe"),
+  expect(await readFile(path, "utf8")).toBe(first);
+  expect(resolve(await readlink(currentLink(p, v1))).toLowerCase()).toBe(
+    resolve(join(p.root, v1.dir)).toLowerCase(),
   );
   await p.uninstall(`test/${name}@2`);
   expect(await readFile(path, "utf8")).toBe(first);
@@ -196,25 +209,23 @@ test("user-edited launchers block removal and retain both installation and edite
 test("selection journal repairs partial shortcut writes on either side of state commit and rejects forged targets", async () => {
   for (const committed of [false, true]) {
     const { p, backend, name, label, path } = await fixture();
+    // First installation is the transaction that writes the launcher; version
+    // switches now only redirect the current junction and rewrite nothing.
+    const before = await p.store.read();
     await p.install(`test/${name}@1`);
-    await p.use(`test/${name}@1`);
-    manifest(name, "2", label);
-    await p.install(`test/${name}@2`);
-    const before = await p.store.read(),
-      oldBytes = await readFile(path);
-    await p.use(`test/${name}@2`);
     const after = await p.store.read(),
       newBytes = await readFile(path);
     const effects = await startMenuEffects(before, after, backend);
     await atomicJson(p.store.statePath, committed ? after : before);
-    await writeFile(path, committed ? oldBytes : newBytes);
+    if (committed) await rm(path);
     await atomicJson(p.store.journalPath, {
       before,
       after,
       startMenu: effects,
     });
     await p.store.recover();
-    expect(await readFile(path)).toEqual(committed ? newBytes : oldBytes);
+    if (committed) expect(await readFile(path)).toEqual(newBytes);
+    else expect(await exists(path)).toBe(false);
     const forged = structuredClone(effects);
     (forged[0]!.target as { path: string }).path = join(work, "foreign.lnk");
     await atomicJson(p.store.journalPath, { before, after, startMenu: forged });

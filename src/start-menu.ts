@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { lstat } from "node:fs/promises";
 import { validateDesktop } from "./integration-declarations.ts";
 import { integrationText, saveEffectBytes, effectBytes } from "./desktop.ts";
+import { appFolder } from "./layout.ts";
 import {
   WindowsEffects,
   equalValue,
@@ -71,9 +72,13 @@ async function shortcutBytes(
   if (!same(await json(join(root, install.dir, ".piko-install.json")), install))
     fail("Start Menu installation receipt changed");
   for (const entry of entries(install)) {
-    const target = join(root, install.dir, entry.path);
-    await noLinks(target);
-    if (!(await lstat(target)).isFile()) fail("Start Menu executable missing");
+    const live = join(root, install.dir, entry.path);
+    await noLinks(live);
+    if (!(await lstat(live)).isFile()) fail("Start Menu executable missing");
+    // Like desktop integration targets, launchers point through the package's
+    // current junction instead of the version directory, so upgrades and
+    // version switches redirect them without rewriting the .lnk files.
+    const target = join(root, "apps", appFolder(install), "current", entry.path);
     const args = (entry.args ?? [])
       .map((a) => quoteArgument(integrationText(root, install, a)))
       .join(" ");
