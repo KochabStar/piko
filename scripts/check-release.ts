@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, basename } from "node:path";
 import { VERSION } from "../src/version.ts";
 import { capture } from "../src/util.ts";
+import { powershellExecutable } from "../src/windows.ts";
 import { executableHash } from "../src/self-update.ts";
 import { checkSource } from "./check-source.ts";
 const file = resolve("dist", `piko-${VERSION}-windows-x64.zip`),
@@ -12,7 +13,7 @@ try {
   if ((await executableHash(file)) !== expected)
     throw new Error("Archive checksum mismatch");
   await capture(
-    "powershell.exe",
+    powershellExecutable(),
     [
       "-NoProfile",
       "-NonInteractive",
@@ -35,7 +36,7 @@ try {
   await checkSource(join(folder, "source"));
   const home = join(root, "installation");
   await capture(
-    "powershell.exe",
+    powershellExecutable(),
     [
       "-NoProfile",
       "-NonInteractive",

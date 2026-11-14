@@ -83,18 +83,30 @@ export function selectedNode(
   };
 }
 export function powershellExecutable(
-  shell: "powershell" | "pwsh" = "powershell",
+  shell?: "powershell" | "pwsh",
 ): string {
-  if (shell === "pwsh")
-    return (
-      Bun.which("pwsh.exe") ?? fail("PowerShell 7 is not installed or on PATH")
+  // Windows ships 5.1 with every supported release, so it is the fallback.
+  // An explicit pwsh request must not silently run 5.1 instead.
+  if (shell === "powershell")
+    return join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
     );
-  return join(
-    process.env.SystemRoot ?? "C:\\Windows",
-    "System32",
-    "WindowsPowerShell",
-    "v1.0",
-    "powershell.exe",
+  const pwsh = Bun.which("pwsh.exe");
+  if (shell === "pwsh")
+    return pwsh ?? fail("PowerShell 7 is not installed or on PATH");
+  return (
+    pwsh ??
+    join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    )
   );
 }
 export async function dispatch(
@@ -228,7 +240,7 @@ export async function addUserPath(root: string): Promise<void> {
   const path = join(root, "shims");
   const script = `$ErrorActionPreference='Stop';$p=$env:PIKO_SETUP_PATH;$old=[Environment]::GetEnvironmentVariable('Path','User');$parts=@($old -split ';' | Where-Object { $_ });if(-not ($parts | Where-Object { $_.TrimEnd('\\') -ieq $p.TrimEnd('\\') })){[Environment]::SetEnvironmentVariable('Path',(($p)+ ';' + $old),'User')}`;
   await capture(
-    "powershell.exe",
+    powershellExecutable(),
     ["-NoProfile", "-NonInteractive", "-Command", script],
     { env: { ...process.env, PIKO_SETUP_PATH: path } },
   );
