@@ -1,11 +1,19 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, readFile, readlink, rm, writeFile, mkdir } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readlink,
+  rm,
+  writeFile,
+  mkdir,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Packages } from "../src/packages.ts";
 import { WindowsEffects } from "../src/windows-effects.ts";
 import { sha256, exists, atomicJson } from "../src/util.ts";
 import { startMenuEffects } from "../src/start-menu.ts";
+import { resetPackages } from "../src/reset.ts";
 import type { EffectTarget, EffectValue } from "../src/types.ts";
 
 const work = await mkdtemp(join(tmpdir(), "piko-start-menu-"));
@@ -175,6 +183,96 @@ test("candidate install preserves selected launcher; switch, rollback and uninst
   await p.uninstall(`test/${name}@1`, true);
   expect(await exists(path)).toBe(false);
 });
+test("reinstall and reset migrate owned legacy launchers through current without overwriting edits", async () => {
+  for (const mode of [
+    "install",
+    "reset",
+    "missing",
+    "edited-install",
+    "edited-reset",
+    "failed-install",
+    "failed-reset",
+  ] as const) {
+    const { p, backend, name, label, path } = await fixture();
+    const install = await p.install(`test/${name}@1`);
+    const legacyBytes = await readFile(path);
+    const legacyReceipt = (await p.store.read()).startMenu![install.key]!;
+    await p.use(`test/${name}@1`);
+
+    const state = await p.store.read();
+    state.startMenu![install.key] = legacyReceipt;
+    await atomicJson(p.store.statePath, state);
+    await writeFile(path, legacyBytes);
+    if (mode === "missing") await rm(path);
+    if (mode.startsWith("edited")) await writeFile(path, "user edit");
+    if (mode.startsWith("failed")) backend.failName = label + ".lnk";
+
+    const operation = mode.endsWith("install")
+      ? p.install(`test/${name}@1`)
+      : resetPackages(p, `test/${name}`);
+    if (mode.startsWith("edited") || mode.startsWith("failed")) {
+      await expect(operation).rejects.toThrow(
+        mode.startsWith("edited") ? "Start Menu resource" : "injected",
+      );
+      expect(await readFile(path)).toEqual(
+        mode.startsWith("edited") ? Buffer.from("user edit") : legacyBytes,
+      );
+      expect((await p.store.read()).startMenu![install.key]).toEqual(
+        legacyReceipt,
+      );
+    } else {
+      await operation;
+      const bytes = await readFile(path);
+      expect(JSON.parse(bytes.toString()).target).toBe(
+        join(currentLink(p, install), "gui.exe"),
+      );
+      const after = await p.store.read();
+      expect(after.startMenu![install.key]!.entries[0]!.hash).toBe(
+        sha256(bytes),
+      );
+      expect(after.defaults[install.key]).toEqual(state.defaults[install.key]);
+    }
+  }
+});
+test("missing legacy shortcut migration recovers on either side of state commit", async () => {
+  for (const committed of [false, true]) {
+    const { p, backend, name, path } = await fixture();
+    const install = await p.install(`test/${name}@1`);
+    const legacyReceipt = (await p.store.read()).startMenu![install.key]!;
+    await p.use(`test/${name}@1`);
+    const before = await p.store.read();
+    before.startMenu![install.key] = legacyReceipt;
+    await atomicJson(p.store.statePath, before);
+    await rm(path);
+    await resetPackages(p, `test/${name}`);
+    const after = await p.store.read();
+    const migrated = await readFile(path);
+    const effects = await startMenuEffects(
+      before,
+      after,
+      backend,
+      [install.key],
+      [
+        {
+          target: { kind: "file", path },
+          before: null,
+          after: { hash: sha256(migrated) },
+        },
+      ],
+    );
+    await atomicJson(p.store.statePath, committed ? after : before);
+    if (committed) await rm(path);
+    await atomicJson(p.store.journalPath, {
+      before,
+      after,
+      startMenu: effects,
+      startMenuRepairKeys: [install.key],
+    });
+    await p.store.recover();
+    if (committed) expect(await readFile(path)).toEqual(migrated);
+    else expect(await exists(path)).toBe(false);
+  }
+});
 test("same-name foreign files are skipped without failing the install, and cross-package names are refused", async () => {
   const { p, name, label, path, folder } = await fixture();
   await mkdir(folder, { recursive: true });
@@ -185,6 +283,9 @@ test("same-name foreign files are skipped without failing the install, and cross
   expect(await readFile(path, "utf8")).toBe("foreign");
   expect((await p.store.read()).startMenu?.[i.key]).toBeUndefined();
   expect(await exists(join(p.root, i.dir, "gui.exe"))).toBe(true);
+  await p.install(`test/${name}@1`);
+  expect(await readFile(path, "utf8")).toBe("foreign");
+  expect((await p.store.read()).startMenu?.[i.key]).toBeUndefined();
   // Recovery no longer loops on that conflict either.
   await p.store.mutate(async () => {});
   await rm(path);

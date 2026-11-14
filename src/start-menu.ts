@@ -130,15 +130,16 @@ export async function enrollStartMenu(
   const selected = state.defaults[install.key];
   if (selected && selected.id !== install.id) return;
   state.startMenu ??= {};
-  const receipt = await claimStartMenu(
-    root,
-    install,
-    backend,
-    launcherOwners(state),
-    state.defaults[install.key] !== undefined,
-  );
+  const receipt = state.startMenu[install.key]
+    ? await shortcutBytes(root, install, backend, !!selected)
+    : await claimStartMenu(
+        root,
+        install,
+        backend,
+        launcherOwners(state),
+        !!selected,
+      );
   if (receipt) state.startMenu[install.key] = receipt;
-  else delete state.startMenu[install.key];
   state.schemaVersion = 8;
 }
 // A launcher path already occupied by a file Piko cannot prove it wrote is left
@@ -262,29 +263,27 @@ export async function startMenuEffects(
       b = next.get(id);
     if (a && b && a.key !== b.key)
       fail("Start Menu ownership transfer requires explicit removal first");
-    if (a?.hash === b?.hash) {
-      if (b && repairKeys.includes(b.key)) {
-        const target: Effect["target"] = { kind: "file", path: b.path };
-        const recorded = snapshots?.find(
-          (e) => e.target.kind === "file" && e.target.path === b.path,
+    let previous = a ? { hash: a.hash } : null;
+    if (a && b && repairKeys.includes(b.key)) {
+      const target: Effect["target"] = { kind: "file", path: b.path };
+      const recorded = snapshots?.find(
+        (e) => e.target.kind === "file" && e.target.path === b.path,
+      );
+      const current = snapshots
+        ? recorded
+          ? recorded.before
+          : previous
+        : await backend.read(target);
+      if (current === null) previous = null;
+      else if (!equalValue(current, previous))
+        fail(
+          "Start Menu resource was edited externally; reset will not overwrite it",
         );
-        const current = snapshots
-          ? recorded
-            ? recorded.before
-            : { hash: b.hash }
-          : await backend.read(target);
-        if (current === null)
-          effects.push({ target, before: null, after: { hash: b.hash } });
-        else if (!equalValue(current, { hash: b.hash }))
-          fail(
-            "Start Menu resource was edited externally; reset will not overwrite it",
-          );
-      }
-      continue;
     }
+    if (previous?.hash === b?.hash) continue;
     effects.push({
       target: { kind: "file", path: (b ?? a)!.path },
-      before: a ? { hash: a.hash } : null,
+      before: previous,
       after: b ? { hash: b.hash } : null,
     });
   }
