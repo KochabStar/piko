@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   download,
   downloadResponse,
+  resolveUrl,
   stallMessage,
   transferWatch,
 } from "../src/util.ts";
@@ -113,6 +114,43 @@ test("stall and drop errors stay retryable and never disclose URL secrets", asyn
     const message = stallMessage(url);
     expect(message).toContain("stalled");
     expect(message).not.toContain("DO_NOT_LOG_THIS");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("release endpoints resolve through the download redirect policy without reading the body", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/latest")
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "/releases/tag/v1.2.3" },
+        });
+      if (path === "/releases/tag/v1.2.3")
+        return new Response("<html>" + "x".repeat(1024 * 1024) + "</html>");
+      if (path === "/loop")
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "/loop" },
+        });
+      return new Response("missing", { status: 404 });
+    },
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    expect((await resolveUrl(`${base}/latest`)).href).toBe(
+      `${base}/releases/tag/v1.2.3`,
+    );
+    await expect(resolveUrl(`${base}/loop`)).rejects.toThrow(
+      "Too many redirects",
+    );
+    await expect(resolveUrl(`${base}/missing`)).rejects.toThrow(
+      "HTTP 404",
+    );
   } finally {
     server.stop(true);
   }

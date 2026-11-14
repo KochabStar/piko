@@ -133,8 +133,7 @@ async function fixture() {
   let version = VERSION,
     payload: Buffer = releaseArchive,
     checksum = sha256(payload);
-  let draft = false,
-    prerelease = false,
+  let unstable = false,
     missing = false,
     crossOrigin = false,
     unavailable = false;
@@ -145,27 +144,29 @@ async function fixture() {
     fetch(request): Response {
       const path = new URL(request.url).pathname;
       requests.push(path);
+      const origin = `http://127.0.0.1:${server.port}`;
       if (path === "/latest") {
         if (unavailable) return new Response("not found", { status: 404 });
-        const asset = `piko-${version}-windows-x64.zip`;
-        return Response.json({
-          tag_name: "v" + version,
-          draft,
-          prerelease,
-          assets: (missing ? [] : [asset, asset + ".sha256"]).map((name) => ({
-            name,
-            browser_download_url:
-              (crossOrigin
-                ? "http://127.0.0.1:1"
-                : `http://127.0.0.1:${server.port}`) +
-              "/" +
-              name,
-          })),
-        });
+        if (crossOrigin)
+          return Response.redirect(
+            `http://localhost:${server.port}/releases/tag/v${version}`,
+            302,
+          );
+        // A repository without a stable Release lands on the list page.
+        if (unstable) return Response.redirect(`${origin}/releases`, 302);
+        return Response.redirect(
+          `${origin}/releases/tag/v${version}`,
+          302,
+        );
       }
+      if (path.startsWith("/releases/tag/"))
+        return new Response("<html>release page</html>");
       if (path.endsWith(".zip.sha256"))
         return new Response(`${checksum}  piko-${version}-windows-x64.zip\n`);
-      if (path.endsWith(".zip")) return new Response(new Uint8Array(payload));
+      if (path.endsWith(".zip"))
+        return missing
+          ? new Response("missing", { status: 404 })
+          : new Response(new Uint8Array(payload));
       return new Response("missing", { status: 404 });
     },
   });
@@ -179,8 +180,7 @@ async function fixture() {
       version?: string;
       payload?: Buffer;
       checksum?: string;
-      draft?: boolean;
-      prerelease?: boolean;
+      unstable?: boolean;
       missing?: boolean;
       crossOrigin?: boolean;
       unavailable?: boolean;
@@ -191,8 +191,7 @@ async function fixture() {
         checksum = sha256(payload);
       }
       if (changes.checksum !== undefined) checksum = changes.checksum;
-      if (changes.draft !== undefined) draft = changes.draft;
-      if (changes.prerelease !== undefined) prerelease = changes.prerelease;
+      if (changes.unstable !== undefined) unstable = changes.unstable;
       if (changes.missing !== undefined) missing = changes.missing;
       if (changes.crossOrigin !== undefined) crossOrigin = changes.crossOrigin;
       if (changes.unavailable !== undefined) unavailable = changes.unavailable;
@@ -217,7 +216,9 @@ test("preview requires no confirmation, never downloads a candidate and compares
         status: "available",
       });
     }
-    expect(f.requests).toEqual(["/latest", "/latest"]);
+    // Two checks, and never a candidate download.
+    expect(f.requests.filter((p) => p === "/latest")).toHaveLength(2);
+    expect(f.requests.filter((p) => p.includes("/download/"))).toEqual([]);
     expect(await executableHash(join(f.root, "apps/piko/piko.exe"))).toBe(
       oldChecksum,
     );
@@ -234,7 +235,7 @@ test("preview requires no confirmation, never downloads a candidate and compares
         })
       ).status,
     ).toBe("current");
-    expect(f.requests).toEqual(["/latest"]);
+    expect(f.requests.filter((p) => p === "/latest")).toHaveLength(1);
     f.set({ version: "0.2.0" });
     expect(
       (
@@ -292,13 +293,17 @@ test("confirmed release verifies ZIP and executable then uses journaled self upd
 test("invalid or unavailable release metadata fails closed with guidance and never downloads a candidate", async () => {
   const f = await fixture();
   try {
-    for (const changes of [
-      { draft: true },
-      { draft: false, prerelease: true },
-      { prerelease: false, missing: true },
-      { missing: false, crossOrigin: true },
-      { crossOrigin: false, unavailable: true },
-    ]) {
+    for (const [changes, archiveRequests] of [
+      // No stable Release: the page falls back to the release list.
+      [{ unstable: true }, 0],
+      // A prerelease tag is not a stable Release.
+      [{ unstable: false, version: "0.5.0-beta.1" }, 0],
+      // A redirect off the metadata origin is never trusted.
+      [{ version: VERSION, crossOrigin: true }, 0],
+      // A published tag whose archive is absent fails when it is requested.
+      [{ crossOrigin: false, missing: true }, 1],
+      [{ missing: false, unavailable: true }, 0],
+    ] as const) {
       f.set(changes);
       await expect(
         updateSelfFromRelease(f.root, process.pid, {
@@ -306,7 +311,9 @@ test("invalid or unavailable release metadata fails closed with guidance and nev
           metadataUrl: f.metadataUrl,
         }),
       ).rejects.toThrow();
-      expect(f.requests).toEqual(["/latest"]);
+      expect(f.requests.filter((p) => p.endsWith(".zip"))).toHaveLength(
+        archiveRequests,
+      );
       expect((await selfUpdateStatus(f.root)).pending).toBeNull();
       expect(await executableHash(join(f.root, "apps/piko/piko.exe"))).toBe(
         oldChecksum,

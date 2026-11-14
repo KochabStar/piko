@@ -250,7 +250,8 @@ export function stallMessage(value: string | URL): string {
 export type ReadChunk =
   | { done: true; value?: undefined }
   | { done: false; value: Uint8Array };
-export async function downloadResponse(
+type Followed = { response: Response; url: URL };
+async function followRedirects(
   value: string,
   options: {
     method?: "GET" | "HEAD";
@@ -258,7 +259,7 @@ export async function downloadResponse(
     signal?: AbortSignal;
     qqSession?: QQDownloadSession;
   } = {},
-): Promise<Response> {
+): Promise<Followed> {
   const initial = networkUrl(value);
   const qq = isQQDownload(initial)
     ? (options.qqSession ?? new QQDownloadSession(initial))
@@ -326,9 +327,28 @@ export async function downloadResponse(
     }
     if (!response.ok)
       fail(`Download failed: HTTP ${response.status} (${publicEndpoint(url)})`);
-    return response;
+    return { response, url };
   }
   fail("Too many redirects");
+}
+export async function downloadResponse(
+  value: string,
+  options: {
+    method?: "GET" | "HEAD";
+    headers?: Headers;
+    signal?: AbortSignal;
+    qqSession?: QQDownloadSession;
+  } = {},
+): Promise<Response> {
+  return (await followRedirects(value, options)).response;
+}
+// Follow the same redirect policy as a download and report where an endpoint
+// finally points, without reading the body. Used for endpoints that answer
+// with a redirect (GitHub release pages) instead of quota-limited JSON APIs.
+export async function resolveUrl(value: string): Promise<URL> {
+  const { response, url } = await followRedirects(value);
+  await response.body?.cancel();
+  return url;
 }
 export async function download(
   value: string,

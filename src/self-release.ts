@@ -11,16 +11,24 @@ import {
   download,
   exists,
   fail,
+  isTransient,
   networkUrl,
   noLinks,
+  publicEndpoint,
   record,
   removeTree,
+  resolveUrl,
   sha256,
+  withRetries,
 } from "./util.ts";
 
-const latestRelease =
-  "https://api.github.com/repos/KochabStar/piko/releases/latest";
+// GitHub's web release page answers with a redirect to the newest stable tag.
+// It is not the rate-limited JSON API, so checking for updates never fails
+// with "API rate limit exceeded" on shared or proxied networks.
+const latestRelease = "https://github.com/KochabStar/piko/releases/latest";
 const archiveLimit = 512 * 1024 * 1024;
+const noRelease =
+  "Cannot check the latest Piko Release. Publish a stable Release first; private repositories require authenticated asset download and manual self update.";
 
 type Options = {
   confirmed?: boolean;
@@ -33,54 +41,35 @@ type Options = {
 
 async function releasePlan(metadataUrl: string) {
   const endpoint = networkUrl(metadataUrl);
-  let value: unknown;
   report({ kind: "stage", label: "Check Piko release" });
+  let tag: URL;
   try {
-    value = JSON.parse(
-      Buffer.from(await download(endpoint.href, 2 * 1024 * 1024)).toString(
-        "utf8",
-      ),
-    );
+    // A flaky link is retried; the redirect policy is re-applied every time.
+    tag = await withRetries(() => resolveUrl(endpoint.href));
   } catch (error) {
+    // A flaky connection stays retryable; only a definitive answer is a
+    // statement about the Release itself.
+    if (isTransient(error)) throw error;
     fail(
-      "Cannot check the latest Piko Release. Publish a stable Release first; private repositories require authenticated asset download and manual self update. " +
+      noRelease +
+        " " +
         (error instanceof Error ? error.message : String(error)),
     );
   }
-  if (
-    !record(value) ||
-    value.draft !== false ||
-    value.prerelease !== false ||
-    typeof value.tag_name !== "string" ||
-    !/^v?\d+\.\d+\.\d+$/.test(value.tag_name) ||
-    !Array.isArray(value.assets)
-  )
-    fail("Invalid latest stable Piko Release metadata");
-  const version = value.tag_name.replace(/^v/, "");
+  // The release page must resolve, on the same origin, to a stable tag; the
+  // asset URLs are derived from it instead of trusted from a metadata body.
+  const match = /^(.*\/releases)\/tag\/(v?\d+\.\d+\.\d+)$/.exec(tag.pathname);
+  if (tag.origin !== endpoint.origin || !match)
+    fail(
+      noRelease +
+        ` The release page resolved to ${publicEndpoint(tag)} instead of a stable tag.`,
+    );
+  const version = match[2]!.replace(/^v/, "");
   if (!semver.valid(version)) fail("Invalid Piko Release version");
   const archive = `piko-${version}-windows-x64.zip`;
-  const asset = (name: string) => {
-    const matches = value.assets.filter(
-      (a: unknown) => record(a) && a.name === name,
-    );
-    if (
-      matches.length !== 1 ||
-      typeof matches[0].browser_download_url !== "string"
-    )
-      fail("Piko Release is missing a unique asset: " + name);
-    const url = networkUrl(matches[0].browser_download_url);
-    if (endpoint.href === latestRelease) {
-      const expected = `https://github.com/KochabStar/piko/releases/download/${value.tag_name}/${name}`;
-      if (url.href !== expected)
-        fail("Piko Release asset is outside the official release");
-    } else if (
-      endpoint.protocol !== "http:" ||
-      !["localhost", "127.0.0.1", "[::1]"].includes(endpoint.hostname) ||
-      url.origin !== endpoint.origin
-    )
-      fail("Test release assets must remain on the loopback metadata origin");
-    return url.href;
-  };
+  const asset = (name: string) =>
+    networkUrl(new URL(`${match[1]}/download/${match[2]}/${name}`, tag).href)
+      .href;
   return {
     version,
     archive,
