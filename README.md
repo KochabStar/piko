@@ -125,7 +125,7 @@ piko source remove tools --force  # 只移除配置，软件与来源记录保�
 
 客户端同时支持原 `schemaVersion: 1` 完整清单和 `schemaVersion: 2` 多版本模板包；索引仍为 schema 1，不改变已安装状态格式。多个版本可在 `index.json` 中指向同一个 `packages/<name>/package.json`。客户端只解析已登记的版本，不凭 URL 模板猜测未校验版本。
 
-模板包包含 `recipes`（可复用的完整 schema 1 配方）和 `versions`（版本 → 配方引用、逐下载 SHA-256 及可选配额）。只在下载 URL、显式解压路径、命令路径和桌面入口路径中替换 `{version}`，各下载的 `{sha256}`／`{sha2562}` 按版本表填入；Shell、配置正文、环境、持久化和执行代码不做全局替换。展开后继续执行原有完整清单校验、配额与摘要校验。
+模板包包含 `recipes`（可复用的完整 schema 1 配方）和 `versions`（版本 → 配方引用、逐下载 SHA-256 及可选配额）。只在下载 URL、显式解压路径、命令路径和桌面入口路径中替换 `{version}`，各下载的 `{sha256}`／`{sha2562}` 按版本表填入；Shell、配置正文、环境、持久化和执行代码不做全局替换。展开后继续执行原有完整清单校验、配额与摘要校验。重打包修订用末位版本号（`5.13.1.1`，不再用 `-piko.N` 后缀：它在 semver 中排序低于原版本，会被判为降级）；发布者标签（如 GitHub `v{upstream}`）不含重打包修订，这类下载地址用 `{upstream}` 占位，它去掉 `-piko.N` 后缀或最后一位修订号（四段式原生上游版本仍用 `{version}`）。
 
 配方变化时在同一文件中保留独立 recipe，不改旧配方；迁移要求所有历史版本展开后的 `JSON.stringify` 及安装 `manifestHash` 完全一致。HTTP 和固定 Git commit 源均使用同一解析器。原格式源继续可用，但**旧客户端不能读取模板包源，须先升级客户端再刷新迁移后的源**。
 
@@ -619,7 +619,7 @@ piko system main/flclash --remove --dry-run
 piko system main/flclash --remove --approve-admin --binding <新的预览摘要>
 ```
 
-必须单独 `--approve-admin` 并已处于管理员终端；**不自动 UAC 提权，不自动打开防火墙、不启用系统功能、不重启 Explorer／系统**。预览含脚本、参数和内容摘要。系统执行不是沙箱或事务；失败／运行中记录会阻止卸载，需检查后按配方撤销／重试。活动系统集成仍绑定具体版本；安装候选后可用 `system <包>@<新版> --upgrade --dry-run` 合并预览旧撤销／新安装，再以单独 `--approve-admin --binding <摘要>` 执行。需要自行提升终端，记录阶段但不冒充事务；失败不自动重放脚本。
+必须单独 `--approve-admin` 并已处于管理员终端；**不自动 UAC 提权，不自动打开防火墙、不启用系统功能、不重启 Explorer／系统**。预览含脚本、参数和内容摘要。系统执行不是沙箱或事务；失败／运行中记录会阻止卸载，需检查后按配方撤销／重试。活动系统集成仍绑定具体版本；安装候选后可用 `system <包>@<新版> --upgrade --dry-run` 合并预览旧撤销／新安装，再以单独 `--approve-admin --binding <摘要>` 执行。需要自行提升终端，记录阶段但不冒充事务；失败不自动重放脚本。集成脚本除 `native` EXE 与 `powershell` 外还支持 `javascript`（`.js`／`.mjs`／`.ts`）：在已提权的 Piko 进程内由内置 Bun 运行时执行 `export default async (ctx) => {}`，`ctx` 含 `args`（声明参数）、`env`、`root` 与 `packageDir`；无 Shell 转义／引号问题，抛出即失败并记录。
 
 独立源已提供 FlClashHelperService 和 TortoiseSVN Shell 扩展配方：先拒绝外部现有服务／注册值／CommonProgramFiles 路径，保留配方自己的所有权记录；撤销只恢复拥有的值，不照搬 Scoop 的整树删除。TortoiseSVN MSI 的重复架构文件以 `files` 中 `#File表标识` 精确选择；无明确映射仍拒绝重名。
 

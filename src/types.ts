@@ -26,7 +26,7 @@ export type ExecDeclaration = {
   path: string;
   args: string[];
   env?: Record<string, string>;
-  kind?: "native" | "powershell";
+  kind?: "native" | "powershell" | "javascript";
 };
 export type BootstrapDeclaration = ExecDeclaration & { outputs: string[] };
 export type AdminDeclaration = {

@@ -1239,7 +1239,10 @@ async function main(): Promise<number> {
       show(
         values.json
           ? JSON.stringify(result, null, 2)
-          : updateTable(result, { verbose: values.verbose }),
+          : updateTable(result, {
+              verbose: values.verbose,
+              focus: !!args[1],
+            }),
       );
       if (result.some((r) => r.status === "blocked")) return 1;
       break;
@@ -1317,7 +1320,7 @@ async function main(): Promise<number> {
         show(
           values.json
             ? JSON.stringify(result, null, 2)
-            : updateTable(result, { verbose: values.verbose }),
+            : updateTable(result, { verbose: values.verbose, focus: true }),
         );
         if (result.some((r) => r.status === "blocked")) return 1;
         break;

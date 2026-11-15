@@ -1,5 +1,5 @@
 import { persistentFolder } from "./layout.ts";
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   installedForIntegration,
@@ -15,6 +15,7 @@ import { checkPersistentFileMappings } from "./persistence.ts";
 import { fail, noLinks, sha256 } from "./util.ts";
 import { nativeRequest } from "./windows-effects.ts";
 import { powershellExecutable } from "./windows.ts";
+import { pathToFileURL } from "node:url";
 import type { Store } from "./store.ts";
 import type { ExecDeclaration, Install, State } from "./types.ts";
 
@@ -134,7 +135,7 @@ export async function inspectExecution(
     executable: plan.target,
     kind: plan.exec.kind ?? "native",
     script:
-      plan.exec.kind === "powershell"
+      plan.exec.kind === "powershell" || plan.exec.kind === "javascript"
         ? (await readFile(plan.target, "utf8")).slice(0, 65536)
         : undefined,
     contentHash: plan.digest,
@@ -234,36 +235,75 @@ export async function runExecution(
           /^(NODE_OPTIONS|BUN_OPTIONS|RUSTUP_INIT_SKIP_PATH_CHECK)$/i.test(key)
         )
           delete env[key];
-      const command =
-        plan.exec.kind === "powershell"
-          ? [
-              powershellExecutable(),
-              "-NoLogo",
-              "-NoProfile",
-              "-NonInteractive",
-              "-File",
-              plan.target,
-              ...plan.args,
-            ]
-          : [plan.target, ...plan.args];
-      if (plan.exec.kind === "powershell") {
+      if (plan.exec.kind === "powershell" || plan.exec.kind === "javascript") {
         const script = await readFile(plan.target, "utf8");
         if (Buffer.byteLength(script) > 65536)
-          fail("Approved PowerShell script exceeds 64 KiB preview limit");
+          fail("Approved integration script exceeds 64 KiB preview limit");
       }
-      const child = Bun.spawn(command, {
-        env,
-        cwd: join(store.root, install.dir),
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-        timeout: options.admin ? 300000 : 900000,
-      });
-      const code = await child.exited;
-      if (code !== 0)
-        fail(
-          `Approved execution failed (exit ${code}); partial external effects/data may remain`,
-        );
+      if (plan.exec.kind === "javascript") {
+        // Approved package code runs inside this (already elevated for admin)
+        // Piko process on its embedded JavaScript runtime: no shell, no
+        // PowerShell quoting or profile pitfalls. The module receives its
+        // declared arguments instead of parsing a command line.
+        // Bun's module cache ignores URL query strings, so each approved
+        // content revision is imported from its own immutable staging copy.
+        const stage = join(store.root, "staging", "exec-" + plan.digest),
+          copy = join(stage, "module.mjs");
+        await noLinks(stage);
+        await mkdir(stage, { recursive: true });
+        await writeFile(copy, await readFile(plan.target), { flag: "wx" });
+        const module = await import(pathToFileURL(copy).href);
+        const entry = (module as { default?: unknown }).default;
+        if (typeof entry !== "function")
+          fail(
+            "Approved JavaScript integration must default-export a function",
+          );
+        try {
+          await (
+            entry as (context: {
+              args: string[];
+              env: Record<string, string>;
+              root: string;
+              packageDir: string;
+            }) => unknown
+          )({
+            args: plan.args,
+            env: { ...plan.env, PIKO_HOME: store.root },
+            root: store.root,
+            packageDir: join(store.root, install.dir),
+          });
+        } catch (error) {
+          fail(
+            `Approved execution failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      } else {
+        const command =
+          plan.exec.kind === "powershell"
+            ? [
+                powershellExecutable(),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-File",
+                plan.target,
+                ...plan.args,
+              ]
+            : [plan.target, ...plan.args];
+        const child = Bun.spawn(command, {
+          env,
+          cwd: join(store.root, install.dir),
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+          timeout: options.admin ? 300000 : 900000,
+        });
+        const code = await child.exited;
+        if (code !== 0)
+          fail(
+            `Approved execution failed (exit ${code}); partial external effects/data may remain`,
+          );
+      }
       if (!options.admin)
         for (const path of install.bootstrap!.outputs) {
           const target = join(

@@ -31,6 +31,7 @@ import {
   chooseVersion,
   normalizeIndex,
   distributionDownloads,
+  versionNewer,
 } from "./catalog.ts";
 import { ensureInstallerTool } from "./installer-tools.ts";
 import { ensureInnoUnpacker, ensureSevenZip } from "./helpers.ts";
@@ -1434,7 +1435,7 @@ export class Packages {
               : "current"
             : semver.valid(row.candidate) &&
                 semver.valid(i.version) &&
-                semver.lt(row.candidate, i.version)
+                !versionNewer(row.candidate, i.version)
               ? "downgrade"
               : "outdated";
         if (row.status === "pinned")

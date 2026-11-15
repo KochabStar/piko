@@ -303,3 +303,72 @@ test("HTTP and compiled clients install old and latest template versions and pre
     server.stop(true);
   }
 });
+
+test("repack versions keep the upstream release in URLs via {upstream}", () => {
+  // A repack downloads the same upstream artifact; its tag has no -piko.N.
+  const repack = release("5.13.1-piko.1", {
+    url: "https://vendor.example/v5.13.1/tool-5.13.1.zip",
+    stripPrefix: "tool-5.13.1",
+    bin: { tool: "bin/tool.exe" },
+  });
+  const document = appendManifest(undefined, repack);
+  const recipe = Object.values<any>(document.recipes)[0]!;
+  expect(recipe.platforms["windows-x64"].url).toBe(
+    "https://vendor.example/v{upstream}/tool-{upstream}.zip",
+  );
+  expect(
+    JSON.stringify(resolveManifestDocument(document, "tool", "5.13.1-piko.1")),
+  ).toBe(JSON.stringify(repack));
+  // A later repack of the same release shares the recipe and its checksums.
+  const second = release("5.13.1-piko.2", {
+    url: "https://vendor.example/v5.13.1/tool-5.13.1.zip",
+    stripPrefix: "tool-5.13.1",
+    bin: { tool: "bin/tool.exe" },
+  });
+  const extended = appendManifest(document, second);
+  expect(Object.keys(extended.recipes)).toHaveLength(1);
+  expect(normalizeManifest(extended, "tool", "5.13.1-piko.2")).toMatchObject({
+    version: "5.13.1-piko.2",
+  });
+  // Plain versions keep substituting the full version as before.
+  const plain = release("5.13.2");
+  const withPlain = appendManifest(extended, plain);
+  expect(normalizeManifest(withPlain, "tool", "5.13.2")).toMatchObject({
+    platforms: { "windows-x64": { url: plain.platforms["windows-x64"].url } },
+  });
+});
+
+test("{upstream} also strips a fourth-component repack revision", () => {
+  const revision = release("4.7.2.1", {
+    url: "https://vendor.example/4.7.2-stable/tool.zip",
+    bin: { tool: "bin/tool.exe" },
+  });
+  const document = appendManifest(undefined, revision);
+  const recipe = Object.values<any>(document.recipes)[0]!;
+  expect(recipe.platforms["windows-x64"].url).toBe(
+    "https://vendor.example/{upstream}-stable/tool.zip",
+  );
+  expect(
+    resolveManifestDocument(document, "tool", "4.7.2.1"),
+  ).toMatchObject({
+    version: "4.7.2.1",
+    platforms: {
+      "windows-x64": { url: "https://vendor.example/4.7.2-stable/tool.zip" },
+    },
+  });
+  // Five-part versions (four-part upstream plus revision) strip one component.
+  const five = release("1.15.0.29830.1", {
+    url: "https://vendor.example/1.15.0.29830/tool.msi",
+    bin: { tool: "bin/tool.exe" },
+  });
+  const doc2 = appendManifest(undefined, five);
+  expect(Object.values<any>(doc2.recipes)[0]!.platforms["windows-x64"].url).toBe(
+    "https://vendor.example/{upstream}/tool.msi",
+  );
+  // A genuine three-part version is never stripped.
+  const plain = release("5.13.1");
+  const doc3 = appendManifest(undefined, plain);
+  expect(
+    Object.values<any>(doc3.recipes)[0]!.platforms["windows-x64"].url,
+  ).toBe("https://vendor.example/v{version}/tool-{version}.zip");
+});

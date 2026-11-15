@@ -41,9 +41,20 @@ export function validateExec(
   );
   const v = value as ExecDeclaration;
   relativeFile(v.path);
-  if (v.kind !== undefined && !["native", "powershell"].includes(v.kind))
+  if (
+    v.kind !== undefined &&
+    !["native", "powershell", "javascript"].includes(v.kind)
+  )
     fail("Invalid execution kind");
-  if (!(v.kind === "powershell" ? /\.ps1$/i : /\.exe$/i).test(v.path))
+  if (
+    !(
+      v.kind === "powershell"
+        ? /\.ps1$/i
+        : v.kind === "javascript"
+          ? /\.(?:js|mjs|ts)$/i
+          : /\.exe$/i
+    ).test(v.path)
+  )
     fail("Execution target has unsupported extension");
   if (
     !Array.isArray(v.args) ||
