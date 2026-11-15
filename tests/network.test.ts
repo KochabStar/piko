@@ -148,9 +148,7 @@ test("release endpoints resolve through the download redirect policy without rea
     await expect(resolveUrl(`${base}/loop`)).rejects.toThrow(
       "Too many redirects",
     );
-    await expect(resolveUrl(`${base}/missing`)).rejects.toThrow(
-      "HTTP 404",
-    );
+    await expect(resolveUrl(`${base}/missing`)).rejects.toThrow("HTTP 404");
   } finally {
     server.stop(true);
   }

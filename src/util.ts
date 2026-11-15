@@ -248,8 +248,7 @@ export function stallMessage(value: string | URL): string {
   return `Download stalled (no data for ${IDLE_TIMEOUT / 1000}s): ${publicEndpoint(value)}`;
 }
 export type ReadChunk =
-  | { done: true; value?: undefined }
-  | { done: false; value: Uint8Array };
+  { done: true; value?: undefined } | { done: false; value: Uint8Array };
 type Followed = { response: Response; url: URL };
 async function followRedirects(
   value: string,

@@ -154,10 +154,7 @@ async function fixture() {
           );
         // A repository without a stable Release lands on the list page.
         if (unstable) return Response.redirect(`${origin}/releases`, 302);
-        return Response.redirect(
-          `${origin}/releases/tag/v${version}`,
-          302,
-        );
+        return Response.redirect(`${origin}/releases/tag/v${version}`, 302);
       }
       if (path.startsWith("/releases/tag/"))
         return new Response("<html>release page</html>");
