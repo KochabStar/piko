@@ -6,7 +6,7 @@ import {
   planDesktopUpgrade,
   stageDesktopChange,
 } from "./desktop.ts";
-import type { WindowsEffects } from "./windows-effects.ts";
+import { WindowsEffects } from "./windows-effects.ts";
 import { editProfile, profileBytes, stageProfileChange } from "./profiles.ts";
 import {
   persistence,
@@ -239,8 +239,8 @@ export class Packages {
     )
       fail(
         state.defaults[key] && state.defaults[key]?.id !== id
-          ? `Required system integration must migrate before switching; preview piko system ${install.source.alias}/${install.name}@${install.version} --upgrade --dry-run`
-          : `Required system integration is not ready; preview piko system ${install.source.alias}/${install.name}@${install.version} --dry-run and approve it in an elevated terminal before selecting this version`,
+          ? `Required system integration must migrate before switching; elevated terminal: piko system ${install.source.alias}/${install.name}@${install.version} --upgrade --approve-admin`
+          : `Required system integration is not ready; elevated terminal: piko system ${install.source.alias}/${install.name}@${install.version} --approve-admin`,
       );
     if (
       Object.values(state.admin ?? {}).some(
@@ -1101,12 +1101,16 @@ export class Packages {
     };
     return this.store.mutate(install, { skipUnchanged });
   }
-  async update(spec: string): Promise<Install> {
-    return this.updatePackage(spec, new Map());
+  async update(
+    spec: string,
+    options: { approveAdmin?: boolean } = {},
+  ): Promise<Install> {
+    return this.updatePackage(spec, new Map(), options);
   }
   private async updatePackage(
     spec: string,
     sourceIndexes: SourceIndexes,
+    options: { approveAdmin?: boolean } = {},
   ): Promise<Install> {
     report({ kind: "stage", label: "Check selected version", detail: spec });
     const state = await this.store.read(),
@@ -1170,6 +1174,33 @@ export class Packages {
       { sourceIndexes, skipUnchanged: true },
     );
     if (installed.id === previous.id) return installed;
+    if (installed.admin?.required) {
+      const receipt = (await this.store.read()).admin?.[installed.id];
+      if (receipt?.action !== "install" || receipt.status !== "completed") {
+        // A required service is anchored to the real version directory, so
+        // switching the default must go through the journalled old-remove /
+        // new-install migration instead of a plain selection.
+        const target = `${active.alias}/${previous.name}@${installed.version}`;
+        if (!options.approveAdmin)
+          fail(
+            `Required system integration must migrate first; elevated terminal: piko system ${target} --upgrade --approve-admin (or rerun update with --approve-admin)`,
+          );
+        if (!(await (this.effectsBackend ?? new WindowsEffects()).elevated()))
+          fail(
+            "Service migration requires an explicitly elevated terminal; no automatic UAC launch",
+          );
+        report({
+          kind: "stage",
+          label: "Migrate system integration",
+          detail: target,
+        });
+        const { inspectSystemUpgrade, applySystemUpgrade } =
+          await import("./integration-upgrade.ts");
+        const plan = await inspectSystemUpgrade(this, target);
+        await applySystemUpgrade(this, target, plan.binding);
+        return (await this.store.read()).installs[installed.id] ?? installed;
+      }
+    }
     report({
       kind: "stage",
       label: "Switch selected version",
@@ -1466,7 +1497,7 @@ export class Packages {
       fail("Package has no default version to check");
     return results;
   }
-  async updateAll(dryRun = false) {
+  async updateAll(dryRun = false, options: { approveAdmin?: boolean } = {}) {
     if (dryRun)
       return (await this.outdated()).map((r) => ({ ...r, version: r.current }));
     const state = await this.store.read(),
@@ -1492,7 +1523,7 @@ export class Packages {
         total: Object.keys(state.defaults).length,
       });
       try {
-        const updated = await this.updatePackage(spec, sourceIndexes);
+        const updated = await this.updatePackage(spec, sourceIndexes, options);
         report({
           kind: "result",
           label: `${spec}@${updated.version}: ${updated.id === i.id ? "unchanged" : "updated"}`,
@@ -1827,7 +1858,9 @@ export class Packages {
                   state.admin[i.id]?.status !== "completed")) ||
               state.admin?.[i.id]?.action === "install"
             )
-              fail(`System integration must be removed first: piko system ${i.source.alias}/${i.name}@${i.version} --remove --dry-run`);
+              fail(
+                `System integration must be removed first: piko system ${i.source.alias}/${i.name}@${i.version} --remove --approve-admin`,
+              );
             await noLinks(path);
             await noLinks(join(path, ".piko-install.json"));
             if (
@@ -1970,7 +2003,9 @@ export class Packages {
         (state.admin?.[installation.id]?.action !== "remove" ||
           state.admin[installation.id]?.status !== "completed")
       )
-        fail(`Required system integration must be removed before uninstall; preview piko system ${installation.source.alias}/${installation.name}@${installation.version} --remove --dry-run and approve the removal in an elevated terminal`);
+        fail(
+          `Required system integration must be removed before uninstall; elevated terminal: piko system ${installation.source.alias}/${installation.name}@${installation.version} --remove --approve-admin`,
+        );
       if (
         state.desktop?.[installation.key]?.id === installation.id ||
         state.admin?.[installation.id]?.action === "install"
@@ -1989,11 +2024,13 @@ export class Packages {
         // remaining install (as use <package>@<version> would pin it); the
         // no-default state dead-ends piko persist <package> --remove.
         const next = Object.values(state.installs)
-          .filter((i) =>
-            i.key === installation.key && i.id !== installation.id &&
-            (!i.admin?.required ||
-              (state.admin?.[i.id]?.action === "install" &&
-                state.admin[i.id]?.status === "completed")),
+          .filter(
+            (i) =>
+              i.key === installation.key &&
+              i.id !== installation.id &&
+              (!i.admin?.required ||
+                (state.admin?.[i.id]?.action === "install" &&
+                  state.admin[i.id]?.status === "completed")),
           )
           .sort((a, b) =>
             semver.valid(a.version) && semver.valid(b.version)

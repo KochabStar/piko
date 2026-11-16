@@ -348,9 +348,7 @@ test("{upstream} also strips a fourth-component repack revision", () => {
   expect(recipe.platforms["windows-x64"].url).toBe(
     "https://vendor.example/{upstream}-stable/tool.zip",
   );
-  expect(
-    resolveManifestDocument(document, "tool", "4.7.2.1"),
-  ).toMatchObject({
+  expect(resolveManifestDocument(document, "tool", "4.7.2.1")).toMatchObject({
     version: "4.7.2.1",
     platforms: {
       "windows-x64": { url: "https://vendor.example/4.7.2-stable/tool.zip" },
@@ -362,9 +360,9 @@ test("{upstream} also strips a fourth-component repack revision", () => {
     bin: { tool: "bin/tool.exe" },
   });
   const doc2 = appendManifest(undefined, five);
-  expect(Object.values<any>(doc2.recipes)[0]!.platforms["windows-x64"].url).toBe(
-    "https://vendor.example/{upstream}/tool.msi",
-  );
+  expect(
+    Object.values<any>(doc2.recipes)[0]!.platforms["windows-x64"].url,
+  ).toBe("https://vendor.example/{upstream}/tool.msi");
   // A genuine three-part version is never stripped.
   const plain = release("5.13.1");
   const doc3 = appendManifest(undefined, plain);

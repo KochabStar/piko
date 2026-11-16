@@ -75,7 +75,7 @@ Commands:
   piko command <operation>     Manage command ownership and aliases
   piko bootstrap <package>     Run an approved bootstrap command
   piko system <package>        Manage system-level integrations
-  piko system <package> --remove  Revoke a package-owned system integration before uninstalling
+  piko system <package> --remove  Revoke a package-owned system integration (one elevated command)
   piko rust <operation>        Manage Rust toolchains
   piko export [file]           Export package inventory
   piko import <file>           Restore package inventory
@@ -136,11 +136,11 @@ Check remote candidates without installing or changing selected versions.
 Alias for outdated; show current requests, candidates, and blocked updates.
 `,
   update: `Usage:
-  piko update <package> [--dry-run]
-  piko update * [--dry-run]
+  piko update <package> [--dry-run | --approve-admin]
+  piko update * [--dry-run | --approve-admin]
   piko update [piko] [--dry-run | --yes]
 
-Update selected software while retaining each saved version request. Use piko update piko to update Piko itself.
+Update selected software while retaining each saved version request. Packages with required system integrations migrate their service in the same command when --approve-admin is given from an elevated terminal. Use piko update piko to update Piko itself.
 `,
   cleanup: `Usage:
   piko cleanup * [--keep N] [--dry-run | --yes]
@@ -215,11 +215,10 @@ Inspect and manage Piko command ownership and aliases.
 Review and explicitly approve a package bootstrap operation. Approved code runs with user permissions.
 `,
   system: `Usage:
-  piko system <package> [--remove] [--dry-run | --approve-admin --binding <hash>]
-  piko system <package>@<installed-version> --upgrade --dry-run
-  piko system <package>@<installed-version> --upgrade --approve-admin --binding <hash>
+  piko system <package> [--remove] [--dry-run | --approve-admin]
+  piko system <package>@<installed-version> --upgrade [--dry-run | --approve-admin]
 
-Review administrative integration changes before approving them. Packages marked as requiring system integration must be approved before use; Piko never performs this step implicitly. Revoke it with system <package> --remove before uninstalling.
+One elevated command previews and applies: piko system <package> --approve-admin. Packages marked as requiring system integration must be approved before use; Piko never performs this step implicitly. --dry-run previews only; --binding approves an earlier separate preview. Revoke with system <package> --remove --approve-admin before uninstalling.
 `,
   rust: `Usage:
   piko rust list
@@ -751,12 +750,12 @@ async function main(): Promise<number> {
         if (!values["dry-run"]) {
           if (!values["approve-admin"])
             fail(
-              "System upgrade needs --approve-admin and the combined --binding",
+              "System upgrade needs --approve-admin (--dry-run previews only; --binding approves an earlier preview)",
             );
           const result = await applySystemUpgrade(
             packages,
             required(1),
-            values.binding ?? "",
+            values.binding ?? plan.binding,
           );
           show(
             values.json ? JSON.stringify(result, null, 2) : planSummary(result),
@@ -779,12 +778,15 @@ async function main(): Promise<number> {
       if (admin ? !values["approve-admin"] : !values["approve-exec"])
         fail(
           admin
-            ? "System integration requires --approve-admin and preview --binding"
-            : "Bootstrap requires --approve-exec and preview --binding; --yes is insufficient",
+            ? "System integration requires --approve-admin (--dry-run previews only; --binding approves an earlier preview)"
+            : "Bootstrap requires --approve-exec, not --yes (--dry-run previews only; --binding approves an earlier preview)",
         );
       const result = await runExecution(store, spec, {
         confirmed: true,
-        binding: values.binding,
+        // The plan above was printed by this same invocation; approving it
+        // as shown needs no copied binding. An explicit --binding still binds
+        // the approval to an earlier separate preview.
+        binding: values.binding ?? plan.binding,
         admin,
         remove,
       });
@@ -1115,13 +1117,16 @@ async function main(): Promise<number> {
                   path: join(root, i.dir),
                   defaultUnchanged: true,
                   ...(i.admin?.required
-                    ? { systemIntegrationRequired: true, next: `piko system ${i.source.alias}/${i.name}@${i.version} --dry-run` }
+                    ? {
+                        systemIntegrationRequired: true,
+                        next: `piko system ${i.source.alias}/${i.name}@${i.version} --approve-admin`,
+                      }
                     : {}),
                 },
                 null,
                 2,
               )
-            : `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Next: ${i.admin?.required ? `piko system ${i.source.alias}/${i.name}@${i.version} --dry-run (administrator approval required before use)` : `piko use ${i.source.alias}/${i.name}@${i.version}`}`,
+            : `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Next: ${i.admin?.required ? `piko system ${i.source.alias}/${i.name}@${i.version} --approve-admin (elevated terminal), then piko use ${i.source.alias}/${i.name}@${i.version}` : `piko use ${i.source.alias}/${i.name}@${i.version}`}`,
         );
         break;
       }
@@ -1297,7 +1302,9 @@ async function main(): Promise<number> {
         if (args[1] && !allPackages)
           fail("Use update --all or update * without a package");
         const result = await task(() =>
-          packages.updateAll(!!values["dry-run"]),
+          packages.updateAll(!!values["dry-run"], {
+            approveAdmin: !!values["approve-admin"],
+          }),
         );
         show(
           values.json
@@ -1329,7 +1336,11 @@ async function main(): Promise<number> {
         if (result.some((r) => r.status === "blocked")) return 1;
         break;
       }
-      const i = await task(() => packages.update(spec));
+      const i = await task(() =>
+        packages.update(spec, {
+          approveAdmin: !!values["approve-admin"],
+        }),
+      );
       show(
         values.json
           ? JSON.stringify(

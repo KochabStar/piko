@@ -28,10 +28,12 @@ export async function inspectSystemUpgrade(packages: Packages, spec: string) {
     );
   const oldSpec =
     previous.source.alias + "/" + previous.name + "@" + previous.version;
-  const targetReady = state.admin?.[target.id]?.action === "install" &&
+  const targetReady =
+    state.admin?.[target.id]?.action === "install" &&
     state.admin[target.id]?.status === "completed";
   const remove =
-    !targetReady && (active?.action === "install" ||
+    !targetReady &&
+    (active?.action === "install" ||
       (previous.admin?.required && active?.action !== "remove"))
       ? await inspectExecution(packages.store, oldSpec, true, true)
       : null;
@@ -112,9 +114,13 @@ export async function applySystemUpgrade(
     const ready = await packages.store.read();
     const selection = ready.defaults[ready.installs[plan.target]!.key];
     if (selection?.id !== plan.previous || selection.request !== plan.request)
-      fail("Default changed during system installation; inspect the journal before selecting the candidate");
-    if (ready.admin?.[plan.target]?.action !== "install" ||
-        ready.admin[plan.target]?.status !== "completed")
+      fail(
+        "Default changed during system installation; inspect the journal before selecting the candidate",
+      );
+    if (
+      ready.admin?.[plan.target]?.action !== "install" ||
+      ready.admin[plan.target]?.status !== "completed"
+    )
       fail("Candidate system integration is not ready for selection");
     phase = "selecting-new";
     await atomicJson(journal, { ...plan, phase });

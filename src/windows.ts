@@ -82,9 +82,7 @@ export function selectedNode(
     version: choice.version,
   };
 }
-export function powershellExecutable(
-  shell?: "powershell" | "pwsh",
-): string {
+export function powershellExecutable(shell?: "powershell" | "pwsh"): string {
   // Windows ships 5.1 with every supported release, so it is the fallback.
   // An explicit pwsh request must not silently run 5.1 instead.
   if (shell === "powershell")
@@ -121,7 +119,9 @@ export async function dispatch(
     (state.admin?.[install.id]?.action !== "install" ||
       state.admin[install.id]?.status !== "completed")
   )
-    fail("Required system integration is not ready; preview and approve piko system <package> before launching it");
+    fail(
+      "Required system integration is not ready; run piko system <package> --approve-admin from an elevated terminal before launching it",
+    );
   if (install.depends?.length)
     await (
       await import("./dependencies.ts")

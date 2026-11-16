@@ -350,9 +350,19 @@ test("required service launchers stay in the real version directory after select
     admin: { required: true, install: action, remove: action },
   });
   const i = await p.install(`test/${name}@1`);
-  await expect(p.use(`test/${name}@1`)).rejects.toThrow("Required system integration");
+  await expect(p.use(`test/${name}@1`)).rejects.toThrow(
+    "Required system integration",
+  );
   await p.store.mutate(async (s) => {
-    s.admin = { [i.id]: { id: i.id, action: "install", status: "completed", binding: "a".repeat(64), at: new Date().toISOString() } };
+    s.admin = {
+      [i.id]: {
+        id: i.id,
+        action: "install",
+        status: "completed",
+        binding: "a".repeat(64),
+        at: new Date().toISOString(),
+      },
+    };
   });
   await p.use(`test/${name}@1`);
   const expected = join(p.root, i.dir, "gui.exe");
