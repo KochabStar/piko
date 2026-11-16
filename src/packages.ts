@@ -239,8 +239,8 @@ export class Packages {
     )
       fail(
         state.defaults[key] && state.defaults[key]?.id !== id
-          ? `Required system integration must migrate before switching; elevated terminal: piko system ${install.source.alias}/${install.name}@${install.version} --upgrade --approve-admin`
-          : `Required system integration is not ready; elevated terminal: piko system ${install.source.alias}/${install.name}@${install.version} --approve-admin`,
+          ? `Required system integration must migrate before switching; Administrator terminal: piko system ${install.source.alias}/${install.name}@${install.version} --upgrade --approve-admin`
+          : `Required system integration is not ready; Administrator terminal: piko system ${install.source.alias}/${install.name}@${install.version} --approve-admin`,
       );
     if (
       Object.values(state.admin ?? {}).some(
@@ -1183,11 +1183,13 @@ export class Packages {
         const target = `${active.alias}/${previous.name}@${installed.version}`;
         if (!options.approveAdmin)
           fail(
-            `Required system integration must migrate first; elevated terminal: piko system ${target} --upgrade --approve-admin (or rerun update with --approve-admin)`,
+            `Required system integration must migrate first; Administrator terminal: piko system ${target} --upgrade --approve-admin (or rerun update with --approve-admin)`,
           );
         if (!(await (this.effectsBackend ?? new WindowsEffects()).elevated()))
           fail(
-            "Service migration requires an explicitly elevated terminal; no automatic UAC launch",
+            "Administrator permission required: open an Administrator terminal (right-click your terminal and choose Run as administrator) and rerun: piko update " +
+              target +
+              " --approve-admin. Piko never opens a UAC prompt by itself.",
           );
         report({
           kind: "stage",
@@ -1807,9 +1809,9 @@ export class Packages {
       const { nativeRequest } = await import("./windows-effects.ts");
       if (await nativeRequest({ op: "elevated" }))
         return "access denied even when elevated; a running service or system ACL may be holding the files";
-      return "access denied; retry from an elevated (administrator) terminal — Piko never auto-elevates";
+      return "access denied; retry from an Administrator terminal (right-click your terminal → Run as administrator) — Piko never opens a UAC prompt by itself";
     } catch {
-      return "access denied; retry from an elevated (administrator) terminal";
+      return "access denied; retry from an Administrator terminal";
     }
   }
   async versionCleanupPlan(spec?: string, keep = 1) {
@@ -1886,7 +1888,7 @@ export class Packages {
               reason =
                 users.map((p) => `${p.name} (${p.pid})`).join(", ") +
                 (i.admin
-                  ? "; system-integrated files are loaded — revoke with piko system <package> --remove in an elevated terminal, or retry after sign-out/restart"
+                  ? "; system-integrated files are loaded — revoke with piko system <package> --remove --approve-admin in an Administrator terminal, or retry after sign-out/restart"
                   : "");
             }
           } catch (error) {
@@ -2004,7 +2006,7 @@ export class Packages {
           state.admin[installation.id]?.status !== "completed")
       )
         fail(
-          `Required system integration must be removed before uninstall; elevated terminal: piko system ${installation.source.alias}/${installation.name}@${installation.version} --remove --approve-admin`,
+          `Required system integration must be removed before uninstall; Administrator terminal: piko system ${installation.source.alias}/${installation.name}@${installation.version} --remove --approve-admin`,
         );
       if (
         state.desktop?.[installation.key]?.id === installation.id ||

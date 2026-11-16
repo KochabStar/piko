@@ -132,7 +132,7 @@ test("compiled bootstrap separates download, code approval and default selection
       ],
       1,
     );
-    expect(nonElevated.err).toContain("elevated terminal");
+    expect(nonElevated.err).toContain("Administrator permission required");
   }
   const unchanged = JSON.parse(
     await readFile(join(home, "apps/piko/state.json"), "utf8"),

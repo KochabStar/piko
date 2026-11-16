@@ -180,7 +180,7 @@ export async function runExecution(
       !(await (store.effectsBackend ?? new WindowsEffects()).elevated())
     )
       fail(
-        "Administrator integration requires an explicitly elevated terminal; no automatic UAC launch",
+        "Administrator permission required: open an Administrator terminal (right-click your terminal and choose Run as administrator) and rerun the same command. Piko never opens a UAC prompt by itself.",
       );
     receiptId = plan.install.id;
     state.schemaVersion = 6;
@@ -208,7 +208,7 @@ export async function runExecution(
         )
       )
         fail(
-          "Another version owns system integration; elevated terminal: piko system <target-exact-version> --upgrade --approve-admin",
+          "Another version owns system integration; Administrator terminal: piko system <target-exact-version> --upgrade --approve-admin",
         );
       state.admin ??= {};
       state.admin[receiptId] = { ...receipt, id: receiptId, action: "install" };
@@ -226,7 +226,9 @@ export async function runExecution(
       options.admin &&
       !(await (store.effectsBackend ?? new WindowsEffects()).elevated())
     )
-      fail("Administrator status changed before execution");
+      fail(
+        "Administrator permission was lost during execution; retry from an Administrator terminal",
+      );
     const receipt = options.admin
       ? state.admin?.[receiptId]
       : state.bootstraps?.[receiptId];

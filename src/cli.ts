@@ -50,6 +50,7 @@ import {
   powershellExecutable,
 } from "./windows.ts";
 import { noLinks, fail, exists, capture } from "./util.ts";
+import { WindowsEffects } from "./windows-effects.ts";
 
 const help = `Piko ${VERSION} — Windows package manager (preview)
 
@@ -75,7 +76,7 @@ Commands:
   piko command <operation>     Manage command ownership and aliases
   piko bootstrap <package>     Run an approved bootstrap command
   piko system <package>        Manage system-level integrations
-  piko system <package> --remove  Revoke a package-owned system integration (one elevated command)
+  piko system <package> --remove  Revoke a package-owned system integration (one Administrator command)
   piko rust <operation>        Manage Rust toolchains
   piko export [file]           Export package inventory
   piko import <file>           Restore package inventory
@@ -140,7 +141,7 @@ Alias for outdated; show current requests, candidates, and blocked updates.
   piko update * [--dry-run | --approve-admin]
   piko update [piko] [--dry-run | --yes]
 
-Update selected software while retaining each saved version request. Packages with required system integrations migrate their service in the same command when --approve-admin is given from an elevated terminal. Use piko update piko to update Piko itself.
+Update selected software while retaining each saved version request. Packages with required system integrations migrate their service in the same command when --approve-admin is given from an Administrator terminal. Use piko update piko to update Piko itself.
 `,
   cleanup: `Usage:
   piko cleanup * [--keep N] [--dry-run | --yes]
@@ -218,7 +219,7 @@ Review and explicitly approve a package bootstrap operation. Approved code runs 
   piko system <package> [--remove] [--dry-run | --approve-admin]
   piko system <package>@<installed-version> --upgrade [--dry-run | --approve-admin]
 
-One elevated command previews and applies: piko system <package> --approve-admin. Packages marked as requiring system integration must be approved before use; Piko never performs this step implicitly. --dry-run previews only; --binding approves an earlier separate preview. Revoke with system <package> --remove --approve-admin before uninstalling.
+One Administrator-terminal command previews and applies: piko system <package> --approve-admin. Packages marked as requiring system integration must be approved before use; Piko never performs this step implicitly. --dry-run previews only; --binding approves an earlier separate preview. Revoke with system <package> --remove --approve-admin before uninstalling.
 `,
   rust: `Usage:
   piko rust list
@@ -1126,7 +1127,7 @@ async function main(): Promise<number> {
                 null,
                 2,
               )
-            : `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Next: ${i.admin?.required ? `piko system ${i.source.alias}/${i.name}@${i.version} --approve-admin (elevated terminal), then piko use ${i.source.alias}/${i.name}@${i.version}` : `piko use ${i.source.alias}/${i.name}@${i.version}`}`,
+            : `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Next: ${i.admin?.required ? `piko system ${i.source.alias}/${i.name}@${i.version} --approve-admin (Administrator terminal), then piko use ${i.source.alias}/${i.name}@${i.version}` : `piko use ${i.source.alias}/${i.name}@${i.version}`}`,
         );
         break;
       }
@@ -1298,6 +1299,13 @@ async function main(): Promise<number> {
     }
     case "update": {
       const allPackages = args[1] === "*";
+      // Fail before any download when admin approval was requested but this
+      // terminal lacks the administrator token; the plain message says what
+      // to open and what to rerun.
+      if (values["approve-admin"] && !(await new WindowsEffects().elevated()))
+        fail(
+          'Administrator permission required: --approve-admin must run in an Administrator terminal. Right-click your terminal and choose "Run as administrator" (or Win+X → "Terminal (Admin)"), then rerun the same command. Piko never opens a UAC prompt by itself.',
+        );
       if (values.all || allPackages) {
         if (args[1] && !allPackages)
           fail("Use update --all or update * without a package");

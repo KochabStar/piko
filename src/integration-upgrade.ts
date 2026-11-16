@@ -53,7 +53,7 @@ export async function inspectSystemUpgrade(packages: Packages, spec: string) {
     ...data,
     binding: sha256(JSON.stringify(data)),
     warning:
-      "One approval covers the displayed old removal and new installation. Run from an elevated terminal. Steps are journaled, not transactional; interrupted/failed scripts are never replayed by recover. The candidate is selected only after its system installation succeeds, preserving the saved version request. Old program files/data are retained.",
+      "One approval covers the displayed old removal and new installation. Run it from an Administrator terminal. Steps are journaled, not transactional; interrupted/failed scripts are never replayed by recover. The candidate is selected only after its system installation succeeds, preserving the saved version request. Old program files/data are retained.",
   };
 }
 
@@ -68,7 +68,9 @@ export async function applySystemUpgrade(
       "System upgrade changed; preview again and approve the combined --binding",
     );
   if (!(await (packages.effectsBackend ?? new WindowsEffects()).elevated()))
-    fail("System upgrade requires an explicitly elevated terminal");
+    fail(
+      "Administrator permission required: open an Administrator terminal (right-click your terminal and choose Run as administrator) and rerun the same command. Piko never opens a UAC prompt by itself.",
+    );
   const journal = join(
     packages.root,
     "apps/piko/system-upgrades",

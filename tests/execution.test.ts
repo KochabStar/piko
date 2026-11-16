@@ -256,7 +256,9 @@ test("required services need successful dedicated approval and removal before un
   );
   await expect(p.uninstall(spec)).rejects.toThrow("system");
   effects.allowAdmin = false;
-  await expect(approve("1.0.0")).rejects.toThrow("elevated terminal");
+  await expect(approve("1.0.0")).rejects.toThrow(
+    "Administrator permission required",
+  );
   expect((await p.store.read()).admin).toBeUndefined();
   effects.allowAdmin = true;
   await writeFile(join(data, "fail-install-1.0.0"), "fail");
@@ -499,5 +501,5 @@ test("javascript admin declarations preview like PowerShell and still require el
         confirmed: true,
         binding: preview.binding,
       }),
-    ).rejects.toThrow("elevated terminal");
+    ).rejects.toThrow("Administrator permission required");
 }, 30000);
