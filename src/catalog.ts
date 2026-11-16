@@ -67,6 +67,29 @@ export function parseSpec(value: string): {
     request,
   };
 }
+// Sources may repack an unchanged upstream version as `<upstream>-piko.N`
+// (fixture rebuilds, integration fixes). Semver orders such prereleases below
+// the plain release, but a repack of the same upstream version is published
+// later and must compare as newer than the plain one (and N orders builds).
+export function repackOf(
+  version: string,
+): { base: string; build: number } | undefined {
+  const match = /^(.*)-piko\.(\d+)$/.exec(version);
+  if (!match) return undefined;
+  const base = match[1]!;
+  return semver.valid(base) ? { base, build: Number(match[2]!) } : undefined;
+}
+// True when `candidate` sorts strictly above `current` under that rule.
+export function versionNewer(candidate: string, current: string): boolean {
+  if (!semver.valid(candidate) || !semver.valid(current)) return false;
+  const a = repackOf(candidate),
+    b = repackOf(current);
+  if (a && b)
+    return a.base === b.base ? a.build > b.build : semver.gt(a.base, b.base);
+  if (a && !b) return semver.eq(a.base, current) || semver.gt(a.base, current);
+  if (!a && b) return semver.gt(candidate, b.base);
+  return semver.gt(candidate, current);
+}
 export function chooseVersion(
   versions: string[],
   request: string,
@@ -82,9 +105,14 @@ export function chooseVersion(
     request = aliases[request]!;
   if (request === "latest") {
     if (latest && versions.includes(latest)) return latest;
+    // Repacks of an upstream release count as stable candidates here; real
+    // prereleases stay excluded.
     const stable = versions
-      .filter((v) => semver.valid(v) && semver.prerelease(v) === null)
-      .sort(semver.rcompare);
+      .filter(
+        (v) =>
+          semver.valid(v) && (repackOf(v) || semver.prerelease(v) === null),
+      )
+      .sort((a, b) => (versionNewer(a, b) ? -1 : versionNewer(b, a) ? 1 : 0));
     if (!stable.length) fail("No stable version available");
     return stable[0]!;
   }

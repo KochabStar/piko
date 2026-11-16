@@ -11,7 +11,6 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { installedHelper } from "./helpers-process.ts";
 import { nativeShimBase64, nativeShimSha256 } from "./generated/shim.ts";
 import {
-  download,
   downloadResponse,
   exists,
   fail,
@@ -21,6 +20,9 @@ import {
   publicEndpoint,
   removeTree,
   sha256,
+  stallMessage,
+  transferWatch,
+  type ReadChunk,
   withRetries,
   assertDiskSpace,
 } from "./util.ts";
@@ -73,13 +75,176 @@ export async function downloadArtifact(
   limit = 512 * 1024 * 1024,
 ): Promise<Uint8Array> {
   const aria2 = await findAria2(root, state);
-  if (!aria2)
-    return await withRetries(() =>
-      download(value, limit, (received, total, complete) =>
-        report({ kind: "download", received, total, complete }),
-      ),
-    );
+  if (!aria2) return await downloadWithFetch(root, value, limit);
   return await downloadWithAria2(root, value, aria2, limit);
+}
+
+type Remainder = {
+  // Bytes this response body carries; 0 when the publisher sent no length.
+  length: number;
+  // Entity size, when the publisher disclosed it.
+  total?: number;
+  // The publisher ignored the range and served the whole entity.
+  whole: boolean;
+};
+
+// A resumable attempt asks only for the remainder of the entity. Verify that
+// the publisher honored exactly that range before any byte is trusted;
+// `undefined` means the response cannot be used for this offset.
+function remainder(
+  response: Response,
+  offset: number,
+  limit: number,
+): Remainder | undefined {
+  const contentRange = response.headers.get("content-range"),
+    length = Number(response.headers.get("content-length") ?? 0),
+    rangeParts = contentRange?.match(/^bytes (\d+)-(\d+)\/(\d+)$/),
+    start = Number(rangeParts?.[1]),
+    end = Number(rangeParts?.[2]),
+    total = Number(rangeParts?.[3]);
+  if (response.status === 206 && rangeParts) {
+    if (
+      ![start, end, total].every(Number.isSafeInteger) ||
+      start !== offset ||
+      end !== total - 1 ||
+      total > limit ||
+      (length !== 0 && length !== total - start)
+    )
+      return undefined;
+    return { length, total, whole: false };
+  }
+  if (
+    response.status !== 200 ||
+    contentRange ||
+    !Number.isSafeInteger(length) ||
+    length < 0 ||
+    length > limit
+  )
+    return undefined;
+  return { length, total: length > 0 ? length : undefined, whole: true };
+}
+
+// Without aria2, Bun streams the artifact itself. It keeps the same staging
+// prefix as the aria2 path, so a retry — or a later install of the same URL —
+// asks only for the missing bytes instead of restarting a slow transfer from
+// zero. A slow link is never aborted; only a silent one is.
+async function downloadWithFetch(
+  root: string,
+  value: string,
+  limit: number,
+): Promise<Uint8Array> {
+  const staging = join(root, "staging");
+  await noLinks(staging);
+  await mkdir(staging, { recursive: true });
+  const stage = join(staging, "fetch-" + sha256(value).slice(0, 16));
+  await noLinks(stage);
+  await mkdir(stage, { recursive: true });
+  const partial = join(stage, "partial");
+  let expected: number | undefined = await readTotal(stage);
+  const run = async (): Promise<Uint8Array> => {
+    let offset = await prefixSize(stage, limit);
+    if (expected !== undefined && offset === expected) {
+      // An earlier attempt already saved every byte of the entity.
+      const bytes = await readFile(partial);
+      report({
+        kind: "download",
+        received: bytes.length,
+        total: expected,
+        complete: true,
+      });
+      return bytes;
+    }
+    if (expected !== undefined)
+      report({ kind: "download", received: offset, total: expected });
+    const watch = transferWatch();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      const response = await downloadResponse(value, {
+        headers: new Headers({
+          "Accept-Encoding": "identity",
+          Range: `bytes=${offset}-`,
+        }),
+        signal: watch.signal,
+      });
+      const shape = remainder(response, offset, limit);
+      if (!shape) {
+        await response.body?.cancel();
+        fail("Resume range was not honored or exceeds the size limit");
+      }
+      if (shape.whole && offset > 0) {
+        // The publisher ignored the range; keep exactly one body on disk.
+        await removeTree(partial);
+        offset = 0;
+      }
+      if (shape.total !== undefined) {
+        if (expected === undefined) {
+          expected = shape.total;
+          await writeTotal(stage, expected);
+          // Check once per download, before any payload is written: running
+          // out of space here fails fast with a clear message.
+          await assertDiskSpace(staging, expected - offset);
+        } else if (expected !== shape.total)
+          fail("Download total changed between requests");
+      }
+      reader = response.body?.getReader();
+      if (!reader) fail("Empty response body");
+      let received = 0;
+      for (;;) {
+        let chunk: ReadChunk;
+        try {
+          chunk = await reader.read();
+        } catch (error) {
+          failTransient(
+            watch.stalled()
+              ? stallMessage(value)
+              : error instanceof Error
+                ? error.message
+                : String(error),
+          );
+        }
+        watch.touch();
+        if (chunk.done) break;
+        if (offset + received + chunk.value.length > limit) {
+          await response.body?.cancel().catch(() => {});
+          fail("Download exceeds size limit");
+        }
+        received += chunk.value.length;
+        await appendFile(partial, chunk.value);
+        report({
+          kind: "download",
+          received: offset + received,
+          total: expected,
+        });
+      }
+      if (expected !== undefined && offset + received !== expected)
+        failTransient(
+          "Download ended before the full entity; resuming from the saved prefix",
+        );
+      const bytes = await readFile(partial);
+      report({
+        kind: "download",
+        received: bytes.length,
+        total: expected,
+        complete: true,
+      });
+      return bytes;
+    } finally {
+      watch.dispose();
+      await reader?.cancel().catch(() => {});
+    }
+  };
+  // Each attempt resumes from the saved prefix; a permanent violation has
+  // nothing resumable and must not linger in staging.
+  const bytes = await withRetries(async () => {
+    try {
+      return await run();
+    } catch (error) {
+      if (!isTransient(error)) await removeTree(stage);
+      throw error;
+    }
+  });
+  await removeTree(stage);
+  return bytes;
 }
 
 // The stage keeps a sequential `partial` prefix plus the entity `total`, so
@@ -193,36 +358,12 @@ export async function downloadWithAria2(
           signal: attempt.abort.signal,
           qqSession,
         });
-        const contentRange = response.headers.get("content-range"),
-          length = Number(response.headers.get("content-length") ?? 0),
-          rangeParts = contentRange?.match(/^bytes (\d+)-(\d+)\/(\d+)$/),
-          start = Number(rangeParts?.[1]),
-          end = Number(rangeParts?.[2]),
-          total = Number(rangeParts?.[3]);
-        if (response.status === 206 && rangeParts) {
-          if (
-            ![start, end, total].every(Number.isSafeInteger) ||
-            start !== attempt.offset ||
-            end !== total - 1 ||
-            total > limit ||
-            (length !== 0 && length !== total - start)
-          ) {
-            await response.body?.cancel();
-            fail("Resume range was not honored or exceeds the size limit");
-          }
-        } else if (
-          response.status !== 200 ||
-          attempt.offset !== 0 ||
-          contentRange ||
-          !Number.isSafeInteger(length) ||
-          length < 0 ||
-          length > limit
-        ) {
+        const shape = remainder(response, attempt.offset, limit);
+        if (!shape || (shape.whole && attempt.offset !== 0)) {
           await response.body?.cancel();
           fail("Resume range was not honored or exceeds the size limit");
         }
-        const known =
-          response.status === 206 ? total : length > 0 ? length : undefined;
+        const known = shape.total;
         if (known) {
           if (expected === undefined) {
             expected = known;

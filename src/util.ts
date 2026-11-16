@@ -206,7 +206,51 @@ export function publicEndpoint(value: string | URL): string {
   url.hash = "";
   return url.href;
 }
-export async function downloadResponse(
+// Slow links are normal, silence is not. Only the wait for response headers
+// is bounded outright; a body is bounded by the time since its last byte.
+// Timeouts are transient, so callers retry instead of reporting a dead end.
+export const CONNECT_TIMEOUT = 60000;
+export const IDLE_TIMEOUT = 120000;
+export type TransferWatch = {
+  signal: AbortSignal;
+  // Re-arm the idle timer after a received chunk.
+  touch(): void;
+  stalled(): boolean;
+  dispose(): void;
+};
+// Abort a transfer only when it stops making progress; a slow connection that
+// keeps delivering bytes runs to completion.
+export function transferWatch(idle = IDLE_TIMEOUT): TransferWatch {
+  const controller = new AbortController();
+  let stalled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      stalled = true;
+      controller.abort(
+        Object.assign(new Error("The operation timed out."), {
+          name: "TimeoutError",
+        }),
+      );
+    }, idle);
+    timer.unref?.();
+  };
+  arm();
+  return {
+    signal: controller.signal,
+    touch: arm,
+    stalled: () => stalled,
+    dispose: () => clearTimeout(timer),
+  };
+}
+export function stallMessage(value: string | URL): string {
+  return `Download stalled (no data for ${IDLE_TIMEOUT / 1000}s): ${publicEndpoint(value)}`;
+}
+export type ReadChunk =
+  { done: true; value?: undefined } | { done: false; value: Uint8Array };
+type Followed = { response: Response; url: URL };
+async function followRedirects(
   value: string,
   options: {
     method?: "GET" | "HEAD";
@@ -214,7 +258,7 @@ export async function downloadResponse(
     signal?: AbortSignal;
     qqSession?: QQDownloadSession;
   } = {},
-): Promise<Response> {
+): Promise<Followed> {
   const initial = networkUrl(value);
   const qq = isQQDownload(initial)
     ? (options.qqSession ?? new QQDownloadSession(initial))
@@ -223,12 +267,28 @@ export async function downloadResponse(
   if (qq) validateQQDownload(new QQDownloadSession(initial).identity, url);
   for (let redirects = 0; redirects < 6; redirects++) {
     let response: Response;
+    // Bound the wait for headers only: the timer is cleared as soon as they
+    // arrive, so a long but progressing body is never cut off here. The
+    // caller's signal (cancellation or its own idle watchdog) still aborts it.
+    const pending = new AbortController();
+    const timer = setTimeout(
+      () =>
+        pending.abort(
+          Object.assign(new Error("The operation timed out."), {
+            name: "TimeoutError",
+          }),
+        ),
+      CONNECT_TIMEOUT,
+    );
+    timer.unref?.();
     try {
       response = await fetch(url, {
         redirect: "manual",
         method: options.method,
         headers: options.headers,
-        signal: options.signal ?? AbortSignal.timeout(120000),
+        signal: options.signal
+          ? AbortSignal.any([options.signal, pending.signal])
+          : pending.signal,
       });
     } catch (error) {
       const code =
@@ -242,6 +302,8 @@ export async function downloadResponse(
       failTransient(
         `Download connection failed (${code}): ${publicEndpoint(url)}`,
       );
+    } finally {
+      clearTimeout(timer);
     }
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       const location = response.headers.get("location");
@@ -264,51 +326,84 @@ export async function downloadResponse(
     }
     if (!response.ok)
       fail(`Download failed: HTTP ${response.status} (${publicEndpoint(url)})`);
-    return response;
+    return { response, url };
   }
   fail("Too many redirects");
+}
+export async function downloadResponse(
+  value: string,
+  options: {
+    method?: "GET" | "HEAD";
+    headers?: Headers;
+    signal?: AbortSignal;
+    qqSession?: QQDownloadSession;
+  } = {},
+): Promise<Response> {
+  return (await followRedirects(value, options)).response;
+}
+// Follow the same redirect policy as a download and report where an endpoint
+// finally points, without reading the body. Used for endpoints that answer
+// with a redirect (GitHub release pages) instead of quota-limited JSON APIs.
+export async function resolveUrl(value: string): Promise<URL> {
+  const { response, url } = await followRedirects(value);
+  await response.body?.cancel();
+  return url;
 }
 export async function download(
   value: string,
   limit = 512 * 1024 * 1024,
   progress?: (received: number, total?: number, complete?: boolean) => void,
 ): Promise<Uint8Array> {
-  const response = await downloadResponse(value);
-  if (Number(response.headers.get("content-length") ?? 0) > limit) {
-    await response.body?.cancel();
-    fail("Download exceeds size limit");
-  }
-  const length = Number(response.headers.get("content-length"));
-  // Fetch may decompress the body, so encoded Content-Length is not a usable total.
-  const expected =
-    !response.headers.get("content-encoding") &&
-    Number.isSafeInteger(length) &&
-    length > 0
-      ? length
-      : undefined;
-  progress?.(0, expected);
-  const reader = response.body?.getReader();
-  if (!reader) fail("Empty response body");
-  const chunks: Uint8Array[] = [];
-  let total = 0;
+  const watch = transferWatch();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
+    const response = await downloadResponse(value, { signal: watch.signal });
+    if (Number(response.headers.get("content-length") ?? 0) > limit) {
+      await response.body?.cancel();
+      fail("Download exceeds size limit");
+    }
+    const length = Number(response.headers.get("content-length"));
+    // Fetch may decompress the body, so encoded Content-Length is not a usable total.
+    const expected =
+      !response.headers.get("content-encoding") &&
+      Number.isSafeInteger(length) &&
+      length > 0
+        ? length
+        : undefined;
+    progress?.(0, expected);
+    reader = response.body?.getReader();
+    if (!reader) fail("Empty response body");
+    const chunks: Uint8Array[] = [];
+    let total = 0;
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.length;
+      let chunk: ReadChunk;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        // Interrupted body transfers (resets, aborts, stalls) are transient;
+        // the caller may retry the whole download. Policy failures below are
+        // plain errors and are never retried.
+        failTransient(
+          watch.stalled()
+            ? stallMessage(value)
+            : error instanceof Error
+              ? error.message
+              : String(error),
+        );
+      }
+      watch.touch();
+      if (chunk.done) break;
+      total += chunk.value.length;
       if (total > limit) fail("Download exceeds size limit");
-      chunks.push(value);
+      chunks.push(chunk.value);
       progress?.(total, expected);
     }
-  } catch (error) {
-    // Interrupted body transfers (resets, aborts) are transient; the caller
-    // may retry the whole download.
-    failTransient(error instanceof Error ? error.message : String(error));
+    progress?.(total, expected, true);
+    return Buffer.concat(chunks, total);
   } finally {
-    await reader.cancel();
+    watch.dispose();
+    await reader?.cancel().catch(() => {});
   }
-  progress?.(total, expected, true);
-  return Buffer.concat(chunks, total);
 }
 export async function capture(
   executable: string,

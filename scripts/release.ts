@@ -4,6 +4,7 @@ import { checkSource } from "./check-source.ts";
 import { VERSION } from "../src/version.ts";
 import { executableHash } from "../src/self-update.ts";
 import { capture, exists } from "../src/util.ts";
+import { powershellExecutable } from "../src/windows.ts";
 const folder = resolve("dist", `piko-${VERSION}-windows-x64`);
 if (await exists(folder))
   throw new Error(
@@ -39,7 +40,7 @@ await writeFile(
 );
 const zip = folder + ".zip";
 await capture(
-  "powershell.exe",
+  powershellExecutable(),
   [
     "-NoProfile",
     "-NonInteractive",

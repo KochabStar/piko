@@ -164,13 +164,17 @@ export function installedRows(
 }
 export function updateTable(
   rows: UpdateRow[],
-  options: { verbose?: boolean } = {},
+  options: { verbose?: boolean; focus?: boolean } = {},
 ): string {
   if (!options.verbose) {
     if (!rows.length) return "No selected packages to update.";
-    const visible = rows.filter(
-      (row) => !["current", "pinned", "unchanged"].includes(row.status),
-    );
+    // A filtered query answers a question about one package; hiding pinned or
+    // current rows would turn that answer into a misleading "up to date".
+    const visible = options.focus
+      ? rows
+      : rows.filter(
+          (row) => !["current", "pinned", "unchanged"].includes(row.status),
+        );
     if (!visible.length) return "All packages are up to date.";
     const counts = new Map<string, number>();
     for (const row of visible)
@@ -182,7 +186,7 @@ export function updateTable(
           : (row.version ?? row.current ?? "-");
       const reason = row.error ?? row.reason;
       return cleanText(
-        `${row.package} (${version}): ${row.status}${reason && !["current", "pinned", "unchanged"].includes(row.status) ? " - " + reason : ""}`,
+        `${row.package} (${version}): ${row.status}${reason && (options.focus || !["current", "pinned", "unchanged"].includes(row.status)) ? " - " + reason : ""}`,
       );
     });
     const summary =

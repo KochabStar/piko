@@ -465,3 +465,68 @@ test("PATH aria2 is optional and absence retains the built-in downloader", async
     server.stop(true);
   }
 });
+
+test("built-in downloader resumes a dropped artifact instead of restarting it", async () => {
+  const root = join(work, "resume"),
+    saved = process.env.PATH,
+    savedPath = process.env.Path,
+    bytes = crypto.getRandomValues(new Uint8Array(256 * 1024)),
+    ranges: string[] = [];
+  let requests = 0;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    idleTimeout: 0,
+    async fetch(request) {
+      requests++;
+      const range = request.headers.get("range") ?? "";
+      ranges.push(range);
+      const start = range ? Number(/^bytes=(\d+)-$/.exec(range)![1]) : 0;
+      if (requests === 1) {
+        // Promise the whole entity, deliver part of it, then drop the link.
+        const stream = new ReadableStream({
+          async start(controller) {
+            controller.enqueue(bytes.subarray(0, 64 * 1024));
+            await Bun.sleep(100);
+            controller.error(new Error("connection reset"));
+          },
+        });
+        return new Response(stream, {
+          headers: { "Content-Length": String(bytes.length) },
+        });
+      }
+      return new Response(bytes.subarray(start), {
+        status: range ? 206 : 200,
+        headers: {
+          "Content-Length": String(bytes.length - start),
+          ...(range
+            ? {
+                "Content-Range": `bytes ${start}-${bytes.length - 1}/${bytes.length}`,
+              }
+            : {}),
+        },
+      });
+    },
+  });
+  try {
+    process.env.PATH = "";
+    delete process.env.Path;
+    expect(await findAria2(root, emptyState())).toBeUndefined();
+    expect(
+      sha256(
+        await downloadArtifact(root, `http://127.0.0.1:${server.port}/file`),
+      ),
+    ).toBe(sha256(bytes));
+    expect(requests).toBe(2);
+    expect(ranges[0]).toBe("bytes=0-");
+    // The retry asked only for the bytes the first attempt could not save.
+    expect(ranges[1]).toMatch(/^bytes=[1-9]\d*-$/);
+    expect(await readdir(join(root, "staging"))).toEqual([]);
+  } finally {
+    if (saved === undefined) delete process.env.PATH;
+    else process.env.PATH = saved;
+    if (savedPath === undefined) delete process.env.Path;
+    else process.env.Path = savedPath;
+    server.stop(true);
+  }
+}, 30000);

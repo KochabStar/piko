@@ -10,6 +10,7 @@ import {
   persistentExecutable,
 } from "../src/execution.ts";
 import { sha256 } from "../src/util.ts";
+import { nativeRequest } from "../src/windows-effects.ts";
 import { normalizeManifest } from "../src/catalog.ts";
 import { WindowsEffects } from "../src/windows-effects.ts";
 import type { Manifest } from "../src/types.ts";
@@ -312,3 +313,136 @@ test("execution declarations reject mutable scripts, missing persistent outputs 
       ),
     ).toThrow();
 });
+
+test("javascript integrations run in-process with declared args and fail closed", async () => {
+  const p = new Packages(join(work, crypto.randomUUID())),
+    name = "jsexec-" + crypto.randomUUID().slice(0, 8);
+  const script = `import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
+export default async function (ctx) {
+  const [action, output] = ctx.args;
+  if (action === "install") {
+    mkdirSync(dirname(output), { recursive: true });
+    writeFileSync(output, "generated-by-js;" + ctx.env.PIKO_HOME);
+  } else if (action === "remove") {
+    rmSync(output);
+  } else if (action === "fail") {
+    throw new Error("js integration refused");
+  }
+}
+`;
+  const m = {
+    schemaVersion: 1,
+    name,
+    version: "1.0.0",
+    platforms: {
+      "windows-x64": {
+        url: `http://127.0.0.1:${server.port}/file`,
+        sha256: sha256(payload),
+        format: "file",
+        file: "payload.ps1",
+        bin: {},
+        persist: ["data", ".piko-system"],
+        configFiles: { "integration.js": script },
+        bootstrap: {
+          kind: "javascript",
+          path: "integration.js",
+          args: ["install", "{persist}/data/generated.txt"],
+          outputs: ["data/generated.txt"],
+        },
+      },
+    },
+  };
+  manifests.set(name, m);
+  await p.addSource("main", `http://127.0.0.1:${server.port}/`);
+  const install = await p.install("main/" + name + "@1.0.0");
+  const spec = "main/" + name,
+    output = join(
+      p.root,
+      "persist",
+      persistentFolder(install, install.key),
+      "data/generated.txt",
+    );
+  const preview = await inspectExecution(p.store, spec);
+  expect(preview.kind).toBe("javascript");
+  expect(preview.script).toContain("export default async function");
+  expect(preview.args[1].endsWith("data/generated.txt")).toBe(true);
+  await expect(
+    runExecution(p.store, spec, { confirmed: true }),
+  ).rejects.toThrow("binding");
+  // The rejected attempt advanced the state revision; preview again.
+  const approved = await inspectExecution(p.store, spec);
+  await runExecution(p.store, spec, {
+    confirmed: true,
+    binding: approved.binding,
+  });
+  expect(await readFile(output, "utf8")).toContain("generated-by-js;");
+  expect((await p.store.read()).bootstraps?.[install.id]?.status).toBe(
+    "completed",
+  );
+  // A throwing module marks the receipt failed and surfaces its reason.
+  await writeFile(
+    join(p.root, install.dir, "integration.js"),
+    "export default async function () { throw new Error('js integration refused'); }\n",
+  );
+  const failed = await inspectExecution(p.store, spec);
+  await expect(
+    runExecution(p.store, spec, {
+      confirmed: true,
+      binding: failed.binding,
+    }),
+  ).rejects.toThrow("js integration refused");
+  expect((await p.store.read()).bootstraps?.[install.id]?.status).toBe(
+    "failed",
+  );
+}, 30000);
+
+test("javascript admin declarations preview like PowerShell and still require elevation", async () => {
+  const p = new Packages(join(work, crypto.randomUUID())),
+    name = "jsadmin-" + crypto.randomUUID().slice(0, 8);
+  const m = {
+    schemaVersion: 1,
+    name,
+    version: "1.0.0",
+    platforms: {
+      "windows-x64": {
+        url: `http://127.0.0.1:${server.port}/file`,
+        sha256: sha256(payload),
+        format: "file",
+        file: "payload.ps1",
+        bin: {},
+        persist: [".piko-system"],
+        configFiles: {
+          "service.js": "export default async function () {}\n",
+        },
+        admin: {
+          install: {
+            kind: "javascript",
+            path: "service.js",
+            args: ["install", "{root}"],
+          },
+          remove: { kind: "javascript", path: "service.js", args: ["remove"] },
+        },
+      },
+    },
+  };
+  manifests.set(name, m);
+  await p.addSource("main", `http://127.0.0.1:${server.port}/`);
+  await p.install("main/" + name + "@1.0.0");
+  const spec = "main/" + name,
+    preview = await inspectExecution(p.store, spec, true);
+  expect(preview.action).toBe("install-system");
+  expect(preview.kind).toBe("javascript");
+  expect(preview.script).toContain("export default async function");
+  expect(preview.warning).toContain("ADMINISTRATOR");
+  const remove = await inspectExecution(p.store, spec, true, true);
+  expect(remove.action).toBe("remove-system");
+  if (!(await nativeRequest({ op: "elevated" })))
+    await expect(
+      runExecution(p.store, spec, {
+        admin: true,
+        confirmed: true,
+        binding: preview.binding,
+      }),
+    ).rejects.toThrow("elevated terminal");
+}, 30000);

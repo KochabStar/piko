@@ -31,6 +31,17 @@ function keys(
 // Only declared download/path fields are interpolated. Configuration, shell,
 // environment, bootstrap/admin code and persistence declarations are literals.
 // {root}, {persist}, {app} and unrelated application placeholders are untouched.
+// {upstream} is the version without its repack marker: the -piko.N suffix
+// or a trailing fourth-component revision (5.13.1.1 -> 5.13.1). Publisher
+// tags (GitHub v{upstream} releases) never contain the repack revision;
+// recipes for genuinely four-part upstream versions keep using {version}.
+function upstreamOf(version: string): string {
+  const base = version.replace(/-piko\.\d+$/, "");
+  const parts = base.split(".");
+  return parts.length > 3 && /^\d+(?:\.\d+)+$/.test(base)
+    ? parts.slice(0, -1).join(".")
+    : base;
+}
 function transform(
   manifest: Json,
   version: string,
@@ -38,12 +49,20 @@ function transform(
   encode: boolean,
 ) {
   const m = structuredClone(manifest);
-  const path = (value: any) =>
-    typeof value === "string"
-      ? value
-          .split(encode ? version : "{version}")
-          .join(encode ? "{version}" : version)
-      : value;
+  const upstream = upstreamOf(version);
+  const path = (value: any) => {
+    if (typeof value !== "string") return value;
+    if (encode) {
+      let out = value.split(version).join("{version}");
+      if (upstream !== version) out = out.split(upstream).join("{upstream}");
+      return out;
+    }
+    return value
+      .split("{version}")
+      .join(version)
+      .split("{upstream}")
+      .join(upstream);
+  };
   m.version = encode ? "{version}" : version;
   const p = m.platforms?.["windows-x64"];
   requireThat(object(p), "Template is missing Windows x64 distribution");
