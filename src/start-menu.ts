@@ -81,9 +81,12 @@ async function shortcutBytes(
     // them without rewriting the .lnk files. An unselected newest install
     // owns its launchers while no junction exists, so it keeps pointing at
     // the version directory until a use switches the target shape.
-    const target = viaCurrent
-      ? join(root, "apps", appFolder(install), "current", entry.path)
-      : live;
+    // Required service packages keep real version paths: some vendors reject
+    // junctions and require the GUI and service to share a physical directory.
+    const target =
+      viaCurrent && !install.admin?.required
+        ? join(root, "apps", appFolder(install), "current", entry.path)
+        : live;
     const args = (entry.args ?? [])
       .map((a) => quoteArgument(integrationText(root, install, a)))
       .join(" ");

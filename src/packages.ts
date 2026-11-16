@@ -232,6 +232,16 @@ export class Packages {
       this.effectsBackend,
     );
     if (
+      install.admin?.required &&
+      (state.admin?.[id]?.action !== "install" ||
+        state.admin[id]?.status !== "completed")
+    )
+      fail(
+        state.defaults[key] && state.defaults[key]?.id !== id
+          ? `Required system integration must migrate before switching; preview piko system ${install.source.alias}/${install.name}@${install.version} --upgrade --dry-run`
+          : `Required system integration is not ready; preview piko system ${install.source.alias}/${install.name}@${install.version} --dry-run and approve it in an elevated terminal before selecting this version`,
+      );
+    if (
       Object.values(state.admin ?? {}).some(
         (r) =>
           state.installs[r.id]?.key === key &&
@@ -304,6 +314,7 @@ export class Packages {
       noCommands?: boolean;
       expectedRevision?: number;
       installLatest?: boolean;
+      retainRequest?: boolean;
     } = {},
   ): Promise<void> {
     let installedLatest: Install | undefined;
@@ -410,7 +421,9 @@ export class Packages {
         state,
         match.key,
         target.id,
-        request,
+        options.retainRequest
+          ? (state.defaults[match.key]?.request ?? request)
+          : request,
         options.noCommands,
       );
     });
@@ -1807,6 +1820,13 @@ export class Packages {
           // of every other package: defer it with the reason instead of
           // failing the whole plan. Removal never proceeds past these checks.
           try {
+            if (
+              (i.admin?.required &&
+                (state.admin?.[i.id]?.action !== "remove" ||
+                  state.admin[i.id]?.status !== "completed")) ||
+              state.admin?.[i.id]?.action === "install"
+            )
+              fail(`System integration must be removed first: piko system ${i.source.alias}/${i.name}@${i.version} --remove --dry-run`);
             await noLinks(path);
             await noLinks(join(path, ".piko-install.json"));
             if (
@@ -1945,6 +1965,12 @@ export class Packages {
           "Bootstrap may be interrupted or running; explicitly retry/inspect it before uninstall",
         );
       if (
+        installation.admin?.required &&
+        (state.admin?.[installation.id]?.action !== "remove" ||
+          state.admin[installation.id]?.status !== "completed")
+      )
+        fail(`Required system integration must be removed before uninstall; preview piko system ${installation.source.alias}/${installation.name}@${installation.version} --remove --dry-run and approve the removal in an elevated terminal`);
+      if (
         state.desktop?.[installation.key]?.id === installation.id ||
         state.admin?.[installation.id]?.action === "install"
       )
@@ -1962,7 +1988,12 @@ export class Packages {
         // remaining install (as use <package>@<version> would pin it); the
         // no-default state dead-ends piko persist <package> --remove.
         const next = Object.values(state.installs)
-          .filter((i) => i.key === installation.key && i.id !== installation.id)
+          .filter((i) =>
+            i.key === installation.key && i.id !== installation.id &&
+            (!i.admin?.required ||
+              (state.admin?.[i.id]?.action === "install" &&
+                state.admin[i.id]?.status === "completed")),
+          )
           .sort((a, b) =>
             semver.valid(a.version) && semver.valid(b.version)
               ? semver.rcompare(a.version, b.version)

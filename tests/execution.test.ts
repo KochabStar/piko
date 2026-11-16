@@ -11,6 +11,8 @@ import {
 } from "../src/execution.ts";
 import { sha256 } from "../src/util.ts";
 import { normalizeManifest } from "../src/catalog.ts";
+import { WindowsEffects } from "../src/windows-effects.ts";
+import type { Manifest } from "../src/types.ts";
 import {
   inspectSystemUpgrade,
   applySystemUpgrade,
@@ -177,6 +179,102 @@ test("system upgrade binds old removal and new installation in a single inert pr
   ).rejects.toThrow("changed");
   expect(await p.store.read()).toEqual(before);
 });
+
+class ServiceEffects extends WindowsEffects {
+  allowAdmin = true;
+  override async elevated() { return this.allowAdmin; }
+}
+async function serviceFixture() {
+  const root = join(work, crypto.randomUUID());
+  const effects = new ServiceEffects(join(root, "external"));
+  const p = new Packages(root, effects);
+  const name = "service-" + crypto.randomUUID().slice(0, 8);
+  const script = `param([string]$Action,[string]$Data,[string]$Version)
+$ErrorActionPreference='Stop'
+$null=[IO.Directory]::CreateDirectory($Data)
+$s=Get-Content -LiteralPath (Join-Path $env:PIKO_HOME 'apps/piko/state.json') -Raw -Encoding UTF8|ConvertFrom-Json
+$choice=@($s.defaults.psobject.Properties|Select-Object -First 1)
+$selected=if($choice.Count){$s.installs.($choice[0].Value.id).version}else{'none'}
+[IO.File]::AppendAllText((Join-Path $Data 'events'),($Action+':'+$Version+':'+$selected+[Environment]::NewLine))
+if(Test-Path -LiteralPath (Join-Path $Data ('fail-'+$Action+'-'+$Version))){throw 'injected service failure'}
+`;
+  const action = (verb: string) => ({
+    kind: "powershell" as const, path: "service.ps1",
+    args: [verb, "{persist}/data", "{version}"],
+  });
+  const manifest: Manifest = {
+    schemaVersion: 1, name, version: "1.0.0",
+    platforms: { "windows-x64": {
+      url: `http://127.0.0.1:${server.port}/file`, sha256: sha256(payload),
+      format: "file", file: "bootstrap.ps1", bin: {}, persist: ["data"],
+      configFiles: { "service.ps1": script },
+      admin: { required: true, install: action("install"), remove: action("remove") },
+    } },
+  };
+  manifests.set(name, manifest);
+  await p.addSource("main", `http://127.0.0.1:${server.port}/`);
+  const spec = "main/" + name;
+  const install = await p.install(spec + "@1.0.0");
+  const data = join(root, "persist", persistentFolder(install, install.key), "data");
+  const approve = async (version: string, remove = false) => {
+    const target = spec + "@" + version;
+    const plan = await inspectExecution(p.store, target, true, remove);
+    return runExecution(p.store, target, { admin: true, remove, confirmed: true, binding: plan.binding });
+  };
+  return { p, effects, manifest, install, spec, data, approve };
+}
+test("required services need successful dedicated approval and removal before uninstall, while data survives reinstall", async () => {
+  const { p, effects, install, spec, data, approve } = await serviceFixture();
+  await expect(p.use(spec + "@latest")).rejects.toThrow("Required system integration");
+  await expect(p.uninstall(spec)).rejects.toThrow("system");
+  effects.allowAdmin = false;
+  await expect(approve("1.0.0")).rejects.toThrow("elevated terminal");
+  expect((await p.store.read()).admin).toBeUndefined();
+  effects.allowAdmin = true;
+  await writeFile(join(data, "fail-install-1.0.0"), "fail");
+  await expect(approve("1.0.0")).rejects.toThrow("Approved execution failed");
+  await expect(p.use(spec + "@latest")).rejects.toThrow("Required system integration");
+  await rm(join(data, "fail-install-1.0.0"));
+  await approve("1.0.0");
+  await p.use(spec + "@latest");
+  await writeFile(join(data, "settings"), "user data");
+  await expect(p.uninstall(spec)).rejects.toThrow("system");
+  await approve("1.0.0", true);
+  await p.uninstall(spec);
+  expect(await readFile(join(data, "settings"), "utf8")).toBe("user data");
+  const reinstalled = await p.install(spec + "@1.0.0");
+  expect(reinstalled.id).toBe(install.id);
+  await expect(p.use(spec + "@latest")).rejects.toThrow("Required system integration");
+  await approve("1.0.0");
+  await p.use(spec + "@latest");
+  expect((await p.store.read()).defaults[install.key]?.id).toBe(install.id);
+  expect(await readFile(join(data, "settings"), "utf8")).toBe("user data");
+}, 30000);
+test("failed service upgrade keeps the old selection and explicit retry selects only after success without pinning latest", async () => {
+  const { p, manifest, install, spec, data, approve } = await serviceFixture();
+  await approve("1.0.0");
+  await p.use(spec + "@latest");
+  manifest.version = "2.0.0";
+  const target = await p.install(spec + "@2.0.0");
+  await expect(p.use(spec + "@2.0.0")).rejects.toThrow("--upgrade");
+  await writeFile(join(data, "fail-install-2.0.0"), "fail");
+  const preview = await inspectSystemUpgrade(p, spec + "@2.0.0");
+  await expect(applySystemUpgrade(p, spec + "@2.0.0", preview.binding)).rejects.toThrow("Approved execution failed");
+  let state = await p.store.read();
+  expect(state.defaults[install.key]?.id).toBe(install.id);
+  expect(state.admin?.[target.id]?.status).toBe("failed");
+  expect(await readFile(join(data, "events"), "utf8")).toContain("install:2.0.0:1.0.0");
+  await rm(join(data, "fail-install-2.0.0"));
+  await approve("2.0.0");
+  const before = await readFile(join(data, "events"), "utf8");
+  const retry = await inspectSystemUpgrade(p, spec + "@2.0.0");
+  await applySystemUpgrade(p, spec + "@2.0.0", retry.binding);
+  state = await p.store.read();
+  expect(state.defaults[install.key]).toMatchObject({ id: target.id, request: "latest" });
+  expect(await readFile(join(data, "events"), "utf8")).toBe(before);
+  await p.uninstall(spec + "@1.0.0");
+  expect((await p.store.read()).installs[install.id]).toBeUndefined();
+}, 30000);
 
 test("execution declarations reject mutable scripts, missing persistent outputs and shell-string execution", async () => {
   const { m } = await fixture();

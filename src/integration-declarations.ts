@@ -66,9 +66,12 @@ export function validateBootstrap(
 export function validateAdmin(
   value: unknown,
 ): asserts value is AdminDeclaration {
-  fields(value, ["install", "remove"]);
-  validateExec((value as AdminDeclaration).install);
-  validateExec((value as AdminDeclaration).remove);
+  fields(value, ["install", "remove", "required"]);
+  const v = value as AdminDeclaration;
+  if (v.required !== undefined && typeof v.required !== "boolean")
+    fail("Invalid required integration flag");
+  validateExec(v.install);
+  validateExec(v.remove);
 }
 export function validateDesktop(
   value: unknown,

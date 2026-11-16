@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { inspectExecution, runExecution } from "./execution.ts";
 import { installedForIntegration } from "./desktop.ts";
-import { nativeRequest } from "./windows-effects.ts";
+import { WindowsEffects } from "./windows-effects.ts";
 import { atomicJson, fail, sha256 } from "./util.ts";
 import type { Packages } from "./packages.ts";
 
@@ -19,14 +19,20 @@ export async function inspectSystemUpgrade(packages: Packages, spec: string) {
     fail(
       "Previous system action is running/failed; inspect and reconcile it explicitly before upgrade",
     );
-  if (state.admin?.[target.id]?.action === "install")
+  if (
+    state.admin?.[target.id]?.action === "install" &&
+    state.admin[target.id]?.status !== "completed"
+  )
     fail(
-      "Target already has an active or uncertain system action; reconcile it explicitly",
+      "Target system installation failed or was interrupted; preview and retry piko system <target-exact-version> before upgrading",
     );
   const oldSpec =
     previous.source.alias + "/" + previous.name + "@" + previous.version;
+  const targetReady = state.admin?.[target.id]?.action === "install" &&
+    state.admin[target.id]?.status === "completed";
   const remove =
-    active?.action === "install"
+    !targetReady && (active?.action === "install" ||
+      (previous.admin?.required && active?.action !== "remove"))
       ? await inspectExecution(packages.store, oldSpec, true, true)
       : null;
   const install = await inspectExecution(packages.store, spec, true);
@@ -36,6 +42,7 @@ export async function inspectSystemUpgrade(packages: Packages, spec: string) {
     spec,
     previous: previous.id,
     target: target.id,
+    targetReady,
     request: selection.request,
     remove,
     install,
@@ -44,7 +51,7 @@ export async function inspectSystemUpgrade(packages: Packages, spec: string) {
     ...data,
     binding: sha256(JSON.stringify(data)),
     warning:
-      "One approval covers the displayed old removal and new installation. Run from an elevated terminal. Steps are journaled, not transactional; interrupted/failed scripts are never replayed by recover. Old program files/data are retained.",
+      "One approval covers the displayed old removal and new installation. Run from an elevated terminal. Steps are journaled, not transactional; interrupted/failed scripts are never replayed by recover. The candidate is selected only after its system installation succeeds, preserving the saved version request. Old program files/data are retained.",
   };
 }
 
@@ -58,7 +65,7 @@ export async function applySystemUpgrade(
     fail(
       "System upgrade changed; preview again and approve the combined --binding",
     );
-  if (!(await nativeRequest({ op: "elevated" })))
+  if (!(await (packages.effectsBackend ?? new WindowsEffects()).elevated()))
     fail("System upgrade requires an explicitly elevated terminal");
   const journal = join(
     packages.root,
@@ -93,18 +100,27 @@ export async function applySystemUpgrade(
         JSON.stringify([plan.install.args, plan.install.env])
     )
       fail("Candidate system code changed after approval");
+    if (!plan.targetReady) {
+      phase = "installing-new";
+      await atomicJson(journal, { ...plan, phase });
+      await runExecution(packages.store, spec, {
+        confirmed: true,
+        binding: candidate.binding,
+        admin: true,
+      });
+    }
+    const ready = await packages.store.read();
+    const selection = ready.defaults[ready.installs[plan.target]!.key];
+    if (selection?.id !== plan.previous || selection.request !== plan.request)
+      fail("Default changed during system installation; inspect the journal before selecting the candidate");
+    if (ready.admin?.[plan.target]?.action !== "install" ||
+        ready.admin[plan.target]?.status !== "completed")
+      fail("Candidate system integration is not ready for selection");
     phase = "selecting-new";
     await atomicJson(journal, { ...plan, phase });
-    await packages.use(spec, { expectedRevision: current.revision });
-    const next = await inspectExecution(packages.store, spec, true);
-    if (next.contentHash !== plan.install.contentHash)
-      fail("Candidate content changed before privileged execution");
-    phase = "installing-new";
-    await atomicJson(journal, { ...plan, phase });
-    await runExecution(packages.store, spec, {
-      confirmed: true,
-      binding: next.binding,
-      admin: true,
+    await packages.use(spec, {
+      expectedRevision: ready.revision,
+      retainRequest: true,
     });
     phase = "completed";
     await atomicJson(journal, { ...plan, phase });

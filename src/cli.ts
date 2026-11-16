@@ -75,6 +75,7 @@ Commands:
   piko command <operation>     Manage command ownership and aliases
   piko bootstrap <package>     Run an approved bootstrap command
   piko system <package>        Manage system-level integrations
+  piko system <package> --remove  Revoke a package-owned system integration before uninstalling
   piko rust <operation>        Manage Rust toolchains
   piko export [file]           Export package inventory
   piko import <file>           Restore package inventory
@@ -218,7 +219,7 @@ Review and explicitly approve a package bootstrap operation. Approved code runs 
   piko system <package>@<installed-version> --upgrade --dry-run
   piko system <package>@<installed-version> --upgrade --approve-admin --binding <hash>
 
-Review administrative integration changes before approving them.
+Review administrative integration changes before approving them. Packages marked as requiring system integration must be approved before use; Piko never performs this step implicitly. Revoke it with system <package> --remove before uninstalling.
 `,
   rust: `Usage:
   piko rust list
@@ -1113,11 +1114,14 @@ async function main(): Promise<number> {
                   verified: i.verified,
                   path: join(root, i.dir),
                   defaultUnchanged: true,
+                  ...(i.admin?.required
+                    ? { systemIntegrationRequired: true, next: `piko system ${i.source.alias}/${i.name}@${i.version} --dry-run` }
+                    : {}),
                 },
                 null,
                 2,
               )
-            : `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Next: piko use ${i.source.alias}/${i.name}@${i.version}`,
+            : `Installed ${i.source.alias}/${i.name}@${i.version}\nDefault unchanged. Next: ${i.admin?.required ? `piko system ${i.source.alias}/${i.name}@${i.version} --dry-run (administrator approval required before use)` : `piko use ${i.source.alias}/${i.name}@${i.version}`}`,
         );
         break;
       }

@@ -13,7 +13,7 @@ import {
 } from "./integration-declarations.ts";
 import { checkPersistentFileMappings } from "./persistence.ts";
 import { fail, noLinks, sha256 } from "./util.ts";
-import { nativeRequest } from "./windows-effects.ts";
+import { WindowsEffects } from "./windows-effects.ts";
 import { powershellExecutable } from "./windows.ts";
 import type { Store } from "./store.ts";
 import type { ExecDeclaration, Install, State } from "./types.ts";
@@ -174,7 +174,7 @@ export async function runExecution(
       fail(
         "Execution requires dedicated approval and unchanged preview --binding",
       );
-    if (options.admin && !(await nativeRequest({ op: "elevated" })))
+    if (options.admin && !(await (store.effectsBackend ?? new WindowsEffects()).elevated()))
       fail(
         "Administrator integration requires an explicitly elevated terminal; no automatic UAC launch",
       );
@@ -188,8 +188,20 @@ export async function runExecution(
       status: "running" as const,
     };
     if (options.admin) {
-      if (options.remove && state.admin?.[receiptId]?.action !== "install")
+      if (
+        options.remove &&
+        state.admin?.[receiptId]?.action !== "install" &&
+        !plan.install.admin?.required
+      )
         fail("No recorded active system integration to remove");
+      if (
+        !options.remove &&
+        Object.values(state.admin ?? {}).some(
+          (r) => r.id !== receiptId && r.action === "install" &&
+            state.installs[r.id]?.key === plan.install.key,
+        )
+      )
+        fail("Another version owns system integration; preview piko system <target-exact-version> --upgrade");
       state.admin ??= {};
       state.admin[receiptId] = { ...receipt, id: receiptId, action: "install" };
     } else {
@@ -202,7 +214,7 @@ export async function runExecution(
   await store.mutate(async (state) => {
     const install =
       state.installs[receiptId] ?? fail("Execution installation disappeared");
-    if (options.admin && !(await nativeRequest({ op: "elevated" })))
+    if (options.admin && !(await (store.effectsBackend ?? new WindowsEffects()).elevated()))
       fail("Administrator status changed before execution");
     const receipt = options.admin
       ? state.admin?.[receiptId]

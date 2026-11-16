@@ -341,6 +341,25 @@ test("selection journal repairs partial shortcut writes on either side of state 
     await rm(p.store.journalPath);
   }
 });
+test("required service launchers stay in the real version directory after selection and reset", async () => {
+  const { p, name, label, path } = await fixture();
+  const m = manifest(name, "1", label);
+  const action = { kind: "powershell", path: "service.ps1", args: [] };
+  Object.assign(m.platforms["windows-x64"], {
+    configFiles: { "service.ps1": "throw 'fixture must not execute'\n" },
+    admin: { required: true, install: action, remove: action },
+  });
+  const i = await p.install(`test/${name}@1`);
+  await expect(p.use(`test/${name}@1`)).rejects.toThrow("Required system integration");
+  await p.store.mutate(async (s) => {
+    s.admin = { [i.id]: { id: i.id, action: "install", status: "completed", binding: "a".repeat(64), at: new Date().toISOString() } };
+  });
+  await p.use(`test/${name}@1`);
+  const expected = join(p.root, i.dir, "gui.exe");
+  expect(JSON.parse(await readFile(path, "utf8")).target).toBe(expected);
+  await resetPackages(p, `test/${name}`);
+  expect(JSON.parse(await readFile(path, "utf8")).target).toBe(expected);
+});
 test("partial failure rolls back every already-written shortcut, without enabling registry effects", async () => {
   const { p, backend, name, label, path } = await fixture();
   manifest(name, "1", label, true);

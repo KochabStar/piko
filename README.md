@@ -611,6 +611,8 @@ rustup 配方使用独立 CARGO_HOME／RUSTUP_HOME、`--no-modify-path --default
 
 平台项 `admin` 必须同时提供 `install`／`remove`，两者使用与 bootstrap 相同的可执行声明。服务、驱动或 COM 扩展需要源提供明确配方，不把整个 Scoop 脚本直接导入。
 
+依赖后台服务才能使用的软件可声明 `admin.required: true`：`install` 只准备文件并显示管理员审批步骤，`use` 和命令启动必须已有成功的系统集成记录。开始菜单入口和桌面 `{root}` 使用真实版本路径，不经 `current` 联接。升级先撤销旧集成、安装新集成，全部成功后才切换默认版本，并保留原来的 `latest`／版本请求；失败保留旧目录、阶段日志和可重新审批的失败记录，不自动重放脚本。卸载或清理版本前必须成功执行该版本的 `system --remove`（即使服务由应用自行注册、没有旧审批记录）；该步骤由配方安全识别归属、保留数据并清理后台服务。普通卸载不会假装已完成需要管理员权限的操作。
+
 ```powershell
 piko system main/flclash --dry-run
 # 用户自行打开提升权限的终端，并确认使用同一个 PIKO_HOME

@@ -162,6 +162,9 @@ export function equalValue(a: EffectValue, b: EffectValue): boolean {
 export class WindowsEffects {
   // Test-only roots are supplied by in-process tests, never CLI/environment flags.
   constructor(readonly testRoot?: string) {}
+  async elevated(): Promise<boolean> {
+    return await nativeRequest({ op: "elevated" });
+  }
   async fileUsers(files: string[]): Promise<{ pid: number; name: string }[]> {
     if (!files.length || this.testRoot) return [];
     if (files.length > 4096) fail("Too many executable images to inspect");

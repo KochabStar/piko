@@ -165,7 +165,7 @@ export function integrationText(
 ) {
   return value.replace(/\{(root|persist|version)\}/g, (_, token) =>
     token === "root"
-      ? stable
+      ? stable && !install.admin?.required
         ? join(root, "apps", appFolder(install), "current")
         : join(root, install.dir)
       : token === "persist"

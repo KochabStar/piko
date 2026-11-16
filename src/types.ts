@@ -30,6 +30,7 @@ export type ExecDeclaration = {
 };
 export type BootstrapDeclaration = ExecDeclaration & { outputs: string[] };
 export type AdminDeclaration = {
+  required?: boolean;
   install: ExecDeclaration;
   remove: ExecDeclaration;
 };

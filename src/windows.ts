@@ -104,6 +104,12 @@ export async function dispatch(
   args: string[],
 ): Promise<number> {
   const { install, bin } = resolveCommand(state, command);
+  if (
+    install.admin?.required &&
+    (state.admin?.[install.id]?.action !== "install" ||
+      state.admin[install.id]?.status !== "completed")
+  )
+    fail("Required system integration is not ready; preview and approve piko system <package> before launching it");
   if (install.depends?.length)
     await (
       await import("./dependencies.ts")
@@ -162,6 +168,7 @@ export async function dispatch(
     stdout: "inherit",
     stderr: "inherit",
     env,
+    cwd: install.admin?.required ? dirname(target) : undefined,
   });
   // Console Ctrl+C is delivered to both inherited-console processes on Windows.
   // Keep the launcher alive until its child exits; do not swallow termination.
