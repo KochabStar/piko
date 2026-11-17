@@ -164,6 +164,7 @@ test("candidate install preserves selected launcher; switch, rollback and uninst
   await p.use(`test/${name}@1`);
   const first = await readFile(path, "utf8");
   manifest(name, "2", label);
+  await p.refreshSources("test");
   const v2 = await p.install(`test/${name}@2`);
   expect(await readFile(path, "utf8")).toBe(first);
   // Selection switches only redirect the current junction; the .lnk bytes
@@ -293,6 +294,7 @@ test("same-name foreign files are skipped without failing the install, and cross
   expect(await exists(path)).toBe(false);
   const other = name + "-other";
   manifest(other, "1", label);
+  await p.refreshSources("test");
   await p.use(`test/${name}@1`);
   // A launcher name another Piko package owns stays a refusal for that package,
   // but the already installed one keeps working and no state is rewritten.
@@ -370,7 +372,7 @@ test("required service launchers stay in the real version directory after select
   await resetPackages(p, `test/${name}`);
   expect(JSON.parse(await readFile(path, "utf8")).target).toBe(expected);
 });
-test("partial failure rolls back every already-written shortcut, without enabling registry effects", async () => {
+test("partial shortcut failure rolls back the installation and explicit retry recreates owned launchers", async () => {
   const { p, backend, name, label, path } = await fixture();
   manifest(name, "1", label, true);
   backend.failName = label + " B.lnk";
@@ -378,8 +380,13 @@ test("partial failure rolls back every already-written shortcut, without enablin
     "injected shortcut failure",
   );
   expect(await exists(path)).toBe(false);
+  expect(
+    Object.values((await p.store.read()).installs).some(
+      (install) => install.name === name,
+    ),
+  ).toBe(false);
   backend.failName = "";
-  await p.store.mutate(async () => {});
+  await p.install(`test/${name}@1`);
   expect(await exists(path)).toBe(true);
   expect((await p.store.read()).desktop).toBeUndefined();
 });

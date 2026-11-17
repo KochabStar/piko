@@ -1,3 +1,30 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { migrateSourceCache } from "./source-fetch.ts";
+import {
+  validateServices,
+  validateServiceReceipt,
+} from "./service-declarations.ts";
+import {
+  assertOrdinaryWrite,
+  hasActiveOperation,
+  isRecoveryOperation,
+  recordOperationState,
+  recordOperationCommit,
+  trackOperationMove,
+  trackOperationFile,
+} from "./journal.ts";
+import {
+  synchronizeReceipts,
+  validateReceipts,
+  recoverReceiptFiles,
+  receiptFileJournal,
+  operationEffectJournal,
+} from "./receipt.ts";
+
+const mutationLease = new AsyncLocalStorage<{
+  root: string;
+  active: boolean;
+}>();
 import {
   appFolder,
   installDirectory,
@@ -63,12 +90,16 @@ import type { State, Source, Install, PersistentData } from "./types.ts";
 
 export function emptyState(): State {
   return {
-    schemaVersion: 1,
+    schemaVersion: 9,
     revision: 0,
     sources: {},
     installs: {},
     defaults: {},
     commands: {},
+    aliases: {},
+    data: {},
+    receipts: {},
+    services: {},
   };
 }
 export function sourceIdentity(
@@ -84,14 +115,17 @@ export function packageKey(source: Source, name: string): string {
 export function installId(key: string, version: string): string {
   return sha256(JSON.stringify([key, version]));
 }
-export function validateState(state: any): asserts state is State {
-  if (![1, 2, 3, 4, 5, 6, 7, 8].includes(state?.schemaVersion))
+function validateStateStructure(state: unknown): asserts state is State {
+  if (
+    !record(state) ||
+    ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(state.schemaVersion)
+  )
     fail(
       "Unsupported state schema; do not use an older Piko on this installation",
     );
   if (
     !record(state) ||
-    ![1, 2, 3, 4, 5, 6, 7, 8].includes(state.schemaVersion) ||
+    ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(state.schemaVersion) ||
     !Number.isSafeInteger(state.revision) ||
     state.revision < 0
   )
@@ -132,11 +166,51 @@ export function validateState(state: any): asserts state is State {
         !/^[a-f0-9]{40,64}$/.test(s.commit))
     )
       fail("Invalid Git source commit");
+    if (
+      s.fetchedAt !== undefined &&
+      (typeof s.fetchedAt !== "string" ||
+        !Number.isFinite(Date.parse(s.fetchedAt)))
+    )
+      fail("Invalid source fetch timestamp");
   };
   for (const [alias, s] of Object.entries(state.sources)) {
     checkSource(s);
     if ((s as Source).alias !== alias || (s as Source).type === "npm")
       fail("Source alias mismatch or invalid source type");
+  }
+  if (state.receipts !== undefined) {
+    if (!record(state.receipts)) fail("Invalid install receipt section");
+    for (const [id, receipt] of Object.entries(state.receipts)) {
+      if (
+        !record(receipt) ||
+        receipt.packageId !== id ||
+        typeof receipt.installedAt !== "string" ||
+        !Number.isFinite(Date.parse(receipt.installedAt)) ||
+        typeof receipt.version !== "string" ||
+        !state.installs[id]
+      )
+        fail("Invalid install receipt");
+    }
+  }
+  if (state.services !== undefined) {
+    if (!record(state.services)) fail("Invalid service section");
+    for (const [id, receipt] of Object.entries(state.services)) {
+      if (
+        !record(receipt) ||
+        typeof receipt.id !== "string" ||
+        receipt.id !== id ||
+        typeof receipt.name !== "string" ||
+        typeof receipt.displayName !== "string" ||
+        typeof receipt.installedAt !== "string" ||
+        !Number.isFinite(Date.parse(receipt.installedAt)) ||
+        typeof receipt.installedVersion !== "string" ||
+        typeof receipt.packageId !== "string" ||
+        !state.installs[receipt.packageId] ||
+        !["registered", "failed", "removed"].includes(receipt.status)
+      )
+        fail("Invalid service receipt");
+      validateServiceReceipt(receipt);
+    }
   }
   validateLayoutOwners(state as State);
   for (const [id, value] of Object.entries(state.installs)) {
@@ -170,6 +244,7 @@ export function validateState(state: any): asserts state is State {
       !["portable", "npm"].includes(i.kind)
     )
       fail("Invalid installation receipt in state");
+    if (i.services !== undefined) validateServices(i.services);
     for (const [name, b] of Object.entries(i.bins)) {
       commandName(name);
       if (!record(b) || !["native", "node", "powershell"].includes(b.kind))
@@ -447,6 +522,12 @@ export function validateState(state: any): asserts state is State {
     }
   }
 }
+export function validateState(state: unknown): asserts state is State {
+  validateStateStructure(state);
+  // All structural and ownership checks above completed before receipt validation.
+  const checked = state as State;
+  validateReceipts(checked);
+}
 function hasErrorCode(error: unknown, code: string): boolean {
   return (
     error !== null &&
@@ -604,6 +685,21 @@ export function upgradeState(state: State): void {
       ],
     };
   }
+  state.receipts ??= {};
+  state.services ??= {};
+  // Configured HTTP metadata is mutable; installed provenance is evidence and
+  // must continue to match its historical .piko-install.json byte for byte.
+  for (const [alias, source] of Object.entries(state.sources)) {
+    if (source.type !== "http") continue;
+    state.sources[alias] = {
+      alias: source.alias,
+      url: source.url,
+      type: "http",
+      identity: sourceIdentity("http", source.url),
+      ...(source.fetchedAt ? { fetchedAt: source.fetchedAt } : {}),
+    };
+  }
+  state.schemaVersion = 9;
 }
 export class Store {
   readonly statePath: string;
@@ -623,6 +719,20 @@ export class Store {
     this.removalPath = join(root, "operations", "removal.json");
     this.rebuildPath = join(root, "operations", "npm-rebuild.json");
     this.dataRemovalPath = join(root, "operations", "data-removal.json");
+  }
+  async withMutationLock<T>(fn: () => Promise<T>): Promise<T> {
+    const parent = mutationLease.getStore();
+    if (parent?.root === this.root && parent.active) return await fn();
+    await noLinks(this.root);
+    await mkdir(this.root, { recursive: true });
+    const lock = await acquireMutationLock(this.root);
+    const lease = { root: this.root, active: true };
+    try {
+      return await mutationLease.run(lease, fn);
+    } finally {
+      lease.active = false;
+      await rm(lock, { recursive: true, force: true });
+    }
   }
   // Launching an installed command must not depend on unrelated recovery.
   // Finishing a pending install/selection/removal/rebuild/desktop/data journal
@@ -650,7 +760,6 @@ export class Store {
     }
   }
   // Journals that a later write can finish on its own, possibly registering the
-  // command a shim was asked to launch.
   async hasPendingJournals(): Promise<boolean> {
     for (const path of [
       this.installPath,
@@ -660,11 +769,15 @@ export class Store {
       this.dataRemovalPath,
       join(this.root, "operations", "profile.json"),
       join(this.root, "operations", "desktop.json"),
+      receiptFileJournal(this.root),
+      operationEffectJournal(this.root),
     ]) {
       await noLinks(path);
       if (await exists(path)) return true;
     }
-    return false;
+    return (await import("./journal.ts"))
+      .pendingOperations(this.root)
+      .then((rows) => rows.length > 0);
   }
   async read(): Promise<State> {
     if (await exists(join(this.root, "operations", "persist.json")))
@@ -717,6 +830,8 @@ export class Store {
         fail(
           "Untracked persistent directory exists; inspect before installation",
         );
+    await trackOperationFile(this, join(this.root, "staging", operation));
+    await trackOperationMove(this, stage, join(this.root, installation.dir));
     await atomicJson(this.installPath, {
       installation,
       operation,
@@ -1041,6 +1156,9 @@ export class Store {
     await rm(this.rebuildPath);
   }
   async recoverRemoval(): Promise<void> {
+    // Keep uninstall trash reversible until the whole enclosing update/install
+    // transaction succeeds, including any later service or selection work.
+    if (hasActiveOperation(this)) return;
     if (!(await exists(this.removalPath))) return;
     await noLinks(this.removalPath);
     const entry = await json(this.removalPath),
@@ -1211,84 +1329,35 @@ export class Store {
     backend = this.effectsBackend,
     startMenuRepairKeys: string[] = [],
   ): Promise<void> {
+    if (
+      mutationLease.getStore()?.root !== this.root ||
+      !mutationLease.getStore()?.active
+    )
+      return await this.withMutationLock(() =>
+        this.commit(before, after, backend, startMenuRepairKeys),
+      );
+    await assertOrdinaryWrite(this);
+    const committed = await this.readCommitted();
+    if (JSON.stringify(committed) !== JSON.stringify(before))
+      fail("State changed before commit; refusing stale revision publication");
     after.revision = before.revision + 1;
-    const recordedSources = [
-      ...Object.values(after.sources),
-      ...Object.values(after.installs).map((i) => i.source),
-      ...Object.values(after.data ?? {}).map((d) => d.source),
-    ];
-    if (
-      after.schemaVersion < 4 &&
-      recordedSources.some((s) => s.commit !== undefined)
-    ) {
-      upgradeState(after);
-      after.schemaVersion = 4;
-    }
-    if (
-      Object.values(after.installs).some(
-        (i) =>
-          i.shell ||
-          i.persistFiles ||
-          Object.values(i.bins).some((b) => b.kind === "powershell"),
-      ) ||
-      after.profiles
-    ) {
-      upgradeState(after);
-      after.schemaVersion = Math.max(
-        after.schemaVersion,
-        5,
-      ) as State["schemaVersion"];
-    }
-    if (
-      Object.values(after.installs).some(
-        (i) =>
-          i.desktop ||
-          i.bootstrap ||
-          i.admin ||
-          Object.values(i.bins).some((b) => b.data),
-      ) ||
-      after.desktop ||
-      after.bootstraps ||
-      after.admin
-    ) {
-      upgradeState(after);
-      after.schemaVersion = 6;
-    }
-    // Never downgrade a previously committed schema, including after removal
-    // of the last installation that originally required it.
-    if (
-      Object.values(after.installs).some(
-        (i) =>
-          i.npmCompatibility ||
-          i.shell?.bash ||
-          (i.depends !== undefined && !i.shell),
-      ) ||
-      Object.values(after.profiles ?? {}).some((p) => p.shell === "bash")
-    ) {
-      upgradeState(after);
-      after.schemaVersion = 7;
-    }
-    if (
-      Object.values(after.installs).some((i) => i.layout) ||
-      Object.values(after.data ?? {}).some((i) => i.layout)
-    ) {
-      upgradeState(after);
-      after.schemaVersion = 8;
-    }
-    after.schemaVersion = Math.max(
-      before.schemaVersion,
-      after.schemaVersion,
-    ) as State["schemaVersion"];
+    upgradeState(after);
     selectedEnvironment(this.root, after);
+    const restoringEffects =
+      isRecoveryOperation(this) &&
+      (await exists(operationEffectJournal(this.root)));
     const startMenu = await planStartMenu(
       this.root,
-      before,
+      restoringEffects ? after : before,
       after,
       backend,
       startMenuRepairKeys,
     );
+    synchronizeReceipts(after);
     validateState(after);
+    await recordOperationState(this, after);
     await checkStartMenu(startMenu, backend);
+    await recordOperationCommit(this, before, after);
     if (await exists(this.journalPath)) fail("Unrecovered selection operation");
     // Source metadata does not switch executables, currents or approved Shell
     // content. Publish it atomically without creating a selection journal or
@@ -1334,39 +1403,42 @@ export class Store {
       startMenuRepairKeys?: string[];
     } = {},
   ): Promise<T> {
-    // A pending self-update journal used to block every later write until the
-    // user found the staged helper by hand. Reconcile it here instead, and keep
-    // going while its owner is gone or the swap already landed.
+    await assertOrdinaryWrite(this);
     await resumeSelfUpdate(this.root);
-    await noLinks(this.root);
-    await mkdir(this.root, { recursive: true });
-    const lock = await acquireMutationLock(this.root);
-    try {
+    return await this.withMutationLock(async () => {
+      await assertOrdinaryWrite(this);
+      const backend = options.effectsBackend ?? this.effectsBackend;
+      await recoverReceiptFiles(this.root, await this.readCommitted(), backend);
       await this.recoverRebuild();
       await this.recoverDataRemoval();
       await this.recoverRemoval();
-      await this.recover(options.effectsBackend);
+      await this.recover(backend);
       await this.recoverInstallation();
       await recoverProfile(this.root, await this.read());
-      await recoverDesktop(
-        this.root,
-        await this.read(),
-        options.effectsBackend,
-      );
+      await recoverDesktop(this.root, await this.read(), backend);
+      await recoverReceiptFiles(this.root, await this.readCommitted(), backend);
       const before = await this.read(),
         state = structuredClone(before);
+      for (const source of Object.values(state.sources))
+        if (source.type === "http") await migrateSourceCache(this.root, source);
+      upgradeState(state);
       try {
+        await recordOperationState(this, state);
         const result = await fn(state);
         await protectDependencies(this.root, before, state);
+        // Privileged helpers may have published ownership checkpoints. Keep
+        // dependency protection bound to the initial state, but publish against
+        // the latest committed revision held by this operation's lease.
+        const latest = await this.readCommitted();
         if (
           !options.skipUnchanged ||
           !!options.startMenuRepairKeys?.length ||
-          JSON.stringify(before) !== JSON.stringify(state)
+          JSON.stringify(latest) !== JSON.stringify(state)
         )
           await this.commit(
-            before,
+            latest,
             state,
-            options.effectsBackend,
+            backend,
             options.startMenuRepairKeys,
           );
         await this.recoverInstallation();
@@ -1374,10 +1446,11 @@ export class Store {
         await this.recoverRemoval();
         await this.recoverDataRemoval();
         await recoverProfile(this.root, await this.read());
-        await recoverDesktop(
+        await recoverDesktop(this.root, await this.read(), backend);
+        await recoverReceiptFiles(
           this.root,
-          await this.read(),
-          options.effectsBackend,
+          await this.readCommitted(),
+          backend,
         );
         return result;
       } catch (error) {
@@ -1385,15 +1458,14 @@ export class Store {
         await this.recoverRemoval();
         await this.recoverDataRemoval();
         await recoverProfile(this.root, await this.read());
-        await recoverDesktop(
+        await recoverDesktop(this.root, await this.read(), backend);
+        await recoverReceiptFiles(
           this.root,
-          await this.read(),
-          options.effectsBackend,
+          await this.readCommitted(),
+          backend,
         );
         throw error;
       }
-    } finally {
-      await rm(lock, { recursive: true, force: true });
-    }
+    });
   }
 }

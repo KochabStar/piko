@@ -59,7 +59,7 @@ Invoke-WebRequest https://github.com/KochabStar/piko/releases/latest/download/in
 .\install.ps1 -Sha256 <EXE_SHA256> -PikoHome D:\piko -Path
 ```
 
-自定义源支持 `-SourceName`、`-SourceUrl`、`-SourceType http|git`、`-SourceRef`；只有主动选用 Git 源时才需要已有 Git。`-Proxy` 作用于引导脚本的 Release 下载；Piko 获取软件源和包时遵循自身代理配置／环境。
+自定义 HTTP(S) 源支持 `-SourceName`、`-SourceUrl`；不再提供 `-SourceType`／`-SourceRef` 或 Git 源安装入口。`-Proxy` 作用于引导脚本的 Release 下载；Piko 获取软件源和包时遵循自身代理配置／环境。
 
 ## 安装软件
 
@@ -81,18 +81,18 @@ piko doctor
 
 ### 推荐：推送版本 tag 后自动发布
 
-`.github/workflows/verify.yml` 在普通 push／PR 时只校验并上传 Actions artifact；只有推送 `v<版本>` tag 才会在校验成功后创建 GitHub Release。当前源码版本为 `0.4.0`，首次发布可以使用 `v0.4.0`；后续先同时修改 `package.json` 和 `src/version.ts`，再使用新的 tag，不覆盖已发布版本。
+`.github/workflows/verify.yml` 在普通 push／PR 时只校验并上传 Actions artifact；只有推送 `v<版本>` tag 才会在校验成功后创建 GitHub Release。当前源码版本为 `0.4.25`；发布前同时修改 `package.json` 和 `src/version.ts`，再使用新的 tag，不覆盖已发布版本。
 
 先提交要发布的代码和工作流，确认工作区干净，再执行：
 
 ```powershell
 git status --short             # 应无输出；不要发布尚未提交的修改
 git push origin master
-git tag -a v0.4.0 -m "Piko 0.4.0"
-git push origin v0.4.0
+git tag -a v0.4.25 -m "Piko 0.4.25"
+git push origin v0.4.25
 # 查看校验／发布结果：
 gh run list --repo KochabStar/piko --workflow verify.yml --limit 5
-gh release view v0.4.0 --repo KochabStar/piko
+gh release view v0.4.25 --repo KochabStar/piko
 ```
 
 工作流会校验 tag 与两处版本声明一致，在 Windows 上重新构建并运行测试、格式／沙盒打包检查、发行包解包与隔离安装校验；全部成功后才使用受限的 `GITHUB_TOKEN` 发布以下五个附件，无需另配个人令牌：

@@ -17,6 +17,10 @@ import { exportInventory, planInventory } from "../src/inventory.ts";
 import { sha256 } from "../src/util.ts";
 import { normalizeManifest } from "../src/catalog.ts";
 import type { EffectTarget, EffectValue } from "../src/types.ts";
+import {
+  operationEffectJournal,
+  restoreOperationEffects,
+} from "../src/receipt.ts";
 
 const work = await mkdtemp(join(tmpdir(), "piko-desktop-tests-"));
 afterAll(() =>
@@ -125,15 +129,13 @@ test("desktop preview is inert; explicit approval owns resources and removal pre
     backend,
   );
   const state = await p.store.read();
-  expect(state.schemaVersion).toBe(8);
+  expect(state.schemaVersion).toBe(9);
   expect(state.desktop?.[install.key]?.id).toBe(install.id);
   const folder = await backend.folders();
   expect(
     await readFile(join(folder.startMenu, "Piko/Test App.lnk"), "utf8"),
   ).toContain("current");
-  await expect(p.uninstall(spec + "@1.0.0", true)).rejects.toThrow(
-    "Revoke desktop",
-  );
+  expect(state.receipts?.[install.id]?.desktop?.[0]?.id).toBe(install.id);
   await expect(p.unuse(spec)).rejects.toThrow("Revoke desktop");
   const remove = await inspectDesktop(p.store, spec, true, backend);
   await applyDesktop(
@@ -185,6 +187,7 @@ test("desktop upgrade refuses changed declarations and external resource drift",
   );
   const manifest = manifests.get(name);
   manifest.version = "2.0.0";
+  await p.refreshSources("main");
   await p.install(spec + "@2.0.0");
   const before = await p.store.read();
   const target = plan.effects[0]!.target;
@@ -198,6 +201,7 @@ test("desktop upgrade refuses changed declarations and external resource drift",
   manifest.version = "3.0.0";
   manifest.platforms["windows-x64"].desktop.environment.TOOL_HOME =
     "{root}/changed";
+  await p.refreshSources("main");
   await p.install(spec + "@3.0.0");
   const installed = await p.store.read();
   await expect(p.use(spec + "@3.0.0")).rejects.toThrow("declaration changed");
@@ -218,6 +222,7 @@ test("changed desktop declaration upgrades in one approval and failed writes res
   manifest.platforms["windows-x64"].desktop = {
     environment: { TOOL_VERSION: "{version}" },
   };
+  await p.refreshSources("main");
   const next = await p.install(spec + "@2.0.0");
   const before = await p.store.read(),
     registry = structuredClone(backend.registry);
@@ -384,6 +389,7 @@ test("PATH integration owns only its appended segments and preserves other packa
     m.platforms["windows-x64"].desktop = { path: ["."] };
     // New version carries the new declaration; install manifests are immutable.
     m.version = "2.0.0";
+    await item.p.refreshSources("main");
     await item.p.install(item.spec + "@2.0.0");
     await item.p.use(item.spec + "@2.0.0");
     const plan = await inspectDesktop(item.p.store, item.spec, false, backend);
@@ -446,6 +452,7 @@ test("PATH integration preserves original empty segments and trailing separators
       m = manifests.get(name);
     m.version = "2.0.0";
     m.platforms["windows-x64"].desktop = { path: ["."] };
+    await p.refreshSources("main");
     await p.install(spec + "@2.0.0");
     await p.use(spec + "@2.0.0");
     const target: EffectTarget = {
@@ -646,6 +653,7 @@ test("PATH removal recovery cannot claim unrelated user segments in its ownershi
     m = manifests.get(name);
   m.platforms["windows-x64"].desktop = { path: ["."] };
   m.version = "2.0.0";
+  await p.refreshSources("main");
   const install = await p.install(spec + "@2.0.0");
   await p.use(spec + "@2.0.0");
   const target: EffectTarget = {
@@ -745,4 +753,96 @@ test("committed desktop removal cannot forge prior ownership of an undeclared re
   committed.revision++;
   await expect(recoverDesktop(p.root, committed, backend)).rejects.toThrow();
   expect(await backend.read(target)).toEqual(effect.after);
+});
+
+test("uninstall revokes desktop ownership automatically and recovers after the installation is gone", async () => {
+  const { p, backend, spec, install } = await fixture();
+  const enabled = await inspectDesktop(p.store, spec, false, backend);
+  await applyDesktop(
+    p.store,
+    spec,
+    { confirmed: true, binding: enabled.binding },
+    backend,
+  );
+  await p.uninstall(spec);
+  const state = await p.store.read();
+  expect(state.installs[install.id]).toBeUndefined();
+  expect(state.desktop?.[install.key]).toBeUndefined();
+  expect(state.receipts?.[install.id]).toBeUndefined();
+  expect([...backend.registry.values()].every((value) => value === null)).toBe(
+    true,
+  );
+  expect(await Bun.file(desktopJournal(p.root)).exists()).toBe(false);
+});
+
+test("desktop removal journal completes from local snapshots after package files and state owner disappear", async () => {
+  const { p, backend, spec, install } = await fixture();
+  const enabled = await inspectDesktop(p.store, spec, false, backend);
+  await applyDesktop(
+    p.store,
+    spec,
+    { confirmed: true, binding: enabled.binding },
+    backend,
+  );
+  const before = await p.store.read();
+  const removal = await inspectDesktop(p.store, spec, true, backend);
+  await stageDesktopChange(
+    p.root,
+    before,
+    install.key,
+    removal.effects,
+    null,
+    backend,
+  );
+  const after = structuredClone(before);
+  after.revision++;
+  delete after.installs[install.id];
+  delete after.desktop![install.key];
+  delete after.receipts![install.id];
+  delete after.defaults[install.key];
+  for (const [command, owner] of Object.entries(after.commands))
+    if (owner === install.key) delete after.commands[command];
+  await rm(join(p.root, install.dir), { recursive: true, force: true });
+  await recoverDesktop(p.root, after, backend);
+  expect([...backend.registry.values()].every((value) => value === null)).toBe(
+    true,
+  );
+  expect(await Bun.file(desktopJournal(p.root)).exists()).toBe(false);
+});
+
+test("operation rollback restores desktop and Start Menu from exact cached target snapshots and retries idempotently", async () => {
+  const { p, backend, spec, install } = await fixture();
+  const enabled = await inspectDesktop(p.store, spec, false, backend);
+  await applyDesktop(
+    p.store,
+    spec,
+    { confirmed: true, binding: enabled.binding },
+    backend,
+  );
+  const target = await p.store.read();
+  const removal = await inspectDesktop(p.store, spec, true, backend);
+  await applyDesktop(
+    p.store,
+    spec,
+    { confirmed: true, binding: removal.binding, remove: true },
+    backend,
+  );
+  const current = await p.store.read();
+  const folder = await backend.folders();
+  const launcher = join(folder.startMenu, "Piko Apps", "Test App.lnk");
+  const withoutLauncher = structuredClone(current);
+  delete withoutLauncher.startMenu![install.key];
+  delete withoutLauncher.receipts![install.id]!.startMenu;
+  await rm(launcher);
+  await restoreOperationEffects(p.store, withoutLauncher, target);
+  await restoreOperationEffects(p.store, withoutLauncher, target);
+  expect(await readFile(launcher, "utf8")).toContain("current");
+  expect(
+    await backend.read({
+      kind: "registry",
+      key: "HKCU\\Environment",
+      name: "TOOL_HOME",
+    }),
+  ).toEqual(target.desktop![install.key]!.effects[0]!.after);
+  expect(await Bun.file(operationEffectJournal(p.root)).exists()).toBe(true);
 });

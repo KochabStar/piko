@@ -33,6 +33,7 @@ export const innoRelease = {
 export async function ensureInnoUnpacker(
   root: string,
   state: State,
+  offline = false,
 ): Promise<string> {
   const installed = await installedHelper(root, state, "innounp", "innounp");
   if (installed) return installed;
@@ -65,6 +66,8 @@ export async function ensureInnoUnpacker(
         innoRelease.sha256,
         false,
         state,
+        undefined,
+        offline,
       ),
       archive = join(stage, "innounp.zip"),
       payload = join(stage, "payload");
@@ -93,6 +96,7 @@ export async function ensureInnoUnpacker(
 export async function ensureSevenZip(
   root: string,
   state: State,
+  offline = false,
 ): Promise<string> {
   const installed = await installedHelper(root, state, "7zip", "7z");
   if (installed) return installed;
@@ -127,6 +131,8 @@ export async function ensureSevenZip(
         sevenZipRelease.bootstrap.sha256,
         false,
         state,
+        undefined,
+        offline,
       ),
       archive = await artifactBytes(
         root,
@@ -134,6 +140,8 @@ export async function ensureSevenZip(
         sevenZipRelease.archive.sha256,
         false,
         state,
+        undefined,
+        offline,
       ),
       bootstrapPath = join(stage, "7zr.exe"),
       archivePath = join(stage, "extra.7z");

@@ -1,4 +1,3 @@
-import { persistentFolder } from "../src/layout.ts";
 import { afterAll, expect, test } from "bun:test";
 import {
   mkdir,
@@ -13,12 +12,20 @@ import { tmpdir } from "node:os";
 import { npmTreeHash } from "../src/scripts.ts";
 import { orphanPlan, quarantineOrphans } from "../src/maintenance.ts";
 import { Packages } from "../src/packages.ts";
-import { Store, packageKey, installId, validateState } from "../src/store.ts";
+import { Store, packageKey, installId, sourceIdentity } from "../src/store.ts";
 import { makeSource, normalizeManifest } from "../src/catalog.ts";
+import {
+  ensureSourceIndex,
+  migrateSourceCache,
+  readSourceIndex,
+  refresh,
+  removeSourceCache,
+} from "../src/source-fetch.ts";
+import { validateInventory } from "../src/inventory.ts";
 import { pathDiagnostics } from "../src/windows.ts";
 import { selectedEnvironment } from "../src/environment.ts";
 import { artifactBytes, cleanCache } from "../src/cache.ts";
-import { atomicJson, capture, exists, sha256 } from "../src/util.ts";
+import { atomicJson, exists, sha256 } from "../src/util.ts";
 import type { Install } from "../src/types.ts";
 const work = await mkdtemp(join(tmpdir(), "piko-enhancements-"));
 afterAll(() =>
@@ -59,7 +66,7 @@ test("verified artifact cache reuses bytes, detects tampering and protects refer
     const url = `http://127.0.0.1:${server.port}/tool.exe`,
       hash = sha256(bytes);
     await artifactBytes(root, url, hash);
-    await artifactBytes(root, url, hash);
+    await artifactBytes(root, "https://offline.invalid/tool.exe", hash);
     expect(requests).toBe(1);
     await writeFile(join(root, "cache/artifacts", hash), "corrupted");
     await expect(artifactBytes(root, url, hash)).rejects.toThrow("checksum");
@@ -92,7 +99,7 @@ test("journaled first install rolls forward across persistence and directory pub
   for (const phase of ["before-map", "mapped", "published"]) {
     const root = join(work, phase),
       store = new Store(root),
-      source = makeSource("main", "https://example.invalid/", "http"),
+      source = makeSource("main", "https://example.invalid/"),
       key = packageKey(source, "saved"),
       id = installId(key, "1.0.0"),
       operation = crypto.randomUUID(),
@@ -207,7 +214,7 @@ test("declarative environments reject protected variables, expand per version an
     expect(() => normalizeManifest(m, "tool", "1.0.0")).toThrow("Protected");
   }
   const root = join(work, "env"),
-    source = makeSource("main", "https://example.invalid/", "http"),
+    source = makeSource("main", "https://example.invalid/"),
     key = packageKey(source, "tool"),
     id = installId(key, "1.0.0"),
     s = await new Store(root).read();
@@ -340,135 +347,135 @@ test("batch update continues after one package fails and preserves that package 
   }
 });
 
-test("Git source installs pinned committed manifests, refreshes, handles deletion and never checks out hooks", async () => {
-  const root = join(work, "git-home"),
-    repo = join(work, "git-repo"),
-    bare = join(work, "git.git");
-  await mkdir(repo, { recursive: true });
-  const artifact = Buffer.from("git source fixture");
-  await writeFile(join(work, "file.exe"), artifact);
-  const serverFile = join(work, "serve-git.cjs");
-  await writeFile(
-    serverFile,
-    `const http=require('http'),fs=require('fs'),path=require('path');const root=process.argv[2];const s=http.createServer((q,r)=>{const p=decodeURIComponent(new URL(q.url,'http://localhost').pathname);if(p.includes('..')){r.writeHead(400);return r.end();}try{const b=fs.readFileSync(path.join(root,p));r.setHeader('Content-Type','application/octet-stream');r.end(b);}catch{r.writeHead(404);r.end();}});s.listen(0,'127.0.0.1',()=>console.log(s.address().port));`,
-  );
-  const server = Bun.spawn(["node", serverFile, work], {
-    stdout: "pipe",
-    stderr: "inherit",
-    stdin: "ignore",
+test("HTTP latest caches respect freshness, explicit refresh and offline failure safety", async () => {
+  const root = join(work, "source-cache");
+  let requests = 0;
+  let latest = "1.0.0";
+  let invalid = false;
+  const index = () => ({
+    schemaVersion: 1,
+    packages: {
+      tool: {
+        latest,
+        versions: { "1.0.0": "tool.json", "2.0.0": "tool2.json" },
+      },
+    },
   });
-  const ready = await server.stdout.getReader().read();
-  const port = Number(Buffer.from(ready.value!).toString().trim());
-  if (!Number.isInteger(port)) throw new Error("Fixture server failed");
-  const url = `http://127.0.0.1:${port}/`;
-  const git = (args: string[], cwd = repo) =>
-    capture("git", args, {
-      cwd,
-      env: {
-        ...process.env,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "NUL",
-      },
-    });
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      expect(new URL(request.url).pathname).toBe("/catalog/index.json");
+      requests++;
+      return Response.json(
+        invalid ? { schemaVersion: 1, packages: { tool: {} } } : index(),
+      );
+    },
+  });
+  const url = `http://127.0.0.1:${server.port}/catalog/`;
+  const source = makeSource("main", url);
+  expect(source.identity).toBe(sourceIdentity("http", url));
   try {
-    await git(["init", "--initial-branch=main"]);
-    await git(["config", "user.email", "fixture@example.invalid"]);
-    await git(["config", "user.name", "Fixture"]);
-    const manifest = (version: string) => ({
-      schemaVersion: 1,
-      name: "tool",
-      version,
-      platforms: {
-        "windows-x64": {
-          url: url + "file.exe",
-          sha256: sha256(artifact),
-          format: "file",
-          file: "tool.exe",
-          bin: { tool: "tool.exe" },
-          persist: ["settings"],
-        },
-      },
-    });
-    await writeFile(
-      join(repo, "index.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        packages: {
-          tool: { latest: "1.0.0", versions: { "1.0.0": "tool.json" } },
-        },
-      }),
+    await ensureSourceIndex(root, source);
+    expect(requests).toBe(1);
+    expect(source.fetchedAt).toBeDefined();
+    expect((await ensureSourceIndex(root, source)).packages.tool?.latest).toBe(
+      "1.0.0",
     );
-    await writeFile(join(repo, "tool.json"), JSON.stringify(manifest("1.0.0")));
-    await git(["add", "."]);
-    await git(["commit", "-m", "fixture"]);
-    await git(["clone", "--bare", repo, bare]);
-    await git(["update-server-info"], bare);
-    const p = new Packages(root);
-    await p.addSource("git", url + "git.git", "git", "main");
-    const i = await p.install("git/tool@1.0.0");
-    expect(i.source.commit).toMatch(/^[a-f0-9]{40}$/);
-    const saved = join(
-      root,
-      "persist",
-      persistentFolder(i, i.key),
-      "settings",
-      "kept.txt",
-    );
-    await writeFile(saved, "user-data");
-    const gitState = await p.store.read();
-    expect(gitState.schemaVersion).toBe(8);
-    const legacy = structuredClone(gitState);
-    legacy.schemaVersion = 3;
-    expect(() => validateState(legacy)).toThrow("requires schema 4");
+    expect(requests).toBe(1);
+    const path = join(root, "sources", source.alias, "latest.json");
     expect(
-      await exists(
-        join(root, "sources", i.source.identity, "repo", "tool.json"),
-      ),
+      await exists(join(root, "sources", source.alias, "fetched-at.txt")),
     ).toBe(false);
-    await p.use("git/tool@1");
-    await writeFile(
-      join(repo, "tool2.json"),
-      JSON.stringify(manifest("1.1.0")),
+    source.fetchedAt = new Date(
+      Date.now() - 24 * 60 * 60 * 1000 - 1000,
+    ).toISOString();
+    latest = "2.0.0";
+    expect(
+      (await ensureSourceIndex(root, source, { offline: true })).packages.tool
+        ?.latest,
+    ).toBe("1.0.0");
+    expect(requests).toBe(1);
+    expect((await ensureSourceIndex(root, source)).packages.tool?.latest).toBe(
+      "2.0.0",
     );
-    await writeFile(
-      join(repo, "index.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        packages: {
-          tool: {
-            latest: "1.1.0",
-            versions: { "1.0.0": "tool.json", "1.1.0": "tool2.json" },
-          },
-        },
-      }),
+    expect(requests).toBe(2);
+    await ensureSourceIndex(root, source, { refresh: true });
+    expect(requests).toBe(3);
+    const good = await readFile(path);
+    const fetchedAt = source.fetchedAt;
+    invalid = true;
+    await expect(refresh(root, source)).rejects.toThrow("Invalid index entry");
+    expect(await readFile(path)).toEqual(good);
+    expect(source.fetchedAt).toBe(fetchedAt);
+    expect((await readSourceIndex(root, source)).packages.tool?.latest).toBe(
+      "2.0.0",
     );
-    await git(["add", "."]);
-    await git(["commit", "-m", "new release"]);
-    await git(["push", bare, "main"]);
-    await git(["update-server-info"], bare);
-    expect((await p.info("git/tool")).available[0]?.versions).toHaveLength(2);
-    expect((await p.update("git/tool")).version).toBe("1.1.0");
-    const dry = await p.updateAll(true);
-    expect(dry[0]?.status).toBe("current");
-    expect("candidate" in dry[0]! && dry[0].candidate).toBe("1.1.0");
-    expect((await p.updateAll())[0]?.status).toBe("unchanged");
-    await expect(p.removeSource("git")).rejects.toThrow("referenced");
-    await p.removeSource("git", true);
-    await expect(p.update("git/tool")).rejects.toThrow("Original source");
-    await p.addSource("git", url + "git.git", "git", "main");
-    const before = await p.store.read();
-    expect((await p.updateAll())[0]?.status).toBe("unchanged");
-    await rename(bare, bare + ".unavailable");
-    await expect(p.refreshSources("git")).rejects.toThrow();
-    expect((await p.updateAll())[0]?.status).toBe("failed");
-    expect((await p.store.read()).defaults).toEqual(before.defaults);
-    await p.uninstall("git/tool@1.0.0");
-    await p.uninstall("git/tool@1.1.0", true);
-    expect(await readFile(saved, "utf8")).toBe("user-data");
-    await p.cleanupData("git/tool", { confirmed: true });
-    expect(await exists(saved)).toBe(false);
+    const count = requests;
+    await expect(
+      ensureSourceIndex(root, source, { offline: true, refresh: true }),
+    ).rejects.toThrow("offline");
+    expect(requests).toBe(count);
+    invalid = false;
+    const explicit = makeSource("explicit", url + "index.json");
+    expect((await refresh(root, explicit)).packages.tool?.latest).toBe("2.0.0");
+    await rm(path);
+    await ensureSourceIndex(root, source);
+    expect(requests).toBe(count + 2);
   } finally {
-    server.kill();
-    await server.exited;
+    server.stop(true);
   }
-}, 60000);
+});
+
+test("legacy HTTP cache migration preserves identity and unknown files without replacing newer latest", async () => {
+  const root = join(work, "legacy-source-cache");
+  const source = makeSource("main", "https://example.invalid/source/");
+  const identity = source.identity;
+  const old = {
+    schemaVersion: 1 as const,
+    packages: { tool: { latest: "1.0.0", versions: { "1.0.0": "tool.json" } } },
+  };
+  const recent = {
+    schemaVersion: 1 as const,
+    packages: {
+      tool: { latest: "2.0.0", versions: { "2.0.0": "tool2.json" } },
+    },
+  };
+  const dir = join(root, "sources", source.identity);
+  const legacy = join(dir, "index.json");
+  const latest = join(root, "sources", source.alias, "latest.json");
+  await atomicJson(legacy, old);
+  await writeFile(join(dir, "user-notes.txt"), "keep");
+  expect(await readSourceIndex(root, source)).toEqual(old);
+  expect(await exists(latest)).toBe(false);
+  expect(await migrateSourceCache(root, source)).toBe(true);
+  expect(source.identity).toBe(identity);
+  expect(await exists(legacy)).toBe(false);
+  expect(await readFile(join(dir, "user-notes.txt"), "utf8")).toBe("keep");
+  await atomicJson(legacy, old);
+  await atomicJson(latest, recent);
+  await migrateSourceCache(root, source);
+  expect(await readSourceIndex(root, source)).toEqual(recent);
+  await removeSourceCache(root, source);
+  expect(await exists(latest)).toBe(false);
+  expect(await readFile(join(dir, "user-notes.txt"), "utf8")).toBe("keep");
+});
+
+test("legacy Git inventory imports fail explicitly instead of rewriting provenance", () => {
+  const inventory = {
+    schemaVersion: 1,
+    sources: [
+      {
+        alias: "old",
+        url: "https://example.invalid/source.git",
+        type: "git",
+        ref: "main",
+      },
+    ],
+    packages: [],
+    aliases: [],
+  };
+  expect(() => validateInventory(inventory)).toThrow(
+    "cannot be converted automatically",
+  );
+});

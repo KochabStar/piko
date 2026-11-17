@@ -151,13 +151,15 @@ test("invalid alias state is rejected and schema 1 remains readable before upgra
   }
   delete state.aliases;
   delete state.data;
+  delete state.receipts;
+  delete state.services;
   for (const selection of Object.values(state.defaults))
     delete selection.commands;
   await atomicJson(p.store.statePath, state);
   expect((await p.store.read()).schemaVersion).toBe(1);
   await p.aliasCommand("old-tool", "first", "tool");
   const updated = await p.store.read();
-  expect(updated.schemaVersion).toBe(2);
+  expect(updated.schemaVersion).toBe(9);
   const bad = structuredClone(updated);
   bad.aliases!["tool"] = { key: i.key, command: "tool" };
   expect(() => validateState(bad)).toThrow();

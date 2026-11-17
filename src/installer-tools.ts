@@ -78,6 +78,7 @@ export async function ensureInstallerTool(
   root: string,
   state: State,
   kind: "lessmsi" | "full7zip",
+  offline = false,
 ): Promise<string> {
   const release = kind === "lessmsi" ? lessMsiRelease : fullSevenZipRelease,
     directory = join(root, "apps/piko/helpers", kind, release.version),
@@ -103,6 +104,8 @@ export async function ensureInstallerTool(
         release.sha256,
         false,
         state,
+        undefined,
+        offline,
       ),
       archive = join(stage, "archive"),
       payload = join(stage, "payload");
@@ -118,7 +121,7 @@ export async function ensureInstallerTool(
           { flag: "wx" },
         );
     } else {
-      const sevenZip = await ensureSevenZip(root, state);
+      const sevenZip = await ensureSevenZip(root, state, offline);
       for (const name of Object.keys(release.files))
         await writeFile(
           join(payload, name),

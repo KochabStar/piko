@@ -259,8 +259,21 @@ test("selected version must match; failed update retains old default and depende
   await p.use("main/consumer@latest");
   const before = await p.store.read();
   await expect(p.update("main/consumer")).rejects.toThrow("does not match 2");
-  expect(await p.store.read()).toEqual(before);
-  expect(before.defaults[consumer.key]?.id).toBe(consumer.id);
+  const after = await p.store.read();
+  expect({
+    ...after,
+    sources: before.sources,
+    revision: before.revision,
+  }).toEqual(before);
+  expect(after.sources).toEqual({
+    ...before.sources,
+    main: { ...before.sources.main, fetchedAt: after.sources.main!.fetchedAt },
+  });
+  expect(Date.parse(after.sources.main!.fetchedAt!)).toBeGreaterThanOrEqual(
+    Date.parse(before.sources.main!.fetchedAt!),
+  );
+  expect(after.revision).toBeGreaterThan(before.revision);
+  expect(after.defaults[consumer.key]?.id).toBe(consumer.id);
   await p.install("main/runtime@2.0.0");
   await expect(p.use("main/runtime@2.0.0")).rejects.toThrow(
     "Dependency protection",
@@ -329,7 +342,7 @@ test("active dependency protection covers command transfers, aliases, unuse and 
   await p.use("main/runtime@1.0.0");
   const consumer = await p.install("main/consumer@1.0.0");
   expect(consumer.depends?.length).toBe(1);
-  expect((await p.store.read()).schemaVersion).toBe(8);
+  expect((await p.store.read()).schemaVersion).toBe(9);
   await p.use("main/consumer@1.0.0");
   const before = await p.store.read();
   await expect(p.releaseCommand("lua")).rejects.toThrow(

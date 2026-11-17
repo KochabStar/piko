@@ -33,6 +33,7 @@ import {
 } from "../src/inventory.ts";
 import { emptyState } from "../src/store.ts";
 import { atomicJson, exists, sha256 } from "../src/util.ts";
+import { restoreOperationEffects } from "../src/receipt.ts";
 
 const work = await mkdtemp(join(tmpdir(), "piko-shell-中文-"));
 const bytes = Buffer.from("fixture, not an executable");
@@ -271,7 +272,21 @@ test("approved initialization remains available during a real stalled source ref
     expect(await readFile(p.store.statePath)).toEqual(before);
     release();
     await refresh;
-    expect(await readFile(p.store.statePath)).toEqual(before);
+    const prior = JSON.parse(before.toString()),
+      after = await p.store.read();
+    expect({
+      ...after,
+      sources: prior.sources,
+      revision: prior.revision,
+    }).toEqual(prior);
+    expect(after.sources).toEqual({
+      ...prior.sources,
+      main: { ...prior.sources.main, fetchedAt: after.sources.main!.fetchedAt },
+    });
+    expect(Date.parse(after.sources.main!.fetchedAt!)).toBeGreaterThanOrEqual(
+      Date.parse(prior.sources.main.fetchedAt),
+    );
+    expect(after.revision).toBeGreaterThan(prior.revision);
   } finally {
     indexGate = undefined;
     release();
@@ -390,8 +405,8 @@ test("Shell dependency aliases use local source metadata and fail closed when mi
   const indexPath = join(
     p.root,
     "sources",
-    install.source.identity,
-    "index.json",
+    install.source.alias,
+    "latest.json",
   );
   const bytes = await readFile(indexPath);
   const index = JSON.parse(bytes.toString());
@@ -714,4 +729,66 @@ test("Profile staging refuses edits outside the managed block", async () => {
     ),
   ).rejects.toThrow("managed block edit");
   expect(await readFile(path)).toEqual(before);
+});
+
+test("uninstalling a non-last version preserves shared Shell approval and the last uninstall keeps other packages and user text", async () => {
+  const { p, profile, install } = await fixture();
+  await mkdir(join(profile, ".."), { recursive: true });
+  await writeFile(profile, "# user profile text\n");
+  const approval = await inspectIntegration(
+    p.store,
+    "main/consumer@1.0.0",
+    profile,
+  );
+  await integrate(p.store, "main/consumer@1.0.0", profile, {
+    confirmed: true,
+    binding: approval.binding,
+  });
+  const runtime = Object.values((await p.store.read()).installs).find(
+    (entry) => entry.name === "runtime",
+  )!;
+  await p.store.mutate(async (state) => {
+    state.profiles![profileKey(profile)]!.approvals[runtime.key] = {
+      binding: "a".repeat(64),
+    };
+  });
+  const original = await readFile(profile);
+  await p.install("main/consumer@2.0.0");
+  await p.uninstall("main/consumer@1.0.0");
+  let state = await p.store.read();
+  expect(state.installs[install.id]).toBeUndefined();
+  expect(
+    state.profiles![profileKey(profile)]!.approvals[install.key],
+  ).toBeDefined();
+  expect(await readFile(profile)).toEqual(original);
+  await p.uninstall("main/consumer@2.0.0");
+  state = await p.store.read();
+  expect(
+    state.profiles![profileKey(profile)]!.approvals[install.key],
+  ).toBeUndefined();
+  expect(
+    state.profiles![profileKey(profile)]!.approvals[runtime.key],
+  ).toBeDefined();
+  expect(await readFile(profile)).toEqual(original);
+  expect(await readFile(profile, "utf8")).toContain("# user profile text");
+});
+
+test("operation effect restoration edits only the Profile managed block and accepts exact target on retry", async () => {
+  const { p, profile } = await fixture();
+  await mkdir(join(profile, ".."), { recursive: true });
+  await writeFile(profile, "# independent user text\n");
+  const approval = await inspectIntegration(p.store, "main/consumer", profile);
+  await integrate(p.store, "main/consumer", profile, {
+    confirmed: true,
+    binding: approval.binding,
+  });
+  const current = await p.store.read();
+  const target = structuredClone(current);
+  delete target.profiles![profileKey(profile)];
+  for (const receipt of Object.values(target.receipts ?? {}))
+    delete receipt.shell;
+  await restoreOperationEffects(p.store, current, target);
+  expect(await readFile(profile, "utf8")).toBe("# independent user text\n");
+  await restoreOperationEffects(p.store, current, target);
+  expect(await readFile(profile, "utf8")).toBe("# independent user text\n");
 });

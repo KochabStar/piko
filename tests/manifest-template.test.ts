@@ -15,7 +15,6 @@ import {
 import { Packages } from "../src/packages.ts";
 import { capture, sha256 } from "../src/util.ts";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
 import { checkSource } from "../scripts/check-source.ts";
 import type { Manifest } from "../src/types.ts";
 
@@ -59,6 +58,50 @@ test("template recipes share versioned URLs and preserve exact historical manife
   expect(normalizeManifest(a, "tool", "1.0.0")).toEqual(a);
 });
 
+test("upstream policies preserve exact historical manifests when recipes advance", () => {
+  const original = release("1.0.0");
+  const document = appendManifest(undefined, original);
+  document.upstream = {
+    provider: "github-release",
+    repo: "publisher/tool",
+    versionRegex: "^v(?<version>[0-9]+(?:\\.[0-9]+)+)$",
+    assetRegex: "^tool-windows-x64\\.zip$",
+    trust: "publisher",
+  };
+  const advanced = appendManifest(document, release("2.0.0"));
+  expect(
+    JSON.stringify(resolveManifestDocument(advanced, "tool", "1.0.0")),
+  ).toBe(JSON.stringify(original));
+  expect(advanced.upstream).toEqual(document.upstream);
+  expect(() => resolveManifestDocument(advanced, "tool", "3.0.0")).toThrow(
+    "not registered",
+  );
+});
+
+test("service binPath participates in template expansion while arguments remain literal", () => {
+  const manifest = release("1.0.0", {
+    services: [
+      {
+        name: "ToolSvc",
+        displayName: "Tool Service",
+        binPath: "bin/tool-1.0.0.exe",
+        startType: "demand",
+        args: ["--version", "1.0.0"],
+      },
+    ],
+  });
+  const document = appendManifest(undefined, manifest);
+  const recipe = Object.values<any>(document.recipes)[0]!;
+  expect(recipe.platforms["windows-x64"].services[0].binPath).toBe(
+    "bin/tool-{version}.exe",
+  );
+  expect(recipe.platforms["windows-x64"].services[0].args).toEqual([
+    "--version",
+    "1.0.0",
+  ]);
+  expect(normalizeManifest(document, "tool", "1.0.0")).toEqual(manifest);
+});
+
 test("version-specific recipes and multiple download checksums remain isolated", () => {
   const a = release("1.0.0");
   const b = release("2.0.0", {
@@ -98,51 +141,51 @@ test("version-specific recipes and multiple download checksums remain isolated",
   );
 });
 
-test("Git template loading reads the pinned commit instead of untrusted working-tree bytes", async () => {
-  const root = join(work, "git-home");
-  const source = makeSource(
-    "git",
-    "https://vendor.example/source.git",
-    "git",
-    "main",
-  );
-  const repo = join(root, "sources", source.identity, "repo");
-  await mkdir(join(repo, "packages/tool"), { recursive: true });
+test("HTTP template snapshots keep versions isolated and support explicit offline loading", async () => {
+  const root = join(work, "snapshot-home");
   const document = appendManifest(
     appendManifest(undefined, release("1.0.0")),
     release("2.0.0"),
   );
+  let requests = 0;
+  let invalid = false;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      requests++;
+      return Response.json(invalid ? { schemaVersion: 1 } : document);
+    },
+  });
+  const source = makeSource(
+    "main",
+    `http://127.0.0.1:${server.port}/index.json`,
+  );
   const path = "packages/tool/package.json";
-  await writeFile(join(repo, path), JSON.stringify(document));
-  const git = (args: string[]) =>
-    execFileSync("git", ["-c", "core.autocrlf=false", ...args], {
-      cwd: repo,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-  git(["init", "--initial-branch=main"]);
-  git(["add", "."]);
-  git([
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "-c",
-    "commit.gpgsign=false",
-    "-c",
-    "core.hooksPath=" + join(repo, "empty-hooks"),
-    "commit",
-    "-m",
-    "template fixture",
-  ]);
-  source.commit = git(["rev-parse", "HEAD"]);
-  await writeFile(join(repo, path), "untrusted local bytes");
-  expect(await loadManifest(root, source, path, "tool", "1.0.0")).toEqual(
-    release("1.0.0"),
-  );
-  expect(await loadManifest(root, source, path, "tool", "2.0.0")).toEqual(
-    release("2.0.0"),
-  );
+  try {
+    await expect(
+      loadManifest(root, source, path, "tool", "1.0.0", { offline: true }),
+    ).rejects.toThrow("snapshot unavailable offline");
+    expect(requests).toBe(0);
+    for (const version of ["1.0.0", "2.0.0"])
+      expect(await loadManifest(root, source, path, "tool", version)).toEqual(
+        release(version),
+      );
+    invalid = true;
+    await expect(
+      loadManifest(root, source, path, "tool", "1.0.0"),
+    ).rejects.toThrow();
+    const count = requests;
+    for (const version of ["1.0.0", "2.0.0"])
+      expect(
+        await loadManifest(root, source, path, "tool", version, {
+          offline: true,
+        }),
+      ).toEqual(release(version));
+    expect(requests).toBe(count);
+  } finally {
+    server.stop(true);
+  }
 });
 
 test("templates reject missing checksum, unknown recipe, unsafe versions and unsupported overrides", () => {
@@ -247,7 +290,7 @@ test("HTTP and compiled clients install old and latest template versions and pre
         },
       }),
     ).toThrow();
-    const source = makeSource("main", url, "http");
+    const source = makeSource("main", url);
     expect(
       (
         await loadManifest(

@@ -51,6 +51,15 @@ import {
 } from "./windows.ts";
 import { noLinks, fail, exists, capture } from "./util.ts";
 import { WindowsEffects } from "./windows-effects.ts";
+import { serviceRows, controlService } from "./service.ts";
+import { recoverOperations, inspectOperations } from "./ops/recover.ts";
+import {
+  planDependencies,
+  installWithDependencies,
+} from "./dependency-install.ts";
+import { shellDiagnostics } from "./shell.ts";
+import { dataProfileStatus } from "./data-profiles.ts";
+import type { ServiceRow } from "./service.ts";
 
 const help = `Piko ${VERSION} — Windows package manager (preview)
 
@@ -63,7 +72,7 @@ Commands:
   piko search <query>          Search package sources
   piko info <package>          Show package details
   piko outdated [package]      Check for available updates
-  piko status [package]        Show update status
+  piko status [package]        Show service status or available updates
   piko update <package>|*      Update one or all selected packages
   piko cleanup <package>|*    Remove old versions or recorded data
   piko source <operation>      Manage package sources
@@ -76,6 +85,7 @@ Commands:
   piko command <operation>     Manage command ownership and aliases
   piko bootstrap <package>     Run an approved bootstrap command
   piko system <package>        Manage system-level integrations
+  piko service list | <pkg> start|stop|restart|status  Manage declared services
   piko system <package> --remove  Revoke a package-owned system integration (one Administrator command)
   piko rust <operation>        Manage Rust toolchains
   piko export [file]           Export package inventory
@@ -90,18 +100,21 @@ Commands:
   piko help <command>          Show detailed command usage
 
 Options: --help, --version, --json, --verbose, --yes, --dry-run
+Install: --offline, --with-deps, --with-service; update: --with-service, --approve-admin
 Progress/color: --progress auto|always|never; --color auto|always|never
 PIKO_HOME overrides the user installation root. Install/update never run lifecycle scripts.
 See README for detailed options and confirmation requirements.
 `;
 const commandHelp: Record<string, string> = {
   install: `Usage:
-  piko install <source/package>[@version] [--skip-checksum]
+  piko install <source/package>[@version] [--skip-checksum] [--offline] [--with-service]
   piko install <spec>... (up to 16 packages; failures do not stop the rest)
   piko install <spec> --with-deps --dry-run
   piko install <spec> --with-deps --yes --binding <hash>
 
 Install a version without selecting it. Alias: piko i.
+HTTP indexes are reused for 24 hours, then refreshed. --offline uses only cached indexes, manifests and verified artifacts; missing cache entries fail without network access, including --distribution and --with-deps.
+--with-service explicitly approves declared Windows services and requires a manually opened Administrator terminal. Piko never opens UAC automatically. npm: packages remain supported.
 `,
   use: `Usage: piko use <package>[@version] [--no-commands] [--distribution <vendor>]
        piko use <package>@latest
@@ -115,6 +128,7 @@ Clear the selected version without uninstalling it or deleting persistent data.
   uninstall: `Usage: piko uninstall <package>[@exact-version] [--force]
 
 Uninstall a non-default version, or the selected/sole version. Persistent data is retained.
+Already approved system removal and recorded receipt effects are revoked automatically. Removing services or approved privileged integrations requires an Administrator terminal; no new manifest code is approved by uninstall, and --force never bypasses ownership checks.
 `,
   list: `Usage: piko list [query] [--selected] [--verbose] [--json]
 
@@ -134,14 +148,14 @@ Check remote candidates without installing or changing selected versions.
 `,
   status: `Usage: piko status [package] [--json]
 
-Alias for outdated; show current requests, candidates, and blocked updates.
+Show declared/receipted Windows service status for a service package, without elevation or a writer lock. Otherwise retain outdated behavior: current requests, candidates, and blocked updates.
 `,
   update: `Usage:
-  piko update <package> [--dry-run | --approve-admin]
-  piko update * [--dry-run | --approve-admin]
+  piko update <package> [--dry-run | --approve-admin] [--with-service]
+  piko update * [--dry-run | --approve-admin] [--with-service]
   piko update [piko] [--dry-run | --yes]
 
-Update selected software while retaining each saved version request. Packages with required system integrations migrate their service in the same command when --approve-admin is given from an Administrator terminal. Use piko update piko to update Piko itself.
+Update selected software while retaining each saved version request. --with-service explicitly approves declared service registration/migration in a manually elevated Administrator terminal. Existing nonstandard system integrations retain --approve-admin previews and approval. Piko never opens UAC automatically. Use piko update piko to update Piko itself.
 `,
   cleanup: `Usage:
   piko cleanup * [--keep N] [--dry-run | --yes]
@@ -153,12 +167,12 @@ On an interactive terminal, cleanup * asks you to type yes; non-interactive dele
 Data cleanup permanently deletes only recorded persistent directories and requires every version to be uninstalled.
 `,
   source: `Usage:
-  piko source add <alias> <url> [--type http|git] [--ref <ref>]
+  piko source add <alias> <http(s)-url>
   piko source list
   piko source refresh [alias]
   piko source remove <alias> [--force]
 
-Manage package catalog sources. Removing a source does not uninstall its packages.
+Manage HTTP package catalogs; Git fetching is not supported. HTTP indexes are reused for 24 hours, then refreshed; source refresh forces a fetch. install --offline uses cached metadata and artifacts only. Removing a source does not uninstall its packages. npm: is a separate retained package provider.
 `,
   cache: `Usage:
   piko cache list [--json]
@@ -219,7 +233,13 @@ Review and explicitly approve a package bootstrap operation. Approved code runs 
   piko system <package> [--remove] [--dry-run | --approve-admin]
   piko system <package>@<installed-version> --upgrade [--dry-run | --approve-admin]
 
-One Administrator-terminal command previews and applies: piko system <package> --approve-admin. Packages marked as requiring system integration must be approved before use; Piko never performs this step implicitly. --dry-run previews only; --binding approves an earlier separate preview. Revoke with system <package> --remove --approve-admin before uninstalling.
+Nonstandard integrations retain explicit previews and approval: piko system <package> --approve-admin in an Administrator terminal. --dry-run previews only; --binding approves an earlier separate preview. Uninstall automatically revokes already approved removal and recorded effects; manual system --remove is optional, not a prerequisite. Declarative services use install/update --with-service instead.
+`,
+  service: `Usage:
+  piko service list [--json]
+  piko service <package> start|stop|restart|status [--json]
+
+List all declared/managed services and current SCM status, including missing services. list/status are read-only and need no elevation. start/stop/restart require a manually opened Administrator terminal, never automatic UAC; only receipt-owned services may be controlled.
 `,
   rust: `Usage:
   piko rust list
@@ -265,13 +285,13 @@ Inspect, update, roll back, or recover Piko itself.
 
 Install this Piko executable for the current user; --path adds its shims to user PATH.
 `,
-  recover: `Usage: piko recover [--force]
+  recover: `Usage: piko recover [--continue | --rollback] [--dry-run] [--force] [--json]
 
-Recover interrupted managed operations. Write operations already reclaim a lock whose recorded owner has exited and finish or discard their own journals; --force additionally removes that stale lock before recovering.
+Resume interrupted operations by default (--continue), or restore their recorded snapshots with --rollback. --dry-run only inspects pending operations. --force only reclaims a stale mutation lock; it never bypasses ownership or snapshot bindings and cannot be combined with --dry-run.
 `,
-  doctor: `Usage: piko doctor
+  doctor: `Usage: piko doctor [--json]
 
-Validate managed state, installations, receipts, integrations, and recovery journals.
+Inspect managed state, installations, receipts, services, integrations and pending operations without running recovery or package scripts.
 `,
   which: `Usage: piko which <command>
 
@@ -363,11 +383,13 @@ async function main(): Promise<number> {
       force: { type: "boolean" },
       recover: { type: "boolean" },
       path: { type: "boolean" },
-      type: { type: "string" },
-      ref: { type: "string" },
       "skip-checksum": { type: "boolean" },
       "no-commands": { type: "boolean" },
       "with-deps": { type: "boolean" },
+      offline: { type: "boolean" },
+      "with-service": { type: "boolean" },
+      continue: { type: "boolean" },
+      rollback: { type: "boolean" },
       lock: { type: "boolean" },
       data: { type: "boolean" },
       fresh: { type: "boolean" },
@@ -428,6 +450,81 @@ async function main(): Promise<number> {
       !["auto", "always", "never"].includes(values[option]!)
     )
       fail(`--${option} must be auto, always or never`);
+  const command = args[0] === "i" ? "install" : args[0]!;
+  if (values.offline && command !== "install")
+    fail("--offline is supported only by install");
+  if (values.offline && values.refresh)
+    fail("Choose --offline or --refresh, not both");
+  if (values["with-service"] && !["install", "update"].includes(command))
+    fail("--with-service is supported only by install and package update");
+  if ((values.continue || values.rollback) && command !== "recover")
+    fail("--continue and --rollback are supported only by recover");
+  if (values.continue && values.rollback)
+    fail("Choose --continue or --rollback, not both");
+  if (values.refresh && command !== "search")
+    fail(
+      "--refresh is supported only by search; use source refresh [alias] for catalogs",
+    );
+  if (values["with-deps"] && command !== "install")
+    fail("--with-deps is supported only by install");
+  if (command === "install" && values["approve-admin"])
+    fail(
+      "Use --with-service for declared services; nonstandard integrations require piko system previews",
+    );
+  const commandOptions: Record<string, readonly string[]> = {
+    install: [
+      "skip-checksum",
+      "distribution",
+      "with-deps",
+      "offline",
+      "with-service",
+      "binding",
+      "yes",
+      "dry-run",
+    ],
+    update: [
+      "all",
+      "dry-run",
+      "approve-admin",
+      "with-service",
+      "distribution",
+      "yes",
+      "sha256",
+    ],
+    uninstall: ["force"],
+    source: ["force", "refresh"],
+    service: [],
+    recover: ["continue", "rollback", "dry-run", "force"],
+    doctor: [],
+    status: ["distribution"],
+    outdated: ["distribution"],
+  };
+  const allowedOptions = commandOptions[command];
+  if (allowedOptions) {
+    const commonOptions = [
+      "json",
+      "verbose",
+      "progress",
+      "color",
+      "no-progress",
+      "no-color",
+    ];
+    for (const [name, value] of Object.entries(values))
+      if (
+        value !== undefined &&
+        !commonOptions.includes(name) &&
+        !allowedOptions.includes(name)
+      )
+        fail(
+          `--${name} is not supported by ${command}; run piko help ${command}`,
+        );
+  }
+  const requireAdministrator = async () => {
+    if (!(await new WindowsEffects().elevated()))
+      fail(
+        "Administrator permission required: open a terminal with Run as administrator, then rerun the same command. Piko never opens a UAC prompt by itself.",
+      );
+  };
   const pretty = !values.json;
   const outputColor =
     pretty &&
@@ -446,6 +543,34 @@ async function main(): Promise<number> {
     !!process.env.WT_SESSION;
   const show = (text: string) =>
     console.log(humanOutput(text, outputColor, { unicode, trueColor }));
+  const showServices = (rows: ServiceRow[]) => {
+    if (values.json) console.log(JSON.stringify(rows, null, 2));
+    else
+      show(
+        rows.length
+          ? table(
+              [
+                "PACKAGE",
+                "VERSION",
+                "SERVICE",
+                "STATUS",
+                "RECEIPT",
+                "OWNED",
+                "ERROR",
+              ],
+              rows.map((row) => [
+                `${row.source}/${row.package}`,
+                row.version,
+                row.name,
+                row.status,
+                row.receiptStatus ?? "none",
+                row.owned ? "yes" : "no",
+                row.error ?? "",
+              ]),
+            )
+          : "No managed services.",
+      );
+  };
   const task = async <T>(fn: () => Promise<T>): Promise<T> => {
     const tty =
       !!process.stderr.isTTY &&
@@ -660,19 +785,26 @@ async function main(): Promise<number> {
       break;
     }
     case "source": {
+      if (
+        values["dry-run"] ||
+        values.distribution ||
+        values.binding ||
+        values["approve-admin"]
+      )
+        fail(
+          "Source commands do not accept package integration or preview options",
+        );
+      if (values.force && args[1] !== "remove")
+        fail("Source --force is supported only by source remove");
       switch (required(1)) {
         case "add": {
-          const type =
-            values.type ?? (required(3).endsWith(".git") ? "git" : "http");
-          if (type !== "git" && type !== "http")
-            fail("Source type must be http or git");
-          await task(() =>
-            packages.addSource(required(2), required(3), type, values.ref),
-          );
+          if (args.length !== 4) fail("Use source add <alias> <http(s)-url>");
+          await task(() => packages.addSource(required(2), required(3)));
           console.log("Source added");
           break;
         }
         case "list": {
+          if (args.length !== 2) fail("Use source list [--json]");
           const sources = Object.values((await packages.store.read()).sources);
           show(
             values.json
@@ -682,10 +814,12 @@ async function main(): Promise<number> {
           break;
         }
         case "refresh":
+          if (args.length > 3) fail("Use source refresh [alias]");
           await task(() => packages.refreshSources(args[2]));
           console.log("Sources refreshed");
           break;
         case "remove":
+          if (args.length !== 3) fail("Use source remove <alias> [--force]");
           await packages.removeSource(required(2), values.force);
           console.log(
             "Source configuration removed; installed packages retained",
@@ -694,6 +828,37 @@ async function main(): Promise<number> {
         default:
           fail("Unknown source command");
       }
+      break;
+    }
+    case "service": {
+      if (
+        values.force ||
+        values["dry-run"] ||
+        values["approve-admin"] ||
+        values.binding ||
+        values.distribution ||
+        values.yes ||
+        values.remove ||
+        values.upgrade
+      )
+        fail(
+          "Service commands do not accept force, preview, approval, distribution or integration options",
+        );
+      if (args[1] === "list") {
+        if (args.length !== 2) fail("Use service list [--json]");
+        showServices(await serviceRows(store));
+        break;
+      }
+      if (
+        args.length !== 3 ||
+        !["start", "stop", "restart", "status"].includes(args[2]!)
+      )
+        fail(
+          "Use service list or service <package> start|stop|restart|status [--json]",
+        );
+      const action = args[2] as "start" | "stop" | "restart" | "status";
+      if (action !== "status") await requireAdministrator();
+      showServices(await controlService(store, required(1), action));
       break;
     }
     case "shell": {
@@ -1073,22 +1238,42 @@ async function main(): Promise<number> {
     }
     case "i":
     case "install": {
+      const installOptions = {
+        offline: values.offline,
+        withService: values["with-service"],
+      };
+      if (values.binding && !values["with-deps"])
+        fail("Install --binding requires --with-deps");
+      if (values["skip-checksum"] && values["with-service"])
+        fail(
+          "--with-service requires verified package content; do not use --skip-checksum",
+        );
+      if (
+        values["with-service"] &&
+        !values["dry-run"] &&
+        (!values["with-deps"] || values.yes)
+      )
+        await requireAdministrator();
       if (values["with-deps"]) {
         if (values["skip-checksum"])
           fail("Dependency plans require verified manifests and downloads");
         if (args.length > 2) fail("--with-deps plans one package at a time");
-        const { planDependencies, installWithDependencies } =
-          await import("./dependency-install.ts");
         const spec = await packages.runtimeSpec(
           required(1),
           values.distribution,
+          { offline: values.offline },
         );
         const outcome = values["dry-run"]
-          ? await planDependencies(packages, spec)
+          ? await planDependencies(packages, spec, installOptions)
           : !values.yes
-            ? await planDependencies(packages, spec)
+            ? await planDependencies(packages, spec, installOptions)
             : await task(() =>
-                installWithDependencies(packages, spec, values.binding ?? ""),
+                installWithDependencies(
+                  packages,
+                  spec,
+                  values.binding ?? "",
+                  installOptions,
+                ),
               );
         show(
           values.json ? JSON.stringify(outcome, null, 2) : planSummary(outcome),
@@ -1102,8 +1287,14 @@ async function main(): Promise<number> {
       const installOne = async (spec: string) =>
         await task(async () =>
           packages.install(
-            await packages.runtimeSpec(spec, values.distribution),
+            await packages.runtimeSpec(spec, values.distribution, {
+              offline: values.offline,
+            }),
             values["skip-checksum"],
+            undefined,
+            undefined,
+            undefined,
+            installOptions,
           ),
         );
       if (specs.length === 1) {
@@ -1239,6 +1430,34 @@ async function main(): Promise<number> {
     }
     case "outdated":
     case "status": {
+      if (args.length > 2)
+        fail("Use status [package] or outdated [package] [--json]");
+      if (values["dry-run"] || values.force || values["approve-admin"])
+        fail(
+          "Status and outdated are read-only; approval, force and dry-run are not supported",
+        );
+      if (args[0] === "status" && args[1]) {
+        const parsed = parseSpec(args[1]),
+          state = await store.read();
+        const servicePackage = Object.values(state.installs).some(
+          (install) =>
+            install.name === parsed.name &&
+            (!parsed.source || install.source.alias === parsed.source) &&
+            ((install.services?.length ?? 0) > 0 ||
+              (state.receipts?.[install.id]?.service?.length ?? 0) > 0 ||
+              Object.values(state.services ?? {}).some(
+                (receipt) => receipt.packageId === install.id,
+              )),
+        );
+        if (servicePackage) {
+          if (values.distribution)
+            fail(
+              "Service status uses an installed package; --distribution is not supported",
+            );
+          showServices(await serviceRows(store, args[1]));
+          break;
+        }
+      }
       const result = await task(async () =>
         packages.outdated(
           args[1]
@@ -1258,11 +1477,11 @@ async function main(): Promise<number> {
       break;
     }
     case "export": {
-      const { exportInventory, exportLockedInventory } =
+      const { exportInventorySnapshot, exportLockedInventory } =
         await import("./inventory.ts");
       const inventory = values.lock
         ? await exportLockedInventory(packages)
-        : exportInventory(await packages.store.read());
+        : await exportInventorySnapshot(packages);
       const content = JSON.stringify(inventory, null, 2) + "\n";
       if (args[1]) {
         const path = resolve(args[1]);
@@ -1299,19 +1518,31 @@ async function main(): Promise<number> {
     }
     case "update": {
       const allPackages = args[1] === "*";
-      // Fail before any download when admin approval was requested but this
-      // terminal lacks the administrator token; the plain message says what
-      // to open and what to rerun.
-      if (values["approve-admin"] && !(await new WindowsEffects().elevated()))
+      if (args.length > 2) fail("Use update <package>|* or update --all");
+      if ((values.all || allPackages) && values.distribution)
+        fail("--distribution requires one package, not update --all or *");
+      if (
+        (!args[1] || args[1] === "piko") &&
+        !values.all &&
+        (values["with-service"] || values["approve-admin"])
+      )
         fail(
-          'Administrator permission required: --approve-admin must run in an Administrator terminal. Right-click your terminal and choose "Run as administrator" (or Win+X → "Terminal (Admin)"), then rerun the same command. Piko never opens a UAC prompt by itself.',
+          "Piko self-update does not accept --with-service or --approve-admin",
         );
+      if (
+        values["dry-run"] &&
+        (values["with-service"] || values["approve-admin"])
+      )
+        fail("Choose --dry-run or privileged update approval, not both");
+      if (values["with-service"] || values["approve-admin"])
+        await requireAdministrator();
       if (values.all || allPackages) {
         if (args[1] && !allPackages)
           fail("Use update --all or update * without a package");
         const result = await task(() =>
           packages.updateAll(!!values["dry-run"], {
             approveAdmin: !!values["approve-admin"],
+            withService: values["with-service"],
           }),
         );
         show(
@@ -1347,6 +1578,7 @@ async function main(): Promise<number> {
       const i = await task(() =>
         packages.update(spec, {
           approveAdmin: !!values["approve-admin"],
+          withService: values["with-service"],
         }),
       );
       show(
@@ -1364,14 +1596,60 @@ async function main(): Promise<number> {
       );
       break;
     }
-    case "uninstall":
+    case "uninstall": {
+      if (args.length !== 2)
+        fail("Use uninstall <package>[@exact-version] [--force]");
+      if (
+        values["approve-admin"] ||
+        values.binding ||
+        values.remove ||
+        values.distribution
+      )
+        fail(
+          "Uninstall revokes existing approved receipts automatically; it does not accept new integration approvals",
+        );
       if (values["dry-run"])
         fail(
           "Uninstall does not support --dry-run; inspect installed versions with piko list",
         );
+      const state = await store.read(),
+        parsed = parseSpec(required(1));
+      const candidates = Object.values(state.installs).filter(
+        (install) =>
+          install.name === parsed.name &&
+          (!parsed.source || install.source.alias === parsed.source) &&
+          (!parsed.request || install.version === parsed.request),
+      );
+      const targets =
+        parsed.request || candidates.length === 1
+          ? candidates
+          : candidates.filter(
+              (install) => state.defaults[install.key]?.id === install.id,
+            );
+      const privileged = targets.some(
+        (install) =>
+          (state.admin?.[install.id]?.action === "install" &&
+            state.admin[install.id]!.status === "completed") ||
+          state.receipts?.[install.id]?.admin?.install?.status ===
+            "completed" ||
+          (state.receipts?.[install.id]?.service ?? []).some(
+            (effect) => effect.receipt.status !== "removed",
+          ) ||
+          Object.values(state.services ?? {}).some(
+            (receipt) =>
+              receipt.packageId === install.id && receipt.status !== "removed",
+          ),
+      );
+      if (privileged) {
+        console.error(
+          "WARNING: Uninstall will revoke previously approved privileged removal and receipt-owned services. Ownership and content bindings remain enforced; no new manifest code is approved.",
+        );
+        await requireAdministrator();
+      }
       await packages.uninstall(required(1), values.force);
       console.log("Uninstalled; persistent data retained");
       break;
+    }
     case "command": {
       switch (required(1)) {
         case "list": {
@@ -1557,9 +1835,65 @@ async function main(): Promise<number> {
       break;
     }
     case "recover": {
+      if (args.length !== 1)
+        fail(
+          "Use recover [--continue | --rollback] [--dry-run] [--force] [--json]",
+        );
+      if (
+        values.binding ||
+        values["approve-admin"] ||
+        values.yes ||
+        values.remove ||
+        values.upgrade ||
+        values.distribution
+      )
+        fail(
+          "Recovery uses validated journal snapshots, not new approval, binding or integration options",
+        );
+      if (values.force && values["dry-run"])
+        fail(
+          "--force reclaims a stale mutation lock and cannot be combined with read-only --dry-run",
+        );
+      if (values["dry-run"]) {
+        const rows = await inspectOperations(root);
+        if (values.json) console.log(JSON.stringify(rows, null, 2));
+        else
+          show(
+            rows.length
+              ? table(
+                  ["KIND", "PACKAGE ID", "OPERATION", "STATUS"],
+                  rows.map((row) => [
+                    row.kind,
+                    row.packageId,
+                    row.id,
+                    row.status,
+                  ]),
+                )
+              : "No pending operations.",
+          );
+        break;
+      }
       if (values.force) await recoverStaleMutationLock(root);
-      await packages.store.mutate(async () => {});
-      console.log("Recovery completed");
+      const rows = await recoverOperations(store, {
+        mode: values.rollback ? "rollback" : "resume",
+      });
+      if (values.json) console.log(JSON.stringify(rows, null, 2));
+      else
+        show(
+          rows.length
+            ? table(
+                ["KIND", "PACKAGE ID", "OPERATION", "STATUS", "ERROR"],
+                rows.map((row) => [
+                  row.kind,
+                  row.packageId,
+                  row.id,
+                  row.status,
+                  row.error ?? "",
+                ]),
+              )
+            : "No pending operations.",
+        );
+      if (rows.some((row) => row.status === "blocked")) return 1;
       break;
     }
     case "scripts": {
@@ -1650,9 +1984,16 @@ async function main(): Promise<number> {
       break;
     }
     case "doctor": {
-      await packages.store.mutate(async () => {}, { skipUnchanged: true });
+      if (
+        args.length !== 1 ||
+        values.force ||
+        values["dry-run"] ||
+        values["approve-admin"]
+      )
+        fail(
+          "Use doctor [--json]; doctor inspects state without running recovery",
+        );
       const s = await packages.store.read();
-      const { shellDiagnostics } = await import("./shell.ts");
       const report = {
         root,
         state: packages.store.statePath,
@@ -1664,10 +2005,11 @@ async function main(): Promise<number> {
         pathDiagnostics: await pathDiagnostics(root, s),
         installs: Object.keys(s.installs).length,
         shellIntegrations: await shellDiagnostics(store),
-        dataProfiles: await (
-          await import("./data-profiles.ts")
-        ).dataProfileStatus(store),
+        dataProfiles: await dataProfileStatus(store),
         desktopIntegrations: s.desktop ?? {},
+        receipts: s.receipts ?? {},
+        services: await serviceRows(store),
+        pendingOperations: await inspectOperations(root),
         executions: {
           bootstraps: s.bootstraps ?? {},
           system: s.admin ?? {},
@@ -1681,7 +2023,38 @@ async function main(): Promise<number> {
         ],
       };
       show(
-        values.json ? JSON.stringify(report, null, 2) : doctorSummary(report),
+        values.json
+          ? JSON.stringify(report, null, 2)
+          : [
+              doctorSummary(report),
+              `Receipts: ${Object.keys(report.receipts).length}`,
+              "Services:",
+              report.services.length
+                ? table(
+                    ["PACKAGE", "SERVICE", "STATUS", "ERROR"],
+                    report.services.map((row) => [
+                      `${row.source}/${row.package}@${row.version}`,
+                      row.name,
+                      row.status,
+                      row.error ?? "",
+                    ]),
+                  )
+                : "No managed services.",
+              `Pending operations: ${report.pendingOperations.length}`,
+              ...(report.pendingOperations.length
+                ? [
+                    table(
+                      ["KIND", "PACKAGE ID", "OPERATION", "STATUS"],
+                      report.pendingOperations.map((row) => [
+                        row.kind,
+                        row.packageId,
+                        row.id,
+                        row.status,
+                      ]),
+                    ),
+                  ]
+                : []),
+            ].join("\n"),
       );
       break;
     }

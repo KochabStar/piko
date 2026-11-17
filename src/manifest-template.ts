@@ -122,6 +122,10 @@ function transform(
       if (typeof b === "string") p.bin[name] = path(b);
       else if (object(b)) b.path = path(b.path);
     }
+  if (p.services)
+    for (const service of p.services)
+      if (object(service) && service.binPath !== undefined)
+        service.binPath = path(service.binPath);
   for (const kind of ["shortcuts", "fonts", "associations", "menus"])
     if (p.desktop?.[kind])
       p.desktop[kind] = p.desktop[kind].map((e: any) =>
@@ -139,7 +143,7 @@ export function resolveManifestDocument(
   if (document.schemaVersion !== 2) return document;
   keys(
     document,
-    ["schemaVersion", "name", "recipes", "versions"],
+    ["schemaVersion", "name", "recipes", "versions", "upstream"],
     "template document fields",
   );
   requireThat(

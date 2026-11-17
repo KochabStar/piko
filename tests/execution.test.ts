@@ -9,7 +9,7 @@ import {
   runExecution,
   persistentExecutable,
 } from "../src/execution.ts";
-import { sha256 } from "../src/util.ts";
+import { exists, sha256 } from "../src/util.ts";
 import { nativeRequest } from "../src/windows-effects.ts";
 import { normalizeManifest } from "../src/catalog.ts";
 import { WindowsEffects } from "../src/windows-effects.ts";
@@ -147,6 +147,7 @@ test("system upgrade binds old removal and new installation in a single inert pr
     bin: {},
     admin: { install: action, remove: action },
   });
+  await p.refreshSources("main");
   const previous = await p.install(spec + "@2.0.0");
   await p.use(spec + "@2.0.0");
   await p.store.mutate(async (s) => {
@@ -161,6 +162,7 @@ test("system upgrade binds old removal and new installation in a single inert pr
     };
   });
   m.version = "3.0.0";
+  await p.refreshSources("main");
   const target = await p.install(spec + "@3.0.0");
   const before = await p.store.read();
   const preview = await inspectSystemUpgrade(p, spec + "@3.0.0");
@@ -198,6 +200,8 @@ $null=[IO.Directory]::CreateDirectory($Data)
 $s=Get-Content -LiteralPath (Join-Path $env:PIKO_HOME 'apps/piko/state.json') -Raw -Encoding UTF8|ConvertFrom-Json
 $choice=@($s.defaults.psobject.Properties|Select-Object -First 1)
 $selected=if($choice.Count){$s.installs.($choice[0].Value.id).version}else{'none'}
+$actionReceipt=$s.admin.psobject.Properties | Select-Object -First 1
+if($actionReceipt){[IO.File]::WriteAllText((Join-Path $Data ('recorded-'+$Action)),($actionReceipt.Value.action+':'+$actionReceipt.Value.status))}
 [IO.File]::AppendAllText((Join-Path $Data 'events'),($Action+':'+$Version+':'+$selected+[Environment]::NewLine))
 if(Test-Path -LiteralPath (Join-Path $Data ('fail-'+$Action+'-'+$Version))){throw 'injected service failure'}
 `;
@@ -249,12 +253,14 @@ if(Test-Path -LiteralPath (Join-Path $Data ('fail-'+$Action+'-'+$Version))){thro
   };
   return { p, effects, manifest, install, spec, data, approve };
 }
-test("required services need successful dedicated approval and removal before uninstall, while data survives reinstall", async () => {
+test("required system installation is explicitly approved and uninstall automatically removes it while preserving user data", async () => {
   const { p, effects, install, spec, data, approve } = await serviceFixture();
   await expect(p.use(spec + "@latest")).rejects.toThrow(
     "Required system integration",
   );
-  await expect(p.uninstall(spec)).rejects.toThrow("system");
+  await expect(inspectExecution(p.store, spec, true, true)).rejects.toThrow(
+    "No recorded",
+  );
   effects.allowAdmin = false;
   await expect(approve("1.0.0")).rejects.toThrow(
     "Administrator permission required",
@@ -270,8 +276,12 @@ test("required services need successful dedicated approval and removal before un
   await approve("1.0.0");
   await p.use(spec + "@latest");
   await writeFile(join(data, "settings"), "user data");
-  await expect(p.uninstall(spec)).rejects.toThrow("system");
-  await approve("1.0.0", true);
+  effects.allowAdmin = false;
+  await expect(p.uninstall(spec)).rejects.toThrow(
+    "Administrator permission required",
+  );
+  expect(await exists(join(p.root, install.dir, "service.ps1"))).toBe(true);
+  effects.allowAdmin = true;
   await p.uninstall(spec);
   expect(await readFile(join(data, "settings"), "utf8")).toBe("user data");
   const reinstalled = await p.install(spec + "@1.0.0");
@@ -289,6 +299,7 @@ test("failed service upgrade keeps the old selection and explicit retry selects 
   await approve("1.0.0");
   await p.use(spec + "@latest");
   manifest.version = "2.0.0";
+  await p.refreshSources("main");
   const target = await p.install(spec + "@2.0.0");
   await expect(p.use(spec + "@2.0.0")).rejects.toThrow("--upgrade");
   await writeFile(join(data, "fail-install-2.0.0"), "fail");
@@ -492,8 +503,9 @@ test("javascript admin declarations preview like PowerShell and still require el
   expect(preview.kind).toBe("javascript");
   expect(preview.script).toContain("export default async function");
   expect(preview.warning).toContain("ADMINISTRATOR");
-  const remove = await inspectExecution(p.store, spec, true, true);
-  expect(remove.action).toBe("remove-system");
+  await expect(inspectExecution(p.store, spec, true, true)).rejects.toThrow(
+    "No recorded",
+  );
   if (!(await nativeRequest({ op: "elevated" })))
     await expect(
       runExecution(p.store, spec, {
@@ -502,4 +514,52 @@ test("javascript admin declarations preview like PowerShell and still require el
         binding: preview.binding,
       }),
     ).rejects.toThrow("Administrator permission required");
+}, 30000);
+
+test("automatic admin remove persists running/failed history, preserves files and retries without overwriting successful install", async () => {
+  const { p, install, spec, data, approve } = await serviceFixture();
+  await approve("1.0.0");
+  await p.use(spec + "@latest");
+  const original = (await p.store.read()).receipts![install.id]!.admin!.install;
+  await writeFile(join(data, "settings"), "keep user data");
+  await writeFile(join(data, "fail-remove-1.0.0"), "fail");
+  await expect(p.uninstall(spec)).rejects.toThrow("Approved execution failed");
+  const failed = await p.store.read();
+  expect(failed.installs[install.id]).toEqual(install);
+  expect(failed.defaults[install.key]?.id).toBe(install.id);
+  expect(failed.receipts![install.id]!.admin!.install).toEqual(original);
+  expect(failed.receipts![install.id]!.admin!.remove).toMatchObject({
+    action: "remove",
+    status: "failed",
+  });
+  expect(failed.admin![install.id]).toMatchObject({
+    action: "remove",
+    status: "failed",
+  });
+  expect(await exists(join(p.root, install.dir, "service.ps1"))).toBe(true);
+  expect(await readFile(join(data, "settings"), "utf8")).toBe("keep user data");
+  await rm(join(data, "fail-remove-1.0.0"));
+  await p.uninstall(spec);
+  expect((await p.store.read()).installs[install.id]).toBeUndefined();
+  expect(await readFile(join(data, "settings"), "utf8")).toBe("keep user data");
+  expect(
+    (await readFile(join(data, "events"), "utf8")).split("remove:1.0.0:")
+      .length - 1,
+  ).toBe(2);
+  expect(await readFile(join(data, "recorded-remove"), "utf8")).toBe(
+    "remove:running",
+  );
+}, 30000);
+
+test("automatic remove rejects altered approved system code before changing ownership or files", async () => {
+  const { p, install, spec, approve } = await serviceFixture();
+  await approve("1.0.0");
+  const before = await p.store.read();
+  await writeFile(
+    join(p.root, install.dir, "service.ps1"),
+    "throw 'unapproved removal'\n",
+  );
+  await expect(p.uninstall(spec)).rejects.toThrow("content changed");
+  expect(await p.store.read()).toEqual(before);
+  expect(await exists(join(p.root, install.dir, "service.ps1"))).toBe(true);
 }, 30000);

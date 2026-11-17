@@ -77,28 +77,23 @@ async function cli(root: string, args: string[], expected = 0) {
   return { out, err };
 }
 
-test("cached HTTP and Git search is offline, read-only and lock-free; explicit refresh is opt-in", async () => {
+test("cached HTTP search is offline, read-only and lock-free; explicit refresh is opt-in", async () => {
   const root = join(work, "offline"),
     p = new Packages(root);
   await p.addSource("main", `http://127.0.0.1:${server.port}/`);
-  const git = makeSource(
-    "git-source",
-    "https://example.invalid/source.git",
-    "git",
-    "main",
-  );
+  const other = makeSource("other", "https://example.invalid/source/");
   await p.store.mutate(async (s) => {
-    s.sources[git.alias] = git;
+    s.sources[other.alias] = other;
   });
-  await mkdir(join(root, "sources", git.identity), { recursive: true });
-  await atomicJson(join(root, "sources", git.identity, "index.json"), index());
+  await mkdir(join(root, "sources", other.alias), { recursive: true });
+  await atomicJson(join(root, "sources", other.alias, "latest.json"), index());
   const before = await readFile(p.store.statePath);
   const count = requests;
   offline = true;
   try {
     expect((await p.search("TOOL")).map((r) => r.source)).toEqual([
-      "git-source",
       "main",
+      "other",
     ]);
     expect((await p.search("MAIN/ALPHA"))[0]?.name).toBe("alpha");
     expect(await p.search("absent")).toEqual([]);
@@ -122,7 +117,7 @@ test("cached HTTP and Git search is offline, read-only and lock-free; explicit r
   } finally {
     offline = false;
   }
-  await p.removeSource(git.alias);
+  await p.removeSource(other.alias);
   latest = "2.0.0";
   try {
     expect((await p.search("tool"))[0]?.latest).toBe("1.0.0");
@@ -141,7 +136,7 @@ test("missing or invalid indexes fail closed without an implicit network request
   await p.addSource("main", `http://127.0.0.1:${server.port}/`);
   const state = await p.store.read(),
     source = state.sources.main!;
-  const path = join(root, "sources", source.identity, "index.json");
+  const path = join(root, "sources", source.alias, "latest.json");
   const count = requests;
   await rm(path);
   await expect(p.search("tool")).rejects.toThrow("piko source refresh main");

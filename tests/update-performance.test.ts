@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Packages } from "../src/packages.ts";
 import { sha256 } from "../src/util.ts";
+import type { State } from "../src/types.ts";
 
 const work = await mkdtemp(join(tmpdir(), "piko-update-performance-"));
 const names = ["alpha", "beta", "gamma"];
@@ -70,6 +71,7 @@ async function fixture() {
       await packages.install(`main/${name}`);
       await packages.use(`main/${name}@latest`);
     }
+    expect(requests.get("/index.json")).toBe(1);
     requests.clear();
     return {
       packages,
@@ -91,10 +93,25 @@ async function fixture() {
   }
 }
 
-test("unchanged batches refresh a shared source once, revalidate manifests and never commit or reselect", async () => {
+function expectSourceMetadataOnly(before: State, after: State) {
+  const sources = structuredClone(after.sources);
+  for (const [alias, source] of Object.entries(sources)) {
+    expect(source.fetchedAt).toBeDefined();
+    expect(Date.parse(source.fetchedAt!)).toBeGreaterThanOrEqual(
+      Date.parse(
+        before.sources[alias]?.fetchedAt ?? "1970-01-01T00:00:00.000Z",
+      ),
+    );
+    if (before.sources[alias]?.fetchedAt === undefined) delete source.fetchedAt;
+    else source.fetchedAt = before.sources[alias]!.fetchedAt;
+  }
+  expect({ ...after, revision: before.revision, sources }).toEqual(before);
+}
+
+test("unchanged batches refresh once and persist only source metadata without reselecting", async () => {
   const f = await fixture();
   try {
-    const before = await readFile(f.packages.store.statePath, "utf8");
+    const before = await f.packages.store.read();
     let commits = 0;
     const commit = f.packages.store.commit.bind(f.packages.store);
     f.packages.store.commit = async (...args) => {
@@ -107,8 +124,8 @@ test("unchanged batches refresh a shared source once, revalidate manifests and n
     expect(f.requests.has("/file.exe")).toBe(false);
     for (const name of names)
       expect(f.requests.get(`/${name}-1.0.0.json`)).toBe(1);
-    expect(commits).toBe(0);
-    expect(await readFile(f.packages.store.statePath, "utf8")).toBe(before);
+    expect(commits).toBeLessThanOrEqual(1);
+    expectSourceMetadataOnly(before, await f.packages.store.read());
 
     f.requests.clear();
     f.publish();
@@ -122,12 +139,12 @@ test("unchanged batches refresh a shared source once, revalidate manifests and n
       expect(state.installs[selection.id]?.version).toBe("1.1.0");
 
     f.requests.clear();
-    const after = await readFile(f.packages.store.statePath, "utf8");
+    const after = await f.packages.store.read();
     expect((await f.packages.updateAll()).map((row) => row.status)).toEqual(
       names.map(() => "unchanged"),
     );
     expect(f.requests.get("/index.json")).toBe(1);
-    expect(await readFile(f.packages.store.statePath, "utf8")).toBe(after);
+    expectSourceMetadataOnly(after, await f.packages.store.read());
   } finally {
     f.server.stop(true);
   }
@@ -157,7 +174,7 @@ test("source failures are shared within a batch, never fall back to stale metada
 test("single and batch no-op updates still reject changed manifests without changing defaults", async () => {
   const f = await fixture();
   try {
-    const before = await readFile(f.packages.store.statePath, "utf8");
+    const before = await f.packages.store.read();
     f.changeManifest();
     await expect(f.packages.update("main/alpha")).rejects.toThrow(
       "different manifest content",
@@ -172,7 +189,7 @@ test("single and batch no-op updates still reject changed manifests without chan
       ),
     ).toBe(true);
     expect(f.requests.get("/index.json")).toBe(1);
-    expect(await readFile(f.packages.store.statePath, "utf8")).toBe(before);
+    expectSourceMetadataOnly(before, await f.packages.store.read());
   } finally {
     f.server.stop(true);
   }

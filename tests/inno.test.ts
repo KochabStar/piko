@@ -248,7 +248,23 @@ test("unsupported or corrupt Inno distributions fail without executing them or c
     await expect(p.update("main/inno-tool")).rejects.toThrow(
       "no supported files",
     );
-    expect(await p.store.read()).toEqual(before);
+    const after = await p.store.read();
+    expect({
+      ...after,
+      sources: before.sources,
+      revision: before.revision,
+    }).toEqual(before);
+    expect(after.sources).toEqual({
+      ...before.sources,
+      main: {
+        ...before.sources.main,
+        fetchedAt: after.sources.main!.fetchedAt,
+      },
+    });
+    expect(Date.parse(after.sources.main!.fetchedAt!)).toBeGreaterThanOrEqual(
+      Date.parse(before.sources.main!.fetchedAt!),
+    );
+    expect(after.revision).toBeGreaterThan(before.revision);
   } finally {
     Object.assign(manifest, previous);
   }

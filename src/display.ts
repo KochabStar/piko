@@ -11,6 +11,7 @@ import { join } from "node:path";
 import type { Source, State } from "./types.ts";
 import type { Packages } from "./packages.ts";
 import { publicEndpoint } from "./util.ts";
+import { sourceCacheIsStale } from "./source-fetch.ts";
 
 // Metadata may originate in a source. Never let it inject terminal control codes
 // or new rows into human-readable tables; JSON retains the original values.
@@ -219,14 +220,30 @@ export function updateTable(
 export function sourceTable(sources: Source[], verbose = false): string {
   if (!sources.length) return "No configured sources.";
   return table(
-    ["SOURCE", "TYPE", "URL", ...(verbose ? ["REF", "COMMIT"] : [])],
+    [
+      "SOURCE",
+      "TYPE",
+      "URL",
+      "CACHE",
+      ...(verbose ? ["FETCHED AT", "POLICY"] : []),
+    ],
     sources
       .sort((a, b) => a.alias.localeCompare(b.alias))
       .map((s) => [
         s.alias,
         s.type,
         publicEndpoint(s.url),
-        ...(verbose ? [s.ref ?? "-", s.commit ?? "-"] : []),
+        s.fetchedAt
+          ? sourceCacheIsStale(s)
+            ? "stale"
+            : "fresh"
+          : "not fetched",
+        ...(verbose
+          ? [
+              s.fetchedAt ?? "-",
+              "install: 24h; update: refresh; search: offline",
+            ]
+          : []),
       ]),
   );
 }

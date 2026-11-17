@@ -7,10 +7,11 @@ import { persistence, validateTemplates } from "./persistence.ts";
 import { validateShell } from "./shell-declarations.ts";
 import semver from "semver";
 import { resolveManifestDocument } from "./manifest-template.ts";
+import { validateServices } from "./service-declarations.ts";
 import { validateEnv } from "./environment.ts";
-import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  exists,
   download,
   networkUrl,
   component,
@@ -20,12 +21,11 @@ import {
   record,
   fail,
   failTransient,
-  capture,
-  exists,
   noLinks,
   atomicJson,
+  json,
+  sha256,
   publicEndpoint,
-  removeTree,
   withRetries,
 } from "./util.ts";
 import { sourceIdentity } from "./store.ts";
@@ -126,40 +126,15 @@ export function chooseVersion(
   if (!v) fail(`No installed/available version matches ${request}`);
   return v;
 }
-export function makeSource(
-  alias: string,
-  url: string,
-  type: "http" | "git",
-  ref?: string,
-): Source {
+export function makeSource(alias: string, url: string): Source {
   alias = component(alias);
   if (alias === "npm") fail("npm is reserved for the npm package provider");
-  if (type === "http") {
-    const u = networkUrl(url);
-    if (!u.pathname.endsWith("/")) u.pathname += "/";
-    url = u.href;
-  } else {
-    const u = new URL(url);
-    if (
-      (!["https:", "ssh:"].includes(u.protocol) &&
-        !(
-          u.protocol === "http:" &&
-          ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname)
-        )) ||
-      u.password ||
-      (u.protocol === "https:" && u.username)
-    )
-      fail(
-        "Git sources require HTTPS or ssh:// URLs without embedded passwords",
-      );
-    url = u.href;
-  }
-  if (
-    ref &&
-    (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$/.test(ref) || ref.includes(".."))
-  )
-    fail("Invalid Git ref");
-  return { alias, url, type, ref, identity: sourceIdentity(type, url, ref) };
+  const u = networkUrl(url);
+  // Keep existing directory URLs (and therefore install identities) unchanged.
+  if (!u.pathname.endsWith("/") && !u.pathname.endsWith("/index.json"))
+    u.pathname += "/";
+  url = u.href;
+  return { alias, url, type: "http", identity: sourceIdentity("http", url) };
 }
 export function normalizeIndex(value: unknown): Index {
   if (!record(value) || value.schemaVersion !== 1 || !record(value.packages))
@@ -190,7 +165,14 @@ export function normalizeIndex(value: unknown): Index {
           target === "latest"
         )
           fail("Invalid version alias");
-        chooseVersion(Object.keys(p.versions), target);
+        component(target);
+        if (
+          !Object.hasOwn(p.versions, target) &&
+          !/^\d+(?:\.\d+){0,3}(?:-[a-zA-Z0-9.-]+)?(?:\+[a-zA-Z0-9.-]+)?$/.test(
+            target,
+          )
+        )
+          fail("Invalid version alias target");
       }
     }
     if (
@@ -207,91 +189,6 @@ export function normalizeIndex(value: unknown): Index {
       fail("Invalid runtime distribution identity");
   }
   return value as Index;
-}
-export async function refresh(root: string, s: Source): Promise<Index> {
-  const dir = join(root, "sources", s.identity);
-  await noLinks(dir);
-  await mkdir(dir, { recursive: true });
-  if (s.type === "http") {
-    const url = new URL("index.json", s.url).href;
-    // Broken proxies and captive portals can answer 200 with a non-JSON
-    // body; retry fetch and parse together so both recover.
-    const value: unknown = await withRetries(async () => {
-      const bytes = await download(url, 8 * 1024 * 1024);
-      try {
-        return JSON.parse(Buffer.from(bytes).toString("utf8"));
-      } catch {
-        failTransient(`Source index is not valid JSON: ${publicEndpoint(url)}`);
-      }
-    });
-    const i = normalizeIndex(value);
-    await atomicJson(join(dir, "index.json"), i);
-    return i;
-  }
-  if (!Bun.which("git"))
-    fail(
-      "Git source requires an existing Git installation on PATH; install Git yourself or use an HTTPS manifest source",
-    );
-  const repo = join(dir, "repo");
-  const args = [
-    "-c",
-    "core.hooksPath=NUL",
-    "-c",
-    "submodule.recurse=false",
-    "-c",
-    "protocol.file.allow=never",
-    "-c",
-    "protocol.ext.allow=never",
-  ];
-  const env = {
-    ...process.env,
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_LFS_SKIP_SMUDGE: "1",
-  };
-  // clone and fetch talk to the network; retry transient connection drops.
-  // Other failures retry too — they refail fast and stay loud.
-  const gitNetwork = (operation: string[]) =>
-    withRetries(async () => {
-      try {
-        return await capture("git", operation, { env });
-      } catch (error) {
-        failTransient(error instanceof Error ? error.message : String(error));
-      }
-    });
-  if (!(await exists(repo)))
-    try {
-      await gitNetwork([...args, "clone", "--no-checkout", "--", s.url, repo]);
-    } catch (error) {
-      // A half-cloned repository makes every later refresh skip the clone
-      // and fail forever; never leave one behind.
-      await removeTree(repo);
-      throw error;
-    }
-  await gitNetwork([
-    ...args,
-    "-C",
-    repo,
-    "fetch",
-    "--no-tags",
-    "origin",
-    s.ref ?? "HEAD",
-  ]);
-  const commit = await capture(
-    "git",
-    [...args, "-C", repo, "rev-parse", "--verify", "FETCH_HEAD^{commit}"],
-    { env },
-  );
-  if (!/^[a-f0-9]{40,64}$/.test(commit)) fail("Invalid Git commit identity");
-  s.commit = commit;
-  // Read committed bytes through git show: no checkout, hooks, filters or repository code executes.
-  const text = await capture(
-    "git",
-    [...args, "-C", repo, "show", `${commit}:index.json`],
-    { env },
-  );
-  const i = normalizeIndex(JSON.parse(text));
-  await atomicJson(join(dir, "index.json"), i);
-  return i;
 }
 export function distributionDownloads(platform: Distribution): Download[] {
   return platform.downloads ?? [platform as Download];
@@ -608,6 +505,7 @@ export function normalizeManifest(
       if (record(bin) && bin.data && !p.bootstrap.outputs.includes(bin.path))
         fail("Persistent command is not a declared bootstrap output");
   }
+  if (p.services !== undefined) validateServices(p.services);
   if (p.admin !== undefined) validateAdmin(p.admin);
   if (p.shell !== undefined) validateShell(p.shell);
   if (p.env !== undefined) validateEnv(p.env);
@@ -637,6 +535,7 @@ export function normalizeManifest(
     "depends",
     "env",
     "persist",
+    "services",
   ];
   for (const k of Object.keys(p))
     if (!allowed.includes(k)) fail(`Unsupported distribution field: ${k}`);
@@ -645,42 +544,79 @@ export function normalizeManifest(
       fail(`Unsupported manifest field: ${k}`);
   return value as Manifest;
 }
-export async function loadManifest(
+export async function loadPackageDocument(
   root: string,
   s: Source,
   path: string,
   name: string,
   version: string,
-): Promise<Manifest> {
+  options: { offline?: boolean } = {},
+): Promise<unknown> {
   relativeFile(path);
-  let manifest: unknown;
-  if (s.type === "http") {
-    const url = new URL(path, s.url).href;
-    // Retry fetch and parse together: transient error pages arrive with 200.
-    manifest = await withRetries(async () => {
-      const bytes = await download(url, 2 * 1024 * 1024);
-      try {
-        return JSON.parse(Buffer.from(bytes).toString("utf8"));
-      } catch {
-        failTransient(
-          `Source manifest is not valid JSON: ${publicEndpoint(url)}`,
-        );
-      }
-    });
-  } else
-    manifest = JSON.parse(
-      await capture(
-        "git",
-        [
-          "-c",
-          "core.hooksPath=NUL",
-          "-C",
-          join(root, "sources", s.identity, "repo"),
-          "show",
-          `${s.commit ?? fail("Refresh Git source before reading a manifest")}:${path}`,
-        ],
-        { env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
-      ),
+  if (s.type !== "http")
+    fail(
+      `Source ${s.alias} is not an HTTP catalog; configure a trusted HTTP source explicitly`,
     );
-  return normalizeManifest(manifest, name, version);
+  const snapshot = join(
+    root,
+    "cache",
+    "documents",
+    sha256(JSON.stringify([s.identity, path, name, version])) + ".json",
+  );
+  await noLinks(snapshot);
+  if (options.offline) {
+    if (!(await exists(snapshot))) {
+      const legacy = join(
+        root,
+        "cache",
+        "manifests",
+        sha256(JSON.stringify([s.identity, path, name, version])) + ".json",
+      );
+      await noLinks(legacy);
+      if (await exists(legacy)) return await json(legacy);
+    }
+    if (!(await exists(snapshot)))
+      fail(
+        `Manifest snapshot unavailable offline: ${s.alias}/${name}@${version}; fetch it online first`,
+      );
+    try {
+      return await json(snapshot);
+    } catch (error: any) {
+      if (error.code === "ENOENT")
+        fail(
+          `Manifest snapshot unavailable offline: ${s.alias}/${name}@${version}; fetch it online first`,
+        );
+      throw error;
+    }
+  }
+  const url = new URL(path, s.url).href;
+  // Retry fetch and parse together: transient error pages arrive with 200.
+  const document: unknown = await withRetries(async () => {
+    const bytes = await download(url, 8 * 1024 * 1024);
+    try {
+      return JSON.parse(Buffer.from(bytes).toString("utf8"));
+    } catch {
+      failTransient(
+        `Source manifest is not valid JSON: ${publicEndpoint(url)}`,
+      );
+    }
+  });
+  normalizeManifest(document, name, version);
+  await atomicJson(snapshot, document);
+  return document;
+}
+
+export async function loadManifest(
+  root: string,
+  source: Source,
+  path: string,
+  name: string,
+  version: string,
+  options: { offline?: boolean } = {},
+): Promise<Manifest> {
+  return normalizeManifest(
+    await loadPackageDocument(root, source, path, name, version, options),
+    name,
+    version,
+  );
 }

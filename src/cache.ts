@@ -25,6 +25,7 @@ export async function artifactBytes(
   bypass = false,
   state?: State,
   limit = 512 * 1024 * 1024,
+  offline = false,
 ): Promise<Uint8Array> {
   if (
     !Number.isSafeInteger(limit) ||
@@ -33,6 +34,10 @@ export async function artifactBytes(
   )
     fail("Invalid artifact size limit");
   if (!checksum || bypass) {
+    if (offline)
+      fail(
+        "Offline installs require a verified cached artifact; checksum bypass is unavailable",
+      );
     report({
       kind: "stage",
       label: "Download",
@@ -59,6 +64,7 @@ export async function artifactBytes(
       fail("Cached artifact checksum mismatch; inspect cache before retrying");
     return bytes;
   }
+  if (offline) fail(`Offline artifact cache miss: ${hash}`);
   report({
     kind: "stage",
     label: "Download",

@@ -299,7 +299,20 @@ test("failed multi-download update preserves the working default and existing fi
     bin: { tool: "tool.exe" },
   };
   await expect(p.update("main/tool")).rejects.toThrow("SHA-256 mismatch");
-  expect(await p.store.read()).toEqual(before);
+  const after = await p.store.read();
+  expect({
+    ...after,
+    sources: before.sources,
+    revision: before.revision,
+  }).toEqual(before);
+  expect(after.sources).toEqual({
+    ...before.sources,
+    main: { ...before.sources.main, fetchedAt: after.sources.main!.fetchedAt },
+  });
+  expect(Date.parse(after.sources.main!.fetchedAt!)).toBeGreaterThanOrEqual(
+    Date.parse(before.sources.main!.fetchedAt!),
+  );
+  expect(after.revision).toBeGreaterThan(before.revision);
   expect(
     await readFile(join(p.root, installation.dir, "tool.exe"), "utf8"),
   ).toBe("working executable fixture");

@@ -345,6 +345,8 @@ async function assertShellSnapshotReady(store: Store): Promise<void> {
     join(store.root, "operations", "persist.json"),
     join(store.root, "operations", "layout.json"),
     join(store.root, "operations", "desktop.json"),
+    join(store.root, "operations", "receipt-files.json"),
+    join(store.root, "operations", "receipt-restore.json"),
     profileJournal(store.root),
     store.installPath,
     store.journalPath,

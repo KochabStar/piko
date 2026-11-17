@@ -1,5 +1,12 @@
 import { persistentFolder } from "./layout.ts";
-import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readlink,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   installedForIntegration,
@@ -16,8 +23,15 @@ import { fail, noLinks, sha256 } from "./util.ts";
 import { WindowsEffects } from "./windows-effects.ts";
 import { powershellExecutable } from "./windows.ts";
 import { pathToFileURL } from "node:url";
+import { ensureInstallReceipt, synchronizeReceipts } from "./receipt.ts";
 import type { Store } from "./store.ts";
-import type { ExecDeclaration, Install, State } from "./types.ts";
+import type {
+  AdminDeclaration,
+  BootstrapDeclaration,
+  ExecDeclaration,
+  Install,
+  State,
+} from "./types.ts";
 
 export async function persistentExecutable(
   root: string,
@@ -36,7 +50,6 @@ export async function persistentExecutable(
     (p) => path.startsWith(p + "/") && !install.persistFiles?.[p],
   );
   if (!mapping) fail("Generated command is not in a persistent directory");
-  const { readlink } = await import("node:fs/promises");
   const link = join(root, install.dir, mapping),
     shared = join(
       root,
@@ -71,21 +84,39 @@ async function planExecution(
   const install = installedForIntegration(state, spec);
   await verifyInstall(store.root, install);
   await checkPersistentFileMappings(store.root, install);
-  const declaration = admin ? install.admin : install.bootstrap;
-  if (!declaration)
-    fail(admin ? "No system integration declared" : "No bootstrap declared");
-  if (admin) validateAdmin(declaration);
-  else validateBootstrap(declaration);
-  const exec: ExecDeclaration = admin
-    ? remove
-      ? install.admin!.remove
-      : install.admin!.install
-    : install.bootstrap!;
+  const history = state.receipts?.[install.id]?.admin;
+  let declaration: AdminDeclaration | BootstrapDeclaration;
+  let exec: ExecDeclaration;
+  if (admin) {
+    const system = (remove ? history?.declaration : undefined) ?? install.admin;
+    if (!system) fail("No system integration declared");
+    if (
+      remove &&
+      !history?.install &&
+      state.admin?.[install.id]?.action !== "install"
+    )
+      fail(
+        "No recorded system installation to remove; a manifest is not execution approval",
+      );
+    validateAdmin(system);
+    declaration = system;
+    exec = remove ? system.remove : system.install;
+  } else {
+    const bootstrap = install.bootstrap ?? fail("No bootstrap declared");
+    validateBootstrap(bootstrap);
+    declaration = bootstrap;
+    exec = bootstrap;
+  }
   const target = join(store.root, install.dir, exec.path);
   await noLinks(target);
   const info = await lstat(target);
   if (!info.isFile() || info.nlink !== 1)
     fail("Execution target is not an unlinked package file");
+  if (
+    (exec.kind === "powershell" || exec.kind === "javascript") &&
+    info.size > 65536
+  )
+    fail("Approved integration script exceeds 64 KiB preview limit");
   if (
     install.persist.some(
       (p) => exec.path === p || exec.path.startsWith(p + "/"),
@@ -147,214 +178,276 @@ export async function inspectExecution(
       : "Executes package code with your full user permissions and may download more software. External effects and partial persistent data are not rolled back. Piko does not verify downloads performed internally by this program. Installation/use remain separate.",
   };
 }
-export async function runExecution(
+type ExecutionOptions = {
+  confirmed?: boolean;
+  binding?: string;
+  admin?: boolean;
+  remove?: boolean;
+};
+
+/** Preflight automatic removal without launching package code or changing state. */
+export async function preflightAdminRemoval(
   store: Store,
-  spec: string,
-  options: {
-    confirmed?: boolean;
-    binding?: string;
-    admin?: boolean;
-    remove?: boolean;
-  },
+  state: State,
+  install: Install,
 ) {
-  let receiptId = "",
-    failure: string | undefined;
-  await store.mutate(async (state) => {
-    const plan = await planExecution(
+  const history = ensureInstallReceipt(state, install).admin;
+  if (!history?.install || history.remove?.status === "completed") return;
+  if (history.install.status !== "completed")
+    fail(
+      "System installation failed or was interrupted; inspect and explicitly reconcile piko system before uninstalling",
+    );
+  if (!(await (store.effectsBackend ?? new WindowsEffects()).elevated()))
+    fail(
+      "Administrator permission required: open an Administrator terminal and rerun uninstall. Piko never opens a UAC prompt by itself.",
+    );
+  const spec = `${install.source.alias}/${install.name}@${install.version}`;
+  const plan = await planExecution(store, state, spec, true, true);
+  if (history.contentHash && history.contentHash !== plan.digest)
+    fail(
+      "Approved system integration content changed; inspect and explicitly reconcile before uninstalling",
+    );
+}
+
+async function persistExecutionReceipt(
+  store: Store,
+  state: State,
+  install: Install,
+  admin: boolean,
+): Promise<void> {
+  const before = await store.read();
+  const checkpoint = structuredClone(before);
+  if (admin) {
+    checkpoint.admin ??= {};
+    checkpoint.admin[install.id] = structuredClone(state.admin![install.id]!);
+    ensureInstallReceipt(checkpoint, install).admin = structuredClone(
+      ensureInstallReceipt(state, install).admin,
+    );
+  } else {
+    checkpoint.bootstraps ??= {};
+    checkpoint.bootstraps[install.id] = structuredClone(
+      state.bootstraps![install.id]!,
+    );
+  }
+  await store.commit(before, checkpoint);
+  state.revision = checkpoint.revision;
+}
+
+/** Run under the caller's mutation lock; persist running and completion separately. */
+async function runExecutionLocked(
+  store: Store,
+  state: State,
+  spec: string,
+  options: ExecutionOptions,
+  automaticRemoval = false,
+) {
+  synchronizeReceipts(state);
+  const plan = await planExecution(
+    store,
+    state,
+    spec,
+    !!options.admin,
+    !!options.remove,
+  );
+  if (
+    !automaticRemoval &&
+    (!options.confirmed || !options.binding || options.binding !== plan.binding)
+  )
+    fail(
+      "Execution requires dedicated approval and unchanged preview --binding",
+    );
+  const install = plan.install;
+  const unified = ensureInstallReceipt(state, install);
+  if (options.admin) {
+    if (!(await (store.effectsBackend ?? new WindowsEffects()).elevated()))
+      fail(
+        "Administrator permission required: open an Administrator terminal (right-click your terminal and choose Run as administrator) and rerun the same command. Piko never opens a UAC prompt by itself.",
+      );
+    if (options.remove) {
+      if (!unified.admin?.install)
+        fail(
+          "No recorded system installation to remove; a manifest is not execution approval",
+        );
+      if (automaticRemoval) await preflightAdminRemoval(store, state, install);
+    } else if (
+      Object.values(state.installs).some((other) => {
+        if (other.id === install.id || other.key !== install.key) return false;
+        const history = ensureInstallReceipt(state, other).admin;
+        return !!history?.install && history.remove?.status !== "completed";
+      })
+    )
+      fail(
+        "Another version owns system integration; Administrator terminal: piko system <target-exact-version> --upgrade --approve-admin",
+      );
+  }
+  const receipt = {
+    binding: plan.binding,
+    at: new Date().toISOString(),
+    status: "running" as "running" | "completed" | "failed",
+    error: undefined as string | undefined,
+  };
+  if (options.admin) {
+    const action = options.remove ? "remove" : "install";
+    state.admin ??= {};
+    state.admin[install.id] = { ...receipt, id: install.id, action };
+    unified.admin ??= {};
+    unified.admin[action] = state.admin[install.id];
+    if (!options.remove) {
+      unified.admin.declaration = structuredClone(install.admin!);
+      unified.admin.contentHash = plan.digest;
+      delete unified.admin.remove;
+    }
+  } else {
+    state.bootstraps ??= {};
+    state.bootstraps[install.id] = receipt;
+  }
+  // The existing lock stays held across both checkpoints and arbitrary code.
+  // Store.mutate rebases its final commit after helpers publish checkpoints.
+  await persistExecutionReceipt(store, state, install, !!options.admin);
+  let failure: string | undefined;
+  try {
+    const current = await planExecution(
       store,
-      state,
+      { ...state, revision: state.revision - 1 },
       spec,
       !!options.admin,
       !!options.remove,
     );
-    if (
-      !options.confirmed ||
-      !options.binding ||
-      options.binding !== plan.binding
-    )
-      fail(
-        "Execution requires dedicated approval and unchanged preview --binding",
-      );
-    if (
-      options.admin &&
-      !(await (store.effectsBackend ?? new WindowsEffects()).elevated())
-    )
-      fail(
-        "Administrator permission required: open an Administrator terminal (right-click your terminal and choose Run as administrator) and rerun the same command. Piko never opens a UAC prompt by itself.",
-      );
-    receiptId = plan.install.id;
-    state.schemaVersion = 6;
-    state.aliases ??= {};
-    state.data ??= {};
-    const receipt = {
-      binding: plan.binding,
-      at: new Date().toISOString(),
-      status: "running" as const,
+    if (current.binding !== plan.binding)
+      fail("Execution inputs changed before launch");
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...plan.env,
+      PIKO_HOME: store.root,
     };
-    if (options.admin) {
-      if (
-        options.remove &&
-        state.admin?.[receiptId]?.action !== "install" &&
-        !plan.install.admin?.required
-      )
-        fail("No recorded active system integration to remove");
-      if (
-        !options.remove &&
-        Object.values(state.admin ?? {}).some(
-          (r) =>
-            r.id !== receiptId &&
-            r.action === "install" &&
-            state.installs[r.id]?.key === plan.install.key,
-        )
-      )
-        fail(
-          "Another version owns system integration; Administrator terminal: piko system <target-exact-version> --upgrade --approve-admin",
-        );
-      state.admin ??= {};
-      state.admin[receiptId] = { ...receipt, id: receiptId, action: "install" };
-    } else {
-      state.bootstraps ??= {};
-      state.bootstraps[receiptId] = receipt;
+    // Prevent inherited package-manager injection; no global policy changes.
+    for (const key of Object.keys(env))
+      if (/^(NODE_OPTIONS|BUN_OPTIONS|RUSTUP_INIT_SKIP_PATH_CHECK)$/i.test(key))
+        delete env[key];
+    if (plan.exec.kind === "powershell" || plan.exec.kind === "javascript") {
+      const script = await readFile(plan.target, "utf8");
+      if (Buffer.byteLength(script) > 65536)
+        fail("Approved integration script exceeds 64 KiB preview limit");
     }
-  });
-  // Persist the started record before execution. An interrupted run remains
-  // visible, never auto-runs on recover, and can be retried after a new preview.
-  await store.mutate(async (state) => {
-    const install =
-      state.installs[receiptId] ?? fail("Execution installation disappeared");
-    if (
-      options.admin &&
-      !(await (store.effectsBackend ?? new WindowsEffects()).elevated())
-    )
-      fail(
-        "Administrator permission was lost during execution; retry from an Administrator terminal",
-      );
-    const receipt = options.admin
-      ? state.admin?.[receiptId]
-      : state.bootstraps?.[receiptId];
-    if (
-      !receipt ||
-      receipt.status !== "running" ||
-      receipt.binding !== options.binding
-    )
-      fail("Execution reservation changed; inspect status");
-    try {
-      const plan = await planExecution(
-        store,
-        { ...state, revision: state.revision - 1 },
-        spec,
-        !!options.admin,
-        !!options.remove,
-      );
-      if (plan.binding !== options.binding)
-        fail("Execution inputs changed before launch");
-      const env: NodeJS.ProcessEnv = {
-        ...process.env,
-        ...plan.env,
-        PIKO_HOME: store.root,
-      };
-      // Prevent inherited package-manager injection; no global policy changes.
-      for (const key of Object.keys(env))
+    if (plan.exec.kind === "javascript") {
+      // Approved package code runs inside this (already elevated for admin)
+      // Piko process on its embedded JavaScript runtime: no shell, no
+      // PowerShell quoting or profile pitfalls. The module receives its
+      // declared arguments instead of parsing a command line.
+      // Bun's module cache ignores URL query strings, so each approved
+      // content revision is imported from its own immutable staging copy.
+      const stage = join(
+          store.root,
+          "staging",
+          "exec-" + plan.digest + "-" + crypto.randomUUID(),
+        ),
+        copy = join(stage, "module.mjs");
+      await noLinks(stage);
+      await mkdir(stage, { recursive: true });
+      await writeFile(copy, await readFile(plan.target), { flag: "wx" });
+      try {
+        const module: unknown = await import(pathToFileURL(copy).href);
         if (
-          /^(NODE_OPTIONS|BUN_OPTIONS|RUSTUP_INIT_SKIP_PATH_CHECK)$/i.test(key)
+          module === null ||
+          typeof module !== "object" ||
+          !("default" in module) ||
+          typeof module.default !== "function"
         )
-          delete env[key];
-      if (plan.exec.kind === "powershell" || plan.exec.kind === "javascript") {
-        const script = await readFile(plan.target, "utf8");
-        if (Buffer.byteLength(script) > 65536)
-          fail("Approved integration script exceeds 64 KiB preview limit");
-      }
-      if (plan.exec.kind === "javascript") {
-        // Approved package code runs inside this (already elevated for admin)
-        // Piko process on its embedded JavaScript runtime: no shell, no
-        // PowerShell quoting or profile pitfalls. The module receives its
-        // declared arguments instead of parsing a command line.
-        // Bun's module cache ignores URL query strings, so each approved
-        // content revision is imported from its own immutable staging copy.
-        const stage = join(store.root, "staging", "exec-" + plan.digest),
-          copy = join(stage, "module.mjs");
-        await noLinks(stage);
-        await mkdir(stage, { recursive: true });
-        await writeFile(copy, await readFile(plan.target), { flag: "wx" });
-        const module = await import(pathToFileURL(copy).href);
-        const entry = (module as { default?: unknown }).default;
-        if (typeof entry !== "function")
           fail(
             "Approved JavaScript integration must default-export a function",
           );
-        try {
-          await (
-            entry as (context: {
-              args: string[];
-              env: Record<string, string>;
-              root: string;
-              packageDir: string;
-            }) => unknown
-          )({
-            args: plan.args,
-            env: { ...plan.env, PIKO_HOME: store.root },
-            root: store.root,
-            packageDir: join(store.root, install.dir),
-          });
-        } catch (error) {
-          fail(
-            `Approved execution failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      } else {
-        const command =
-          plan.exec.kind === "powershell"
-            ? [
-                powershellExecutable(),
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-File",
-                plan.target,
-                ...plan.args,
-              ]
-            : [plan.target, ...plan.args];
-        const child = Bun.spawn(command, {
-          env,
-          cwd: join(store.root, install.dir),
-          stdin: "inherit",
-          stdout: "inherit",
-          stderr: "inherit",
-          timeout: options.admin ? 300000 : 900000,
+        await module.default({
+          args: plan.args,
+          env: { ...plan.env, PIKO_HOME: store.root },
+          root: store.root,
+          packageDir: join(store.root, install.dir),
         });
-        const code = await child.exited;
-        if (code !== 0)
-          fail(
-            `Approved execution failed (exit ${code}); partial external effects/data may remain`,
-          );
+      } catch (error) {
+        fail(
+          `Approved execution failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } finally {
+        await rm(stage, { recursive: true, force: true });
       }
-      if (!options.admin)
-        for (const path of install.bootstrap!.outputs) {
-          const target = join(
-            store.root,
-            "persist",
-            persistentFolder(install, install.key),
-            path,
-          );
-          await noLinks(target);
-          if (!(await lstat(target)).isFile())
-            fail("Bootstrap did not create a declared output");
-        }
-      receipt.status = "completed";
-      if (options.admin && options.remove)
-        state.admin![receiptId]!.action = "remove";
-    } catch (error) {
-      failure = error instanceof Error ? error.message : String(error);
-      receipt.status = "failed";
-      receipt.error = failure;
-      if (options.admin && options.remove)
-        state.admin![receiptId]!.action = "install";
+    } else {
+      const command =
+        plan.exec.kind === "powershell"
+          ? [
+              powershellExecutable(),
+              "-NoLogo",
+              "-NoProfile",
+              "-NonInteractive",
+              "-File",
+              plan.target,
+              ...plan.args,
+            ]
+          : [plan.target, ...plan.args];
+      const child = Bun.spawn(command, {
+        env,
+        cwd: join(store.root, install.dir),
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+        timeout: options.admin ? 300000 : 900000,
+      });
+      const code = await child.exited;
+      if (code !== 0)
+        fail(
+          `Approved execution failed (exit ${code}); partial external effects/data may remain`,
+        );
     }
-  });
+    if (!options.admin)
+      for (const path of install.bootstrap!.outputs) {
+        const target = join(
+          store.root,
+          "persist",
+          persistentFolder(install, install.key),
+          path,
+        );
+        await noLinks(target);
+        if (!(await lstat(target)).isFile())
+          fail("Bootstrap did not create a declared output");
+      }
+    if (options.admin) state.admin![install.id]!.status = "completed";
+    else receipt.status = "completed";
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+    const result = options.admin ? state.admin![install.id]! : receipt;
+    result.status = "failed";
+    result.error = failure;
+  }
+  await persistExecutionReceipt(store, state, install, !!options.admin);
   if (failure) fail(failure);
   return {
     status: "completed",
     defaultUnchanged: true,
     restartApplications: true,
   };
+}
+
+export async function removeAdminIntegrationLocked(
+  store: Store,
+  state: State,
+  install: Install,
+) {
+  const history = ensureInstallReceipt(state, install).admin;
+  if (!history?.install || history.remove?.status === "completed") return;
+  return await runExecutionLocked(
+    store,
+    state,
+    `${install.source.alias}/${install.name}@${install.version}`,
+    { admin: true, remove: true },
+    true,
+  );
+}
+
+export async function runExecution(
+  store: Store,
+  spec: string,
+  options: ExecutionOptions,
+) {
+  return await store.mutate(
+    (state) => runExecutionLocked(store, state, spec, options),
+    { skipUnchanged: true },
+  );
 }

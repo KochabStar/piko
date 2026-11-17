@@ -104,11 +104,18 @@ test("an interrupted installation never disables unrelated commands, and its jou
   expect(launched.out).toContain("still-works");
   // Read-only commands keep working too.
   expect((await cli(["list"])).out).toContain("main/first");
-  // The broken journal is reported, not hidden, when something tries to write.
-  const doctor = await cli(["doctor"], 1);
-  expect(doctor.err).toContain("Invalid installation journal");
-  await rm(join(home, "operations", "install.json"));
+  // Diagnosis and unrelated tools remain readonly; explicit recovery reports
+  // invalid write intent without deleting the evidence.
+  const before = await readFile(join(home, "apps", "piko", "state.json"));
   await cli(["doctor"]);
+  expect(await readFile(join(home, "apps", "piko", "state.json"))).toEqual(
+    before,
+  );
+  expect(await exists(join(home, "operations", "install.json"))).toBe(true);
+  const recovery = await cli(["recover"], 1);
+  expect(recovery.err).toContain("Invalid installation journal");
+  await rm(join(home, "operations", "install.json"));
+  await cli(["recover"]);
 });
 
 test("a pending selection journal neither blocks launches nor needs piko recover", async () => {
@@ -132,9 +139,10 @@ test("a pending selection journal neither blocks launches nor needs piko recover
   ]);
   expect(launched.out).toContain("committed-state");
   expect(await exists(store.journalPath)).toBe(true);
-  // The next write finishes the interrupted selection on its own. Because the
-  // state file never reached the new revision, recovery keeps the old default.
+  // Explicit recovery keeps the old default when publication never happened.
   await cli(["doctor"]);
+  expect(await exists(store.journalPath)).toBe(true);
+  await cli(["recover"]);
   expect(await exists(store.journalPath)).toBe(false);
   expect((await store.read()).defaults[key]?.id).toBe(first.id);
 });

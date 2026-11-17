@@ -85,7 +85,7 @@ afterAll(async () => {
 });
 async function legacy(name: string, { alias = false, persist = true } = {}) {
   const root = join(work, name),
-    source = makeSource("main", url, "http"),
+    source = makeSource("main", url),
     key = packageKey(source, "tool"),
     id = installId(key, "1.2.3.4"),
     dir = join("apps", key, versionKey("1.2.3.4"));
@@ -134,7 +134,7 @@ async function legacy(name: string, { alias = false, persist = true } = {}) {
     join(root, "apps", key, "current"),
     "junction",
   );
-  await atomicJson(join(root, "sources", source.identity, "index.json"), index);
+  await atomicJson(join(root, "sources", source.alias, "latest.json"), index);
   await atomicJson(join(root, "apps/piko/state.json"), state);
   return { root, source, key, id, i, state };
 }
@@ -151,7 +151,7 @@ test("new installs use package/version folders while source identities remain in
     resolve(join(p.root, i.dir)),
   );
   expect(await exists(join(p.root, "persist/tool/data"))).toBe(true);
-  expect((await p.store.read()).schemaVersion).toBe(8);
+  expect((await p.store.read()).schemaVersion).toBe(9);
 });
 test("safe vendor versions are readable; path/device identifiers never become directories", () => {
   expect(readableVersion("5.2.6.32774")).toBe("5.2.6.32774");

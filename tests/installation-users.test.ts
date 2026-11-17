@@ -186,7 +186,8 @@ test("process inspection failure is not treated as permission to remove old Shel
   expect(await exists(p.store.removalPath)).toBe(false);
 });
 test("active system registration is still content-approved; loaded-image support never bypasses removal approval", async () => {
-  const { p, old } = await fixture();
+  const { p, effects, old } = await fixture();
+  effects.elevated = async () => false;
   const state = await p.store.read();
   state.admin = {
     [old.id]: {
@@ -199,9 +200,13 @@ test("active system registration is still content-approved; loaded-image support
   };
   await atomicJson(p.store.statePath, state);
   await expect(p.uninstall("extension")).rejects.toThrow(
-    "desktop/system integration",
+    "Administrator permission required",
   );
   expect(await p.store.read()).toEqual(state);
+  expect(await exists(join(p.root, old.dir, "extension.exe"))).toBe(true);
+  expect(await readFile(join(p.root, old.dir, "data/settings"), "utf8")).toBe(
+    "persistent data kept",
+  );
   latest = "2.0.0";
   const next = await p.install("main/extension@2.0.0");
   await expect(p.use("main/extension@2.0.0")).rejects.toThrow(

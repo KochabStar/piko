@@ -344,6 +344,9 @@ describe("portable package lifecycle", () => {
   });
   test("source refresh failure does not silently reuse cache", async () => {
     const p = await manager("refresh");
+    const state = await p.store.read();
+    state.sources.main!.fetchedAt = "2000-01-01T00:00:00.000Z";
+    await atomicJson(p.store.statePath, state);
     brokenIndex = true;
     try {
       await expect(p.install("tool@1.0.0")).rejects.toThrow("503");
@@ -377,6 +380,9 @@ describe("portable package lifecycle", () => {
     delete after.installs[i.id];
     delete after.defaults[i.key];
     delete after.commands.tool;
+    delete after.receipts?.[i.id];
+    delete after.services?.[i.id];
+    delete after.startMenu?.[i.key];
     const trash = "uninstall-" + crypto.randomUUID();
     await mkdir(join(p.root, "staging"), { recursive: true });
     await atomicJson(p.store.removalPath, { installation: i, trash });
@@ -394,6 +400,9 @@ describe("portable package lifecycle", () => {
       after = structuredClone(before);
     after.revision++;
     delete after.installs[i.id];
+    delete after.receipts?.[i.id];
+    delete after.services?.[i.id];
+    delete after.startMenu?.[i.key];
     const trash = "uninstall-" + crypto.randomUUID();
     await mkdir(join(p.root, "staging"), { recursive: true });
     await atomicJson(p.store.removalPath, { installation: i, trash });
@@ -410,6 +419,9 @@ describe("portable package lifecycle", () => {
     const after = structuredClone(await p.store.read());
     after.revision++;
     delete after.installs[i.id];
+    delete after.receipts?.[i.id];
+    delete after.services?.[i.id];
+    delete after.startMenu?.[i.key];
     const trash = "uninstall-" + crypto.randomUUID();
     await mkdir(join(p.root, "staging"), { recursive: true });
     await rename(join(p.root, i.dir), join(p.root, "staging", trash));

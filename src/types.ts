@@ -29,6 +29,76 @@ export type ExecDeclaration = {
   kind?: "native" | "powershell" | "javascript";
 };
 export type BootstrapDeclaration = ExecDeclaration & { outputs: string[] };
+export type ServiceDeclaration = {
+  name: string;
+  displayName: string;
+  description?: string;
+  binPath: string;
+  args?: string[];
+  startType: "auto" | "demand" | "disabled";
+  depends?: string[];
+  startAfterInstall?: boolean;
+  stopBeforeUninstall?: boolean;
+};
+export type ServiceReceiptConfig = {
+  binaryPath: string;
+  startType: number;
+  serviceType: number;
+  errorControl: number;
+  account: string;
+  displayName: string;
+  description: string;
+  depends: string[];
+};
+export type ServiceReceipt = {
+  id: string;
+  name: string;
+  displayName: string;
+  installedAt: string;
+  installedVersion: string;
+  packageId: string;
+  status: "registered" | "failed" | "removed";
+  config?: ServiceReceiptConfig;
+  owned?: boolean;
+  error?: string;
+};
+export type ServiceEffect = {
+  order: number;
+  declaration: ServiceDeclaration;
+  receipt: ServiceReceipt;
+};
+export type ShellEffect = {
+  order: number;
+  packageId: string;
+  path: string;
+  block: string;
+};
+export type FileEffect = {
+  order: number;
+  packageId: string;
+  path: string;
+  kind: "file" | "directory";
+  before: EffectValue;
+  after: EffectValue;
+};
+export type AdminEffect = {
+  install?: AdminReceipt;
+  remove?: AdminReceipt;
+  declaration?: AdminDeclaration;
+  contentHash?: string;
+};
+export type InstallReceipt = {
+  packageId: string;
+  installedAt: string;
+  version: string;
+  desktop?: (DesktopReceipt & { order: number })[];
+  shell?: ShellEffect[];
+  startMenu?: (StartMenuReceipt & { order: number })[];
+  service?: ServiceEffect[];
+  admin?: AdminEffect & { order?: number };
+  bootstrap?: (BootstrapReceipt & { order: number })[];
+  files?: FileEffect[];
+};
 export type AdminDeclaration = {
   required?: boolean;
   install: ExecDeclaration;
@@ -77,6 +147,10 @@ export type PersistentFile = { mode: "hardlink" | "seed"; initial: string };
 export type PersistDeclaration =
   string | ({ path: string; kind: "file" } & PersistentFile);
 export type ConfigTemplate = { text: string };
+/** Historical provenance is retained verbatim for installed receipt verification.
+ * New configured sources are HTTP-only (npm is an internal provider); git/ref/
+ * commit remain readable solely to list/remove/uninstall legacy installations.
+ */
 export type Source = {
   alias: string;
   url: string;
@@ -84,6 +158,7 @@ export type Source = {
   ref?: string;
   commit?: string;
   identity: string;
+  fetchedAt?: string;
 };
 export type ScriptApproval = { binding: string; approvedAt: string };
 export type NpmBuild = {
@@ -116,6 +191,7 @@ export type Install = {
   desktop?: DesktopDeclaration;
   bootstrap?: BootstrapDeclaration;
   admin?: AdminDeclaration;
+  services?: ServiceDeclaration[];
   depends?: Dependency[];
   npmBuild?: NpmBuild;
   scripts?: {
@@ -141,13 +217,15 @@ export type StartMenuReceipt = {
   entries: { name: string; hash: string }[];
 };
 export type State = {
-  schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+  schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
   revision: number;
   sources: Record<string, Source>;
   installs: Record<string, Install>;
   defaults: Record<string, Selection>;
   commands: Record<string, string>;
   aliases?: Record<string, CommandAlias>;
+  receipts?: Record<string, InstallReceipt>;
+  services?: Record<string, ServiceReceipt>;
   data?: Record<string, PersistentData>;
   profiles?: Record<string, ProfileIntegration>;
   startMenu?: Record<string, StartMenuReceipt>;
@@ -201,6 +279,7 @@ export type Distribution = {
   desktop?: DesktopDeclaration;
   bootstrap?: BootstrapDeclaration;
   admin?: AdminDeclaration;
+  services?: ServiceDeclaration[];
   maxExpandedBytes?: number;
 } & (
   | (Download & { downloads?: never })

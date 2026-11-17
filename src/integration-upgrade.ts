@@ -3,9 +3,14 @@ import { inspectExecution, runExecution } from "./execution.ts";
 import { installedForIntegration } from "./desktop.ts";
 import { WindowsEffects } from "./windows-effects.ts";
 import { atomicJson, fail, sha256 } from "./util.ts";
-import type { Packages } from "./packages.ts";
+import { ensureInstallReceipt } from "./receipt.ts";
+import type { PackagesContext } from "./ops/context.ts";
+import { usePackage } from "./ops/use.ts";
 
-export async function inspectSystemUpgrade(packages: Packages, spec: string) {
+export async function inspectSystemUpgrade(
+  packages: PackagesContext,
+  spec: string,
+) {
   const state = await packages.store.read();
   const target = installedForIntegration(state, spec);
   const selection = state.defaults[target.key];
@@ -14,27 +19,35 @@ export async function inspectSystemUpgrade(packages: Packages, spec: string) {
     fail(
       "Install the candidate first and specify its exact version; an older default must be selected",
     );
-  const active = state.admin?.[previous.id];
-  if (active?.action === "install" && active.status !== "completed")
+  const previousHistory = ensureInstallReceipt(state, previous).admin;
+  const targetHistory = ensureInstallReceipt(state, target).admin;
+  if (
+    previousHistory?.install &&
+    previousHistory.install.status !== "completed"
+  )
     fail(
       "Previous system action is running/failed; inspect and reconcile it explicitly before upgrade",
     );
-  if (
-    state.admin?.[target.id]?.action === "install" &&
-    state.admin[target.id]?.status !== "completed"
-  )
+  if (targetHistory?.install && targetHistory.install.status !== "completed")
     fail(
       "Target system installation failed or was interrupted; preview and retry piko system <target-exact-version> before upgrading",
+    );
+  if (targetHistory?.remove && targetHistory.remove.status !== "completed")
+    fail(
+      "Target system removal failed or was interrupted; inspect and reconcile it before upgrading",
     );
   const oldSpec =
     previous.source.alias + "/" + previous.name + "@" + previous.version;
   const targetReady =
-    state.admin?.[target.id]?.action === "install" &&
-    state.admin[target.id]?.status === "completed";
+    targetHistory?.install?.status === "completed" && !targetHistory.remove;
+  const previousActive =
+    previousHistory?.install && previousHistory.remove?.status !== "completed";
+  if (targetReady && previousActive)
+    fail(
+      "Two versions have active system integration; reconcile the previous removal before selecting the target",
+    );
   const remove =
-    !targetReady &&
-    (active?.action === "install" ||
-      (previous.admin?.required && active?.action !== "remove"))
+    !targetReady && previousActive
       ? await inspectExecution(packages.store, oldSpec, true, true)
       : null;
   const install = await inspectExecution(packages.store, spec, true);
@@ -58,7 +71,7 @@ export async function inspectSystemUpgrade(packages: Packages, spec: string) {
 }
 
 export async function applySystemUpgrade(
-  packages: Packages,
+  packages: PackagesContext,
   spec: string,
   binding: string,
 ) {
@@ -126,7 +139,7 @@ export async function applySystemUpgrade(
       fail("Candidate system integration is not ready for selection");
     phase = "selecting-new";
     await atomicJson(journal, { ...plan, phase });
-    await packages.use(spec, {
+    await usePackage(packages, spec, {
       expectedRevision: ready.revision,
       retainRequest: true,
     });

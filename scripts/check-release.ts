@@ -30,6 +30,8 @@ try {
   if (
     metadata.version !== VERSION ||
     metadata.signed !== false ||
+    !Array.isArray(metadata.stateSchemas) ||
+    !metadata.stateSchemas.includes(9) ||
     (await executableHash(exe)) !== metadata.sha256
   )
     throw new Error("Release identity mismatch");

@@ -1,11 +1,17 @@
 import {
   chooseVersion,
-  loadManifest,
   makeSource,
   parseSpec,
-  refresh,
   distributionDownloads,
 } from "./catalog.ts";
+import { ensureSourceIndex } from "./source-fetch.ts";
+import {
+  resolvePackageManifest,
+  resolutionSession,
+} from "./package-resolution.ts";
+import { installPackage } from "./ops/install.ts";
+import { savedManifest } from "./package-resolution.ts";
+import { normalizeManifest } from "./catalog.ts";
 import { dependencyStatus } from "./dependencies.ts";
 import { chooseLayout, installDirectory } from "./layout.ts";
 import { npmSnapshotPath } from "./scripts.ts";
@@ -27,7 +33,7 @@ import type { Bin, CatalogPackage, Manifest, Source, State } from "./types.ts";
 
 export type Inventory = {
   schemaVersion: 1;
-  sources: { alias: string; url: string; type: "http" | "git"; ref?: string }[];
+  sources: { alias: string; url: string; type: "http" }[];
   packages: {
     source: string;
     name: string;
@@ -37,6 +43,10 @@ export type Inventory = {
   aliases: { name: string; package: string; command: string }[];
   npmRegistry?: string;
   npmRegistries?: Record<string, string>;
+  exactManifests?: Record<
+    string,
+    { sourceIdentity: string; manifestHash: string; manifest: Manifest }
+  >;
   npmLocks?: Record<string, unknown>;
   integrations?: {
     package: string;
@@ -45,12 +55,7 @@ export type Inventory = {
 };
 function safeUrl(value: string): string {
   const u = new URL(value);
-  if (
-    u.password ||
-    (u.username && !(u.protocol === "ssh:" && u.username === "git")) ||
-    u.search ||
-    u.hash
-  )
+  if (u.password || u.username || u.search || u.hash)
     fail(
       "Inventory refuses URLs containing credentials, queries or fragments; configure a credential-free endpoint first",
     );
@@ -72,6 +77,7 @@ export function validateInventory(value: unknown): Inventory {
     "npmRegistry",
     "npmRegistries",
     "npmLocks",
+    "exactManifests",
     "integrations",
   ]);
   const v = value as Inventory;
@@ -87,15 +93,24 @@ export function validateInventory(value: unknown): Inventory {
     fail("Invalid inventory header or size");
   const sources = new Set<string>();
   for (const s of v.sources) {
-    fields(s, ["alias", "url", "type", "ref"]);
+    if (!record(s)) fail("Invalid inventory source");
+    const raw = s as unknown as Record<string, unknown>;
+    if (
+      raw.type === "git" ||
+      Object.hasOwn(raw, "ref") ||
+      Object.hasOwn(raw, "commit")
+    )
+      fail(
+        "Legacy Git inventory sources cannot be converted automatically; configure a trusted HTTP source and reinstall explicitly without rewriting installed provenance",
+      );
+    fields(s, ["alias", "url", "type"]);
     if (
       typeof s.alias !== "string" ||
       typeof s.url !== "string" ||
-      !["http", "git"].includes(s.type) ||
-      (s.ref !== undefined && typeof s.ref !== "string")
+      s.type !== "http"
     )
-      fail("Invalid inventory source");
-    const canonical = makeSource(s.alias, safeUrl(s.url), s.type, s.ref);
+      fail("Invalid inventory source: only HTTP catalogs are supported");
+    const canonical = makeSource(s.alias, safeUrl(s.url));
     if (
       s.alias !== canonical.alias ||
       s.url !== canonical.url ||
@@ -194,6 +209,35 @@ export function validateInventory(value: unknown): Inventory {
       validateNpmLock(lock, parsed.name, parsed.request);
     }
   }
+  for (const [spec, snapshot] of Object.entries(v.exactManifests ?? {})) {
+    const parsed = parseSpec(spec),
+      declared = specs.get(`${parsed.source}/${parsed.name}`);
+    fields(snapshot, ["sourceIdentity", "manifestHash", "manifest"]);
+    if (
+      !parsed.request ||
+      !declared ||
+      parsed.source === "npm" ||
+      !declared.versions.includes(parsed.request)
+    )
+      fail("Unreferenced exact inventory manifest");
+    const source = v.sources.find((entry) => entry.alias === parsed.source)!;
+    if (
+      snapshot.sourceIdentity !== makeSource(source.alias, source.url).identity
+    )
+      fail("Exact inventory source identity mismatch");
+    const manifest = normalizeManifest(
+      snapshot.manifest,
+      parsed.name,
+      parsed.request,
+    );
+    if (
+      sha256(JSON.stringify(manifest)) !== snapshot.manifestHash ||
+      distributionDownloads(manifest.platforms["windows-x64"]!).some(
+        (download) => !download.sha256,
+      )
+    )
+      fail("Exact inventory manifest content mismatch or missing checksum");
+  }
   const aliases = new Set<string>();
   for (const a of v.aliases) {
     fields(a, ["name", "package", "command"]);
@@ -234,11 +278,14 @@ export function exportInventory(state: State): Inventory {
   const sources = new Map<string, Inventory["sources"][number]>();
   const addSource = (s: Source) => {
     if (s.type === "npm") return;
-    const item = {
+    if (s.type !== "http")
+      fail(
+        "Legacy Git provenance cannot be exported as HTTP; explicitly migrate trusted sources and reinstall first",
+      );
+    const item: Inventory["sources"][number] = {
       alias: s.alias,
       url: safeUrl(s.url),
-      type: s.type,
-      ...(s.ref ? { ref: s.ref } : {}),
+      type: "http",
     };
     const prior = sources.get(s.alias);
     if (prior && JSON.stringify(prior) !== JSON.stringify(item))
@@ -376,6 +423,7 @@ export async function planInventory(packages: Packages, value: unknown) {
     }[] = [];
   const sourceMap = new Map<string, Source>(),
     metadata = new Map<string, Metadata>();
+  const resolution = resolutionSession();
   const bySpec = new Map(inventory.packages.map((p) => [packageSpec(p), p]));
   const keyFor = (p: Inventory["packages"][number]) =>
     p.source === "npm"
@@ -390,14 +438,16 @@ export async function planInventory(packages: Packages, value: unknown) {
         ? packageKey(sourceMap.get(p.source)!, p.name)
         : undefined;
   for (const s of inventory.sources) {
-    const source = makeSource(s.alias, s.url, s.type, s.ref);
+    const source = makeSource(s.alias, s.url);
     sourceMap.set(s.alias, source);
     const existing = state.sources[s.alias];
-    if (existing && existing.identity !== source.identity)
+    if (existing && existing.identity !== source.identity) {
       conflicts.push(`Source ${s.alias} conflicts with its existing identity`);
+      continue;
+    }
     if (!existing) steps.push({ action: "add-source", source: s.alias });
     try {
-      const index = await refresh(packages.root, source);
+      const index = await ensureSourceIndex(packages.root, existing ?? source);
       for (const p of inventory.packages.filter((p) => p.source === s.alias)) {
         const entry = index.packages[p.name];
         if (!entry) {
@@ -406,19 +456,18 @@ export async function planInventory(packages: Packages, value: unknown) {
         }
         const manifests = new Map<string, Manifest>();
         for (const version of p.versions) {
-          if (!Object.hasOwn(entry.versions, version)) {
-            conflicts.push(
-              `${packageSpec(p)}@${version} is absent from its source`,
-            );
-            continue;
-          }
-          const manifest = await loadManifest(
-            packages.root,
-            source,
-            entry.versions[version]!,
-            p.name,
-            version,
-          );
+          const manifest =
+            inventory.exactManifests?.[`${packageSpec(p)}@${version}`]
+              ?.manifest ??
+            (await resolvePackageManifest(
+              packages.root,
+              state,
+              source,
+              p.name,
+              entry,
+              version,
+              { session: resolution },
+            ));
           if (
             distributionDownloads(manifest.platforms["windows-x64"]!).some(
               (d) => !d.sha256,
@@ -680,6 +729,14 @@ export async function planInventory(packages: Packages, value: unknown) {
         hash!,
       ]),
     ),
+    exact: Object.fromEntries(
+      [...metadata].flatMap(([spec, meta]) =>
+        [...meta.manifests].map(([version, manifest]) => [
+          `${spec}@${version}`,
+          { source: meta.source, name: manifest.name, version, manifest },
+        ]),
+      ),
+    ),
     warning:
       "Restore is sequential, not a whole-machine transaction. It does not restore credentials, data or script approvals. Successful earlier steps remain after failure; rerun a preview to resume.",
   };
@@ -687,7 +744,7 @@ export async function planInventory(packages: Packages, value: unknown) {
 
 export async function exportLockedInventory(packages: Packages) {
   const state = await packages.store.read();
-  const inventory = exportInventory(state);
+  const inventory = await exportInventorySnapshot(packages);
   const npmLocks: Record<string, unknown> = {};
   for (const install of Object.values(state.installs).filter(
     (i) => i.kind === "npm",
@@ -729,20 +786,21 @@ export async function importInventory(
   }[] = [];
   for (const s of plan.inventory.sources) {
     if (!(await packages.store.read()).sources[s.alias]) {
-      await packages.addSource(s.alias, s.url, s.type, s.ref, revision++);
+      await packages.addSource(s.alias, s.url, revision++);
       completed.push({ action: "source-added", source: s.alias });
     }
   }
   for (const spec of plan.order) {
     const p = plan.inventory.packages.find((p) => packageSpec(p) === spec)!;
     for (const version of p.versions) {
-      await packages.install(
-        `${spec}@${version}`,
-        false,
-        revision++,
-        plan.manifests[`${spec}@${version}`],
-        plan.inventory.npmLocks?.[`${spec}@${version}`],
-      );
+      await installPackage(packages, `${spec}@${version}`, {
+        expectedRevision: revision++,
+        expectedManifestHash: plan.manifests[`${spec}@${version}`],
+        npmLock: plan.inventory.npmLocks?.[`${spec}@${version}`],
+        ...(p.source !== "npm"
+          ? { bound: plan.exact[`${spec}@${version}`]! }
+          : {}),
+      });
       completed.push({ action: "installed", package: spec, version });
     }
     if (p.selection) {
@@ -776,4 +834,36 @@ export async function importInventory(
     pendingIntegrations: plan.inventory.integrations ?? [],
     warning: plan.warning,
   };
+}
+
+export async function exportInventorySnapshot(
+  packages: Packages,
+): Promise<Inventory> {
+  const state = await packages.store.read();
+  const inventory = exportInventory(state);
+  const exactManifests: NonNullable<Inventory["exactManifests"]> = {};
+  for (const install of Object.values(state.installs)) {
+    if (install.kind === "npm") continue;
+    const manifest = await savedManifest(
+      packages.root,
+      install.source,
+      install.name,
+      install.version,
+    );
+    if (!manifest) continue;
+    const manifestHash = sha256(JSON.stringify(manifest));
+    if (manifestHash !== install.manifestHash)
+      fail("Saved exact manifest differs from installed receipt");
+    exactManifests[
+      `${install.source.alias}/${install.name}@${install.version}`
+    ] = {
+      sourceIdentity: install.source.identity,
+      manifestHash,
+      manifest,
+    };
+  }
+  return validateInventory({
+    ...inventory,
+    ...(Object.keys(exactManifests).length ? { exactManifests } : {}),
+  });
 }

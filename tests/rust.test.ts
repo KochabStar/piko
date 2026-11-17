@@ -59,7 +59,7 @@ else if(a[0]!=='update')process.exit(7);writeFileSync(f,JSON.stringify(s));`,
     ).success,
   ).toBe(true);
   const p = new Packages(join(root, "home"));
-  const source = makeSource("main", "https://rust-fixture.invalid/", "http");
+  const source = makeSource("main", "https://rust-fixture.invalid/");
   const key = packageKey(source, "rustup"),
     id = installId(key, "1.0.0"),
     dir = join("apps", key, "1.0.0");

@@ -321,7 +321,23 @@ test("compiled MSI install bootstraps private tools, leaves default unchanged, a
     version = "2.0.0";
     missing = true;
     await expect(p.update("main/tool")).rejects.toThrow("missing");
-    expect(await p.store.read()).toEqual(before);
+    const after = await p.store.read();
+    expect({
+      ...after,
+      sources: before.sources,
+      revision: before.revision,
+    }).toEqual(before);
+    expect(after.sources).toEqual({
+      ...before.sources,
+      main: {
+        ...before.sources.main,
+        fetchedAt: after.sources.main!.fetchedAt,
+      },
+    });
+    expect(Date.parse(after.sources.main!.fetchedAt!)).toBeGreaterThanOrEqual(
+      Date.parse(before.sources.main!.fetchedAt!),
+    );
+    expect(after.revision).toBeGreaterThan(before.revision);
   } finally {
     server.stop(true);
   }

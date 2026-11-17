@@ -13,7 +13,7 @@ try {
   const env = { ...process.env, PIKO_HOME: root },
     exe = resolve("dist/piko.exe");
   await capture(exe, ["setup"], { env });
-  const source = makeSource("fixture", "https://benchmark.invalid/", "http"),
+  const source = makeSource("fixture", "https://benchmark.invalid/"),
     key = packageKey(source, "node"),
     version = (await capture(node, ["--version"])).replace(/^v/, ""),
     id = installId(key, version),

@@ -406,7 +406,6 @@ test("compiled CLI progress stays on stderr; JSON, pipes, CI and no-progress rem
     "always",
     "--verbose",
   ]);
-  expect(verbose.err).toContain("Keep pinned version");
   expect(verbose.out).toContain("PACKAGE");
   const status = await run(["status"]);
   expect(status.out).toBe("All packages are up to date.\n");

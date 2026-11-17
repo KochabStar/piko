@@ -28,7 +28,7 @@ await writeFile(
       sha256: hash,
       signed: false,
       bun: Bun.version,
-      stateSchemas: [1, 2, 3, 4, 5, 6, 7, 8],
+      stateSchemas: [1, 2, 3, 4, 5, 6, 7, 8, 9],
     },
     null,
     2,

@@ -31,11 +31,7 @@ export function npmEnvironment(node: string): NodeJS.ProcessEnv {
   env.PATH = dirname(node) + ";" + (process.env.PATH ?? process.env.Path ?? "");
   return env;
 }
-export async function npmContext(
-  root: string,
-  state: State,
-  name?: string,
-): Promise<{
+export type NpmContext = {
   node: string;
   npm: string;
   registry: string;
@@ -43,8 +39,13 @@ export async function npmContext(
   registries: Record<string, string>;
   version: string;
   env: NodeJS.ProcessEnv;
-  run: (args: string[], cwd: string) => Promise<string>;
-}> {
+  run(args: string[], cwd: string): Promise<string>;
+};
+export async function npmContext(
+  root: string,
+  state: State,
+  name?: string,
+): Promise<NpmContext> {
   const selected = selectedNode(root, state);
   await noLinks(selected.exe);
   await noLinks(selected.npm);

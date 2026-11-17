@@ -27,6 +27,7 @@ import type {
   State,
 } from "./types.ts";
 import type { Store } from "./store.ts";
+import { validateState } from "./store.ts";
 
 export const desktopJournal = (root: string) =>
   join(root, "operations", "desktop.json");
@@ -213,10 +214,13 @@ export async function stageDesktopChange(
     validateEffect(effect);
     if (!equalValue(await backend.read(effect.target), effect.before))
       fail("Integration resource changed after confirmation");
+    await effectBytes(root, effect.before);
+    await effectBytes(root, effect.after);
   }
   const entry = {
     key,
     beforeRevision: state.revision,
+    state: structuredClone(state),
     before: state.desktop?.[key] ?? null,
     after,
     effects,
@@ -277,10 +281,20 @@ export async function recoverDesktop(
   }
   const receipt = j.after ?? j.before;
   if (!receipt) fail("Desktop recovery has no ownership transition");
-  const install = state.installs[receipt.id];
+  let beforeState: State;
+  if (j.state !== undefined) {
+    validateState(j.state);
+    beforeState = structuredClone(j.state);
+    if (
+      beforeState.revision !== j.beforeRevision ||
+      JSON.stringify(beforeState.desktop?.[j.key] ?? null) !==
+        JSON.stringify(j.before)
+    )
+      fail("Desktop recovery state snapshot does not match ownership");
+  } else beforeState = structuredClone(state);
+  const install = beforeState.installs[receipt.id];
   if (!install || install.key !== j.key)
     fail("Desktop recovery references missing installation");
-  const beforeState = structuredClone(state);
   beforeState.revision = j.beforeRevision;
   beforeState.desktop ??= {};
   if (j.before) beforeState.desktop[j.key] = j.before;
@@ -311,7 +325,7 @@ export async function recoverDesktop(
             effect.before === null,
           );
     };
-    const originalInstall = state.installs[j.before.id];
+    const originalInstall = beforeState.installs[j.before.id];
     if (!originalInstall || originalInstall.key !== j.key)
       fail("Prior desktop installation missing");
     const originalPlan = await desktopPlan(
@@ -321,6 +335,7 @@ export async function recoverDesktop(
       false,
       originalBackend,
       true,
+      committed && !state.installs[receipt.id] ? j.before : undefined,
     );
     const originalEffects = originalPlan.receipt!.effects.map((e) => {
       if (e.pathEntries === undefined) return e;
@@ -358,6 +373,7 @@ export async function recoverDesktop(
     j.after === null,
     snapshotBackend,
     true,
+    committed && !state.installs[receipt.id] ? j.before : undefined,
   );
   if (
     plan.install.id !== install.id ||
@@ -397,11 +413,12 @@ async function desktopPlan(
   remove: boolean,
   backend: WindowsEffects,
   recovery = false,
+  snapshot?: DesktopReceipt,
 ) {
   const rootTag = sha256(resolve(root).toLowerCase()).slice(0, 8);
   const install = installedForIntegration(state, spec, !remove && !recovery),
     prior = state.desktop?.[install.key];
-  await verifyInstall(root, install);
+  if (!snapshot) await verifyInstall(root, install);
   const retired: Effect[] = [];
   let effects: Effect[] = [],
     declaration = install.desktop;
@@ -504,7 +521,10 @@ async function desktopPlan(
         const actual = join(root, "apps", appFolder(install), "current", path),
           live = join(root, install.dir, path);
         await noLinks(live);
-        if (!(await lstat(live)).isDirectory() || /[;\x00-\x1f]/.test(actual))
+        if (
+          (!snapshot && !(await lstat(live)).isDirectory()) ||
+          /[;\x00-\x1f]/.test(actual)
+        )
           fail("User PATH entry is not a safe package directory");
         if (!parts.some((p) => normalizedPath(p) === normalizedPath(actual))) {
           parts.push(actual);
@@ -521,7 +541,8 @@ async function desktopPlan(
     for (const shortcut of declaration.shortcuts ?? []) {
       const live = join(root, install.dir, shortcut.path);
       await noLinks(live);
-      if (!(await lstat(live)).isFile()) fail("Shortcut target missing");
+      if (!snapshot && !(await lstat(live)).isFile())
+        fail("Shortcut target missing");
       const target = join(
           root,
           "apps",
@@ -574,9 +595,11 @@ async function desktopPlan(
         fail("Per-user font installation requires Windows 10 1809 or newer");
       const live = join(root, install.dir, path);
       await noLinks(live);
-      const info = await lstat(live);
-      if (!info.isFile() || info.nlink !== 1 || info.size > 64 * 1024 * 1024)
-        fail("Invalid font payload");
+      if (!snapshot) {
+        const info = await lstat(live);
+        if (!info.isFile() || info.nlink !== 1 || info.size > 64 * 1024 * 1024)
+          fail("Invalid font payload");
+      }
       const target = join(
         folders.fonts,
         "piko-" +
@@ -586,7 +609,16 @@ async function desktopPlan(
           "-" +
           basename(path),
       );
-      const bytes = await readFile(live);
+      const saved = snapshot?.effects.find(
+        (effect) =>
+          effect.target.kind === "file" && effect.target.path === target,
+      );
+      const bytes = snapshot
+        ? Buffer.from(
+            (await effectBytes(root, saved?.after ?? null)) ??
+              fail("Desktop recovery font ownership blob missing"),
+          )
+        : await readFile(live);
       if (!(
         [0, 1, 0, 0].every((n, i) => bytes[i] === n) ||
         bytes.subarray(0, 4).toString("ascii") === "OTTO"
@@ -608,7 +640,8 @@ async function desktopPlan(
     for (const menu of declaration.menus ?? []) {
       const live = join(root, install.dir, menu.path);
       await noLinks(live);
-      if (!(await lstat(live)).isFile()) fail("Context menu target missing");
+      if (!snapshot && !(await lstat(live)).isFile())
+        fail("Context menu target missing");
       const scope =
           menu.target === "file"
             ? "*"
@@ -639,7 +672,7 @@ async function desktopPlan(
     for (const association of declaration.associations ?? []) {
       const live = join(root, install.dir, association.path);
       await noLinks(live);
-      if (!(await lstat(live)).isFile())
+      if (!snapshot && !(await lstat(live)).isFile())
         fail("File association executable missing");
       const progId = `Piko.${rootTag}.${install.key}.${association.extension.slice(1)}`,
         key = `HKCU\\Software\\Classes\\${progId}`;
@@ -722,21 +755,41 @@ async function desktopPlan(
   for (const effect of operations)
     if (!equalValue(await backend.read(effect.target), effect.before))
       fail("Desktop resource drift; preview/reconcile explicitly");
-  const binding = sha256(
-    JSON.stringify([
-      state.revision,
-      install,
-      remove ? null : await contentHash(root, install),
-      declaration,
-      remove,
-      operations,
-    ]),
-  );
+  const binding =
+    snapshot?.binding ??
+    sha256(
+      JSON.stringify([
+        state.revision,
+        install,
+        remove ? null : await contentHash(root, install),
+        declaration,
+        remove,
+        operations,
+      ]),
+    );
   const receipt = remove
     ? null
     : { id: install.id, declaration: declaration!, effects, binding };
   if (receipt) validateDesktopReceipt(receipt);
   return { install, operations, receipt, binding };
+}
+
+/** Receipt-backed removal plan; no source or remote manifest is consulted. */
+export async function planDesktopRemoval(
+  root: string,
+  state: State,
+  install: Install,
+  backend = new WindowsEffects(),
+) {
+  if (state.desktop?.[install.key]?.id !== install.id)
+    fail("Desktop ownership changed before removal");
+  return await desktopPlan(
+    root,
+    state,
+    `${install.source.alias}/${install.name}@${install.version}`,
+    true,
+    backend,
+  );
 }
 // Stable external effects need no rewrite or renewed execution approval.
 // Rebuild the plan against the candidate to check files and resource ownership.

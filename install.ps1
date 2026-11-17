@@ -30,10 +30,7 @@ param(
     [switch]$NoSource,
     [ValidatePattern('^[a-z0-9][a-z0-9._-]{0,79}$')]
     [string]$SourceName = 'main',
-    [uri]$SourceUrl = 'https://raw.githubusercontent.com/KochabStar/piko-source/main/',
-    [ValidateSet('http', 'git')]
-    [string]$SourceType = 'http',
-    [string]$SourceRef = 'main'
+    [uri]$SourceUrl = 'https://raw.githubusercontent.com/KochabStar/piko-source/main/'
 )
 $ErrorActionPreference = 'Stop'
 # Avoid inheriting PowerShell 7 native stderr policy in PowerShell 7.3+.
@@ -212,15 +209,12 @@ try {
         $sources = (Invoke-Piko $target @('source', 'list', '--json') | Out-String) | ConvertFrom-Json
         $existing = @($sources | Where-Object { $_.alias -eq $SourceName })
         if ($existing.Count) {
-            if ($existing.Count -ne 1 -or $existing[0].type -ne $SourceType -or
-                ([uri]$existing[0].url).AbsoluteUri.TrimEnd('/') -cne $SourceUrl.AbsoluteUri.TrimEnd('/') -or
-                ($SourceType -eq 'git' -and $existing[0].ref -cne $SourceRef)) {
+            if ($existing.Count -ne 1 -or $existing[0].type -ne 'http' -or
+                ([uri]$existing[0].url).AbsoluteUri.TrimEnd('/') -cne $SourceUrl.AbsoluteUri.TrimEnd('/')) {
                 throw 'Existing source alias has a different configuration; nothing was replaced. Choose another -SourceName or use -NoSource.'
             }
         } else {
-            $sourceArgs = @('source', 'add', $SourceName, $SourceUrl.AbsoluteUri, '--type', $SourceType)
-            if ($SourceType -eq 'git') { $sourceArgs += @('--ref', $SourceRef) }
-            $null = Invoke-Piko $target $sourceArgs
+            $null = Invoke-Piko $target @('source', 'add', $SourceName, $SourceUrl.AbsoluteUri)
         }
     }
     if (-not $NoPath) {

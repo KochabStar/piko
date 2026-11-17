@@ -150,9 +150,8 @@ test("compiled cleanup CLI previews and requires --data plus explicit non-intera
     join(lock, "owner.json"),
     JSON.stringify({ pid: dead.pid, started: new Date().toISOString() }),
   );
-  expect((await run(["recover", "--force"])).out).toContain(
-    "Recovery completed",
-  );
+  await run(["recover", "--force"]);
+  expect(JSON.parse((await run(["recover", "--json"])).out)).toEqual([]);
   expect(await exists(lock)).toBe(false);
   await mkdir(lock);
   await writeFile(

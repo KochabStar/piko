@@ -59,11 +59,7 @@ if (!node)
   throw new Error(
     "Integration tests require a development Node/npm installation",
   );
-const nodeSource = makeSource(
-  "fixture",
-  "https://node-fixture.invalid/",
-  "http",
-);
+const nodeSource = makeSource("fixture", "https://node-fixture.invalid/");
 const archives: Record<string, Uint8Array> = {},
   metadata: Record<string, any> = {};
 const server = Bun.serve({

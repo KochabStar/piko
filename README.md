@@ -1,6 +1,6 @@
 # Piko
 
-使用 **TypeScript + Bun** 开发的 Windows x64 命令行包管理器，当前为 **0.4.1 预览版**。统一管理便携程序、Node 等运行时和 npm CLI；Piko 的 EXE 不需要预装 Node/Bun。
+使用 **TypeScript + Bun** 开发的 Windows x64 命令行包管理器，当前源码版本为 **0.4.25 预览版**。统一管理便携程序、Node 等运行时和 npm CLI；Piko 的 EXE 不需要预装 Node/Bun。
 
 替代目标与待办见 [替代 Scoop 与 mise 的功能差距](docs/replacement-gaps.md)（仅用户级软件与全局版本管理，不包含 mise 项目功能）。本轮依赖、集成升级、Shell、npm、安装载荷与 Rust 的新增能力、用法和边界见 [B 类限制完善记录](docs/b-improvements.md)。
 
@@ -10,7 +10,7 @@
 
 ## 已实现
 
-- 单文件、ZIP、7z、tar、tar.gz、tar.xz 分发，以及 Inno Setup 安装包的只解包安装；多文件组合下载与初始文本配置，逐项 SHA-256 校验与可信缓存。HTTPS 静态清单源、Git 清单源和 npm registry。
+- 单文件、ZIP、7z、tar、tar.gz、tar.xz 分发，以及 Inno Setup 安装包的只解包安装；多文件组合下载与初始文本配置，逐项 SHA-256 校验与可信缓存。HTTP(S) 静态清单源和独立 npm 包提供器；不再接受新增 Git／npm 类型的清单源。
 - 所有软件多版本共存；安装不选默认。`use` 选择已安装版本，`current` 为 junction，EXE shims 供 CMD、PowerShell 和普通子进程调用。
 - 按精确版本、主/次版本或源声明的渠道别名更新，保留旧版本；支持逐包批量更新、远端候选预览与运行时发行版选择。
 - 非默认版本清理预览与保留策略；可移植整机软件清单导出、恢复计划和显式确认，保留来源、默认请求和命令别名。
@@ -21,7 +21,9 @@
 - npm CLI 按包/版本隔离，运行时使用当前默认受管理 Node；安装和更新始终禁用生命周期。内容绑定批准后显式重建，依赖逐项批准。
 - 受校验的 Piko 自升级、备份和兼容性回退；本地 ZIP 发行包、安装入口和 CI 配置。
 
-桌面软件扩充后的源码及 EXE 已通过本机 **165 项测试、1,660 次断言、0 失败**。独立源共 46 包；本轮新增 8 款均通过隔离安装、默认选择／命令入口、主程序版本和 Windows 签名检查，另验证两款远控软件的配置留存模型。当前构建与清单摘要见 `docs/verification/desktop-apps-20261029.json`；之前的 19→38 包扩充和 B 类完善分别保留在 `source-expansion-20261029.json`、`b-improvements.json`。类型、构建、格式及示例／46 包源校验通过。本轮未启动 GUI、服务／驱动或新 Sandbox，没有接管现有安装或改动日常 PATH／Profile。实际编译 CLI 覆盖 PowerShell 5.1／7 与 Git Bash；未修改日常 PATH／Profile。历史 0.3.0 有 62 条实际 Sandbox 检查通过，0.4.0 的两份旧构建分别通过 75 条基础和 51 条集成专项；它们不等于本轮构建的完整 Sandbox 验收。本轮未启动 Sandbox，管理员实装、真实 Rust 工具链、PowerShell 7 沙盒与 Windows 10 清洁环境仍需验收。
+**本轮运行时上游解析重构验证**：类型检查、EXE 构建和完整 Bun 回归通过（455 pass、1 skip、0 fail，56 个测试文件）；软件源完整 Node 回归 203 pass、0 fail；70 包上游策略校验、159 个历史清单不变性验证和本次修改文件的格式检查通过。冻结 source 的真实 CLI 测试覆盖直接更新到未收录版本、摘要失败、版本约束、离线重装和精确恢复。部分外部 MSI／Burn 探测夹具未配置；未逐包实装全部最新版本，也未替换本机 Piko 或发布远端软件源。真实 SCM、管理员／驱动、浏览器与 GUI 现场验收不由这些结果替代；详见 `REFACTOR.md`。
+
+历史桌面软件扩充记录见 `docs/verification/desktop-apps-20261029.json`；此前的软件源扩充和 B 类完善记录分别保留在 `source-expansion-20261029.json`、`b-improvements.json`。这些测试、构建和隔离安装记录只证明对应历史构建，不是本轮重构的测试结果，也不代表 GUI、SCM 服务、驱动或新 Sandbox 已验收。管理员实装、真实 Rust 工具链、PowerShell 7 沙盒与 Windows 10 清洁环境仍须独立验收。
 
 ## 开发与构建
 
@@ -45,6 +47,8 @@ node scripts/bootstrap-bun.cjs
 ```
 
 构建输出为 `dist/piko.exe`。开发脚本可用本地 Bun 替换 `bun`。
+
+修改共享上游解析器或模板解析器后，在同时检出两个仓库的工作区运行 `bun run source:runtime`，重新生成 `piko-source/scripts/lib/upstream.mjs` 和 `manifest-template.mjs`。软件源提交生成的独立 ESM，部署端只发布 `index.json` 与 `packages/`，不需要运行客户端源码或维护服务。
 
 ## 安装
 
@@ -80,11 +84,11 @@ piko maintenance layout --yes --binding <预览摘要>
 piko maintenance layout --recover    # 仅在迁移中断时完成已记录的操作
 ```
 
-迁移备份状态和收据，保留包 ID、来源、版本、命令归属和用户数据，重建 current／持久化 junction。迁移期间阻止程序启动；遇到冲突、未知链接、已批准外部集成、npm 旧安装或路径绑定模板时拒绝并要求单独处理。新布局使用 **state schema 8**，旧 EXE 无法读取；不要强行换回旧构建。
+迁移备份状态和收据，保留包 ID、来源、版本、命令归属和用户数据，重建 current／持久化 junction。迁移期间阻止程序启动；遇到冲突、未知链接、已批准外部集成、npm 旧安装或路径绑定模板时拒绝并要求单独处理。可读布局始于 schema 8；当前状态写入 **schema 9**，包含统一安装收据与服务收据，旧 EXE 无法读取时不要强行换回旧构建。
 
 ## 安装软件
 
-独立的 `../piko-source/` 当前有 **46 个包**：原 38 包覆盖已盘点的 Scoop／mise 目标，另登记用户选择的 8 款桌面软件。维护说明与验证见其 README、`verification/desktop-apps-20261029.json`；原扩充记录保留在 `verification/coverage-20261029.json`。微信与向日葵清单采用可核验的官方新版，本机原安装未升级。独立源不自动复制到客户端示例源。
+独立的 `../piko-source/` 当前包含 **70 个包**，发布上游探测规则、安装配方与不可变的历史版本锚点。客户端根据这些规则直接发现新版本，不要求源先追加版本表；独立源不会自动复制到客户端示例源，历史软件实装记录见源仓库的验证文档。
 
 客户端示例内附固定版本 Node **26.12.1**、ripgrep **15.2.0**，不是自动追踪上游最新版本。`examples/source/` 或发行包中的 `source/` 可以作为 HTTPS 静态目录托管，不需要用户本地持续运行服务器。开发试用可在仓库运行 `bun run source:serve`，然后：
 
@@ -109,27 +113,32 @@ piko use npm:@mariozechner/pi-coding-agent@0.73.1
 pi --version
 ```
 
-只有回环 HTTP 允许作测试源。HTTPS 不降级，Git 使用已有 Git 和认证，不修改用户 Git 配置。
+只有回环 HTTP 允许作测试源，正式源使用 HTTPS，HTTPS 不降级。源是 Piko 清单格式，不兼容 Scoop bucket。
 
 ```powershell
-piko source add tools https://example.com/owner/piko-source.git --type git --ref main
-piko source refresh tools
+piko source add tools https://example.com/piko-source/
+piko source refresh tools         # 省略 alias 则刷新全部已配置源
 piko source list
 piko source remove tools          # 有安装引用时拒绝
-piko source remove tools --force  # 只移除配置，软件与来源记录保留
+piko source remove tools --force  # 移除配置，不改已安装软件的来源身份
+piko install main/node@26.12.1 --offline
 ```
 
-源是 Piko 清单格式，不兼容 Scoop bucket。Git 从固定 commit 读取，不 checkout 或运行仓库代码。源刷新失败直接报错，不使用过期缓存；移除源后更新需要恢复同一来源。
+HTTP 索引只保留最近一次成功验证的 `sources/<alias>/latest.json`；成功刷新时间记录在 Source 元数据 `fetchedAt`。安装在索引缺失或超过 **24 小时**时刷新；更新仍刷新来源配置，但不再要求 source 为每次上游发布追加版本：配置了 `upstream` 的包直接查询声明的发布渠道，使用 source 提供的安装配方生成并验证精确候选。批量操作共享来源与上游元数据请求；刷新或探测失败明确报错，不静默使用旧 latest。`search` 默认只读本地缓存，只有 `--refresh` 才联网。
+
+`install --offline` 严格使用已保存的请求解析、精确清单、artifact 和辅助工具，允许读取过期索引但不联网补齐；任一缺项即失败。动态候选先在线解析并验证，之后才能离线使用；中断恢复绑定原先保存的精确版本，不重新查询上游。npm 包仍由 `npm:<name>` 提供器处理，不是可添加的 npm 目录源。
+
+历史 Git 安装的 `type/ref/commit/identity` 是来源证据，仍保留在旧安装收据与本地查询信息中；不再从 Git 源 fetch，也不会将其静默改写为同名 HTTP 来源。旧 Git inventory 明确拒绝自动导入；迁移时由用户核验并显式配置可信 HTTP URL，按新来源处理。更换 URL 不会接管旧 Git 安装的身份、收据或数据。旧缓存迁移只处理已验证且确认为 Piko 管理的 HTTP 索引，不整目录删除未知文件／链接。
 
 ## 模板包清单
 
-客户端同时支持原 `schemaVersion: 1` 完整清单和 `schemaVersion: 2` 多版本模板包；索引仍为 schema 1，不改变已安装状态格式。多个版本可在 `index.json` 中指向同一个 `packages/<name>/package.json`。客户端只解析已登记的版本，不凭 URL 模板猜测未校验版本。
+客户端支持原 `schemaVersion: 1` 完整清单和 `schemaVersion: 2` 多版本模板包；索引仍为 schema 1。模板包可增加声明式 `upstream`，指定版本来源、Windows 资产匹配及验证策略。历史 `versions` 继续提供可重复安装的已审核锚点，`latest` 和受支持的版本请求可从上游解析未收录的新版本；不执行源内脚本，也不凭 URL 模板猜测版本。
 
-模板包包含 `recipes`（可复用的完整 schema 1 配方）和 `versions`（版本 → 配方引用、逐下载 SHA-256 及可选配额）。只在下载 URL、显式解压路径、命令路径和桌面入口路径中替换 `{version}`，各下载的 `{sha256}`／`{sha2562}` 按版本表填入；Shell、配置正文、环境、持久化和执行代码不做全局替换。展开后继续执行原有完整清单校验、配额与摘要校验。软件源的版本号与上游保持一致，不自造 `-piko.N` 后缀（semver 排序低于原版本会被判为降级，且模板 URL 会把后缀拼进发布者标签）或末位修订号；配方修订由维护者原地并入对应上游版本。`{upstream}` 占位符可在下载地址中引用去掉 `-piko.N` 后缀或末位修订的基版本，供历史源或特殊场景使用。
+模板包包含 `recipes`（可复用的完整 schema 1 配方）和 `versions`（版本 → 配方引用、逐下载 SHA-256 及可选配额）。只在声明的下载和路径字段中替换 `{version}`／`{upstream}`，逐下载摘要按版本表或经过验证的上游候选填入；Shell、配置正文、环境、持久化和执行代码保持字面含义。版本绑定的配置或执行代码必须审核配方，不能盲目替换。展开后仍执行完整清单、配额和内容验证；已发布版本的配方与摘要不可原地覆盖，配方变化只用于新的版本。
 
-配方变化时在同一文件中保留独立 recipe，不改旧配方；迁移要求所有历史版本展开后的 `JSON.stringify` 及安装 `manifestHash` 完全一致。HTTP 和固定 Git commit 源均使用同一解析器。原格式源继续可用，但**旧客户端不能读取模板包源，须先升级客户端再刷新迁移后的源**。
+配方变化时在同一文件中保留独立 recipe，不改旧配方；迁移要求所有历史版本展开后的 `JSON.stringify` 及安装 `manifestHash` 完全一致。HTTP 源使用同一解析器；保留历史 Git 来源证据不代表仍支持 Git fetch。原格式源继续可用，但**旧客户端不能读取模板包源，须先升级客户端再刷新迁移后的源**。
 
-独立源已迁移为 47 个包文件，仍保留 58 个版本；普通版本更新只增加校验表条目，不增加清单文件。未启用按数量删旧版。
+独立源包含 70 个包的上游规则与安装配方。新版本不再依赖源仓库先追加版本表；上游地址、资产命名、应用布局或安装步骤改变时，仍需维护 source 配方。已发布的历史清单保持不可变。
 
 ## 分发格式与声明式安装
 
@@ -284,7 +293,7 @@ piko unuse main/node
 piko uninstall main/node@26.12.1
 ```
 
-`search` 默认只读取已验证的本地源索引（离线可用），不会刷新远端、修改状态或争用 mutation.lock。使用 `source refresh [alias]` 或 `search <query> --refresh` 更新索引；本地索引缺失／损坏时明确报错，不隐式联网。`search` 与 `list` 默认使用按包排序的表格；原 JSON 字段保留在 `--json` 输出中，脚本调用需显式添加该参数。搜索支持大小写不敏感的子串与有序子序列模糊匹配（`tl` 也能找到 `main/tool`），完整子串命中始终排在模糊命中之前。上游源仓库的自动更新见其自身 `update-source` 工作流（每天上海时间 07:50）。
+`search` 默认只读取已验证的本地源索引（离线可用），不会刷新远端、修改状态或争用 mutation.lock。使用 `source refresh [alias]` 或 `search <query> --refresh` 更新索引；本地索引缺失／损坏时明确报错。搜索结果显示源的历史锚点，并不冒称已探测全部上游。`search` 与 `list` 默认使用排序表格，脚本使用 `--json`。普通包更新直接探测上游；源仓库的 `update-source` 工作流仅为手动触发的可选历史快照审核工具。
 
 ### 命令行进度与输出
 
@@ -329,7 +338,7 @@ piko uninstall main/listary@6.3.5.94    # 也可明确指定来源和旧版本
 
 ## 运行时渠道与发行版
 
-版本别名由软件源的 `index.json` 包条目声明，与命令别名不同。例如下面的条目片段要求源已经登记 24.x／22.x 的版本：
+版本别名由软件源的 `index.json` 包条目声明，与命令别名不同。下面的条目片段把渠道映射到主版本约束；静态包要求索引存在匹配版本，动态包按相同约束查询上游：
 
 ```json
 {
@@ -345,7 +354,7 @@ piko update main/node           # 保留 lts 请求，按源当前映射更新
 piko info main/node@lts
 ```
 
-别名只映射到已登记的精确版本或主/次版本请求，不支持递归、链式跳转或重定义 `latest`。`piko use <包>@latest` 会刷新软件源并解析其指定的最新版，缺失时校验并安装，然后切换 default/current；已安装的同一版本不重复下载。已有安装沿用原始来源，未安装时按已配置的软件源查找；来源不明确时须指定 `<source>/<package>`。下载、校验或依赖检查失败时保持旧默认，切换冲突时新安装可保留但不改变旧默认。自动安装不跳过校验、不安装缺失依赖、不执行脚本或自动批准集成。未显式指定 `@latest` 的 `use` 仍只选择已安装版本；解析渠道时会刷新原始源，不自动安装。依赖字段也可使用其来源声明的版本别名。现有固定 Node 26 示例没有被擅自标为 LTS；渠道由可信源维护，客户端不查询上游发布。
+别名映射到精确版本或主／次版本请求，不支持递归、链式跳转或重定义 `latest`。`piko use <包>@latest` 解析原来源声明的最新候选，缺失时完成验证和安装后切换 default/current；同一内容版本不重复下载。动态包可发现未列入历史版本表的上游版本；没有 `upstream` 的静态包仍按索引解析。已有安装保留原始来源身份，来源歧义必须显式指定。失败保留旧默认；不自动安装缺失依赖、不执行脚本或批准系统集成。未显式指定 `@latest` 的 `use` 仍只选择已安装版本，渠道名称不凭空赋予某个固定示例版本。
 
 ```powershell
 # 一步安装（如有需要）并选择源中最新版，保存 latest 请求用于后续更新
@@ -366,9 +375,13 @@ piko info main/java --distribution temurin
 
 ## 更新检查与预览
 
-`outdated [包]`、`status [包]` 和 `update --all --dry-run` 会查询默认包的原始来源，展示当前版本、保存的请求、候选版本、源的 latest 及状态：`pinned`、`current`、`outdated`、`downgrade` 或 `blocked`。单包也可用 `update <包> --dry-run`。某包受阻继续检查其他包，CLI 遇受阻项退出码为 1。
+`outdated [包]`、`status [包]` 和 `update --all --dry-run` 共用版本解析入口：动态包查询原来源声明的上游渠道，静态包按索引查询；展示当前版本、保存的请求、候选与受阻原因。单包可用 `update <包> --dry-run`。实际 `update` 沿用已保存的请求与权限要求，不新增探测命令或开关，不静默跨渠道或降级；某包受阻不阻断其他包的报告。
 
-不安装、不切换默认、不改变命令归属或状态文件；查询可更新本地源／npm 缓存。便携候选还检查摘要声明、依赖、启用命令／别名和环境冲突，但不下载分发文件，因此预览不能保证后续下载与安装成功。npm 查询仍需要已选择且符合要求的受管理 Node/npm；registry 改变会受阻。未选默认的版本不自动纳入更新。
+预览不安装、不切换默认、不改变命令归属；可更新本地元数据缓存，但不下载应用载荷。只有下载后才能确定的 PE 版本、签名或动态应用树必须保留待校验边界，不能把预览当作安装成功保证。`upstream.trust: "publisher"` 要求发布端强摘要或声明的 Authenticode 验证；`"https"` 表示 source 显式委托所声明的 HTTPS 发布渠道，下载后固定 SHA-256 仅用于内容完整性与重复安装，不等同于独立签名认证。任一已声明摘要、签名、路径或配额检查失败均不发布安装。npm 查询仍要求符合条件的受管理 Node/npm。
+
+GitHub 上游元数据优先通过现有 `gh api --hostname github.com --method GET` 获取：先使用已校验的受管理 gh 真正可执行文件，再查找 PATH 上的原生 gh，避免更新持锁时递归调用 Piko shim。复用 gh 已有登录状态，不导出 token，不交互登录；调用有超时和输出上限。gh 不存在时仍走原 HTTP 路径；gh 已存在但认证／请求失败时明确报错，不静默降回匿名额度。此机制仅用于官方仓库元数据 API，不用于分发文件、其他主机或任意源脚本。
+
+动态解析要求实际托管的包文档包含 `upstream`；只修改本地 source 仓库不会更新远端。没有该字段的旧源仍只比较索引中版本，其 `current` 不等于已核对上游最新发布。
 
 ## 旧安装版本清理
 
@@ -385,7 +398,7 @@ piko cleanup main/node --versions --keep 0 --yes --binding <hash>
 
 `--keep N` 表示除默认版本外再保留 N 个版本；单包 `--versions` 和 `cleanup --versions` 默认 N=1，`cleanup *` 默认 N=0，只保留默认版本。显式传 `--keep N` 可覆盖默认值，默认版本始终保护。标准语义版本按版本从高到低排序，其他版本标识按数字感知的字符串排序（不代表上游发布时间），请核对预览。只卸载已登记且收据一致的版本，保留 persist 数据，不清理缓存，也不扫描未知目录；不与 `--data` 混用。
 
-执行前和每次卸载持锁时重新检查目标，默认、收据或持久化链接漂移都会拒绝；链接漂移时报错指明包内路径、当前形态与 persist 目标，人工核对合并后删除包内副本再重试，或用 `piko reset` 重建链接。逐项沿用已有卸载日志恢复，不是全包原子操作；失败项列明错误，其他项继续。删除被 Windows 拒绝（EPERM／EACCES／EBUSY）时错误附加上下文提示：当前未提升会建议在管理员终端重试（Piko 从不自动提权），已提升则提示文件可能被服务或系统 ACL 占用；带系统集成的版本被进程占用时预览为 `defer-in-use`，并提示先用管理员终端执行 `piko system <包> --remove` 撤销集成或注销／重启后重试。交互终端运行 `cleanup *` 时按提示输入 `yes` 确认；非交互脚本须先检查预览再传 `--yes`。
+执行前和每次卸载持锁时重新检查目标，默认、收据或持久化链接漂移都会拒绝；链接漂移时报错指明包内路径、当前形态与 persist 目标，人工核对合并后删除包内副本再重试，或用 `piko reset` 重建链接。逐项沿用卸载日志恢复，不是全包原子操作；失败项列明错误，其他项继续。已有成功批准的管理员集成由卸载自动执行其保存的 `admin.remove`，无需先手动 `system --remove`；需要权限时在同一个 PIKO_HOME 的管理员终端重试。删除被 Windows 拒绝（EPERM／EACCES／EBUSY）时会提示权限／服务／系统 ACL 或进程占用；`defer-in-use` 项保留待用户关闭程序、注销或重启后重试，不强删占用文件。交互终端运行 `cleanup *` 时按提示输入 `yes` 确认；非交互脚本须先检查预览再传 `--yes`。
 
 ## 整机软件清单导出／恢复
 
@@ -397,7 +410,7 @@ piko import piko-software.json --yes
 piko import piko-software.json --yes --binding <预览返回的 hash>
 ```
 
-清单记录源 URL／类型／ref、各包已安装的精确版本、所选版本与原始更新请求、启用命令和命令别名；不复制机器专属 state.json、路径、程序文件、用户数据、凭据或脚本批准。默认拒绝导出未校验安装，以及含认证信息、查询参数或片段的源／registry URL，不悄悄删掉参数导致换源。SSH 的标准 `git` 用户名可保留，认证需在目标机器独立配置。
+清单记录源 URL／类型、历史来源证据、各包已安装的精确版本、所选版本与原始更新请求、启用命令和命令别名；不复制机器专属 state.json、路径、程序文件、用户数据、凭据或脚本批准。默认拒绝导出未校验安装，以及含认证信息、查询参数或片段的源／registry URL，不悄悄删掉参数导致换源。保留历史 Git 信息供审计不等于可以自动恢复该 Git 目录源；须先显式处理可信 HTTP 迁移，不能悄悄换源恢复。
 
 恢复预览刷新源、核对版本／清单、检查源身份、默认、命令／别名、环境与显式依赖冲突，并展示安装顺序。只有 `--yes` 才新增源、安装或选择版本；来源和已有默认不一致时先要求用户显式解决，不隐式覆盖。普通依赖须在文件中明确带有兼容的默认选择或已在目标环境满足，按依赖顺序恢复；npm CLI 前需要已选 Node 或文件中明确选定的 Node。源渠道由导出时保存的请求继续跟踪，但首次恢复的是导出的精确版本。
 
@@ -533,13 +546,13 @@ piko unintegrate main/z.lua --shell pwsh --yes --binding <hash>
 
 `mode: "hardlink"` 将应用内文件链接到持久化文件；已有数据优先，卸载仅移除链接。应用原子替换文件会断开硬链接，Piko 在再安装、选用和卸载时检查文件身份，发现分叉则停止，保留两份文件待人工核对，不静默同步。LocalSend 尚未完成实际保存行为验收，因此未发布其清单。文件／目录及映射模式不能跨版本静默改变。
 
-文件数据沿用 `cleanup --data` 的显式预览和确认。Shell／文件持久化元数据至少使用 state schema 5，外部集成使用 schema 6；旧 schema 1–5 仍可读取，使用新功能后不要直接换回不支持 schema 6 的旧 EXE。
+Shell／文件持久化始于 schema 5，外部集成始于 schema 6；当前客户端读取旧状态并升级为 schema 9。历史版本最低 schema 要求不代表可以降级当前 state.json；不要换回不识别当前收据和 journal 的旧 EXE。
 
 ## 用户级桌面集成与显式引导
 
 平台项 `desktop` 可声明 `environment`、`path`、`shortcuts`、`fonts`、`menus`、`associations`。其中 **`shortcuts` 随已校验的 GUI 安装自动创建**，不需另行 `integrate`：当前用户开始菜单 `Programs\Piko Apps` 保存真实 `.lnk`，直接指向应用 EXE，工作目录为 EXE 所在目录，不指向 `.shim`。安装不自动选择 CLI 默认版本；未选择默认时，新装 GUI 提供入口；已有默认时，安装候选不抢入口，`use`／更新／回退同步切换，卸载入口所属版本时改用剩余版本或移除。重复 `install` 可通过同一安装流程登记旧安装的快捷方式，不重新下载载荷。同名外部快捷方式及用户修改不覆盖，冲突报错；安装未成功时保留可恢复日志，不假报成功。
 
-快捷方式所有权记录在 state 的 `startMenu`，变更并入 selection journal，失败／中断会校验后恢复。**仅快捷方式自动创建**；字体、环境变量、PATH、右键菜单、文件关联和服务仍不自动启用。其余桌面效果先 `use` 再单独预览授权：
+快捷方式所有权纳入 schema 9 的安装收据，旧 `startMenu` 字段仅为过渡投影，变更仍使用 selection journal，失败／中断会校验后恢复。**仅快捷方式自动创建**；字体、环境变量、PATH、右键菜单、文件关联和服务仍不默认启用。其余桌面效果先 `use` 再单独预览授权：
 
 ```powershell
 piko integrate main/llvm --desktop --dry-run
@@ -553,7 +566,7 @@ piko unintegrate main/llvm --desktop --yes --binding <预览摘要>
 - `fonts` 是确切 TTF／OTF 文件列表。检查签名后复制到当前用户字体目录，以独立名称写 HKCU Fonts 并刷新字体资源；不覆盖原 Scoop 字体，不自动更改终端字体设置。需要 Windows 10 1809+；字体被占用时可能需关闭应用或重新登录，失败保留恢复日志。
 - `menus` 声明 `{id,label,target,path,args?}`；`target` 为 `file`／`directory`／`background`，只登记独立 HKCU Classes 右键命令。`associations` 声明 `{extension,label,path,args?}`，提供 Open With 项，**不绕过 Windows UserChoice 或强抢默认应用**。这不是 COM Shell 扩展注册。
 - 资源变更保存原值、所有权和内容摘要，写入前重查；失败或中断按 journal 恢复。恢复会按安装收据和原声明重新推导操作，拒绝重复目标、未声明资源、异常 revision 或不一致的替换值；提交后的撤销也校验原归属。先预检所有外部资源与所需备份内容，再逐项写入并再次检查并发变化，冲突则停止并保留日志。这不是跨文件／注册表事务。注册表空键可能保留，不删除用户未知内容。执行广播不等于已运行终端／IDE 的环境立即更新。
-- 桌面声明和实际外部效果不变时，更新／切版／回退自动延续已有所有权收据；文件缺失、资源漂移或字体字节改变仍拒绝。声明／效果变化时，先安装候选，再 `integrate <包>@<新版> --desktop --upgrade --dry-run`，以 `--yes --binding <摘要>` 一次确认变更资源和默认切换；失败恢复旧资源，外部用户修改不覆盖。卸载活动版本前仍需撤销。Shell 初始化继续使用独立内容绑定机制。
+- 桌面声明和实际外部效果不变时，更新／切版／回退自动延续已有所有权收据；文件缺失、资源漂移或字体字节改变仍拒绝。声明／效果变化时，先安装候选，再 `integrate <包>@<新版> --desktop --upgrade --dry-run`，以 `--yes --binding <摘要>` 一次确认变更资源和默认切换；失败恢复受管理资源，外部用户修改不覆盖。卸载通过统一收据撤销所拥有的效果，先预检漂移和所需备份；不会删除未知资源。Shell 初始化继续使用独立内容绑定机制。
 
 ### reset：重建入口与数据映射
 
@@ -607,11 +620,48 @@ piko use main/rustup@1.29.2
 
 rustup 配方使用独立 CARGO_HOME／RUSTUP_HOME、`--no-modify-path --default-toolchain none`：只引导管理器，不擅自装 Rust 工具链／MSVC／SDK。选择后可自行 `rustup toolchain install stable`、`rustup default stable`，现在也可使用 `piko rust list` 及 `piko rust install|use|update|remove <工具链>` 统一管理，变更先 `--dry-run`，再用 `--approve-exec --binding <摘要>`。`use` 只选已安装工具链，默认工具链删除受保护，操作绑定受管理 rustup 和隔离 homes。rustup 仍负责下载／组件校验，生成命令是可变数据，不视为固定源载荷。
 
+### 声明式 Windows 服务
+
+普通用户态 SCM 服务在 `platforms.windows-x64.services` 中声明为**数组**（不是单个 `service` 字段）。每项包含 `name`、`displayName`、包内相对 `binPath` 和 `startType: "auto" | "demand" | "disabled"`，可声明 `description`、参数数组 `args`、服务名依赖 `depends`、`startAfterInstall` 与 `stopBeforeUninstall`。服务可执行文件须来自已校验的非持久化包内容，不借用 PATH、外部安装或任意持久化代码。
+
+```json
+{
+  "services": [
+    {
+      "name": "ExampleService",
+      "displayName": "Example Service",
+      "binPath": "bin/service.exe",
+      "startType": "demand",
+      "startAfterInstall": true,
+      "stopBeforeUninstall": true
+    }
+  ]
+}
+```
+
+```powershell
+# 用户手动打开管理员终端，确认使用同一个 PIKO_HOME
+piko install main/example --with-service
+piko update main/example --with-service
+piko service list
+piko service main/example status
+piko service main/example stop
+piko service main/example start
+piko service main/example restart
+piko uninstall main/example
+```
+
+普通安装不静默注册服务，须显式 `--with-service` 并已处于管理员终端；Piko 不自动发起 UAC。注册保存按安装版本归属的 ServiceReceipt，按声明设置名称、描述、参数、启动类型和依赖，按 `startAfterInstall` 启动。`service list`／包 `status` 读取 SCM 实际状态，start／stop／restart 操作受管理服务。卸载按收据预检，按声明停止并注销服务后才移除程序；`stopBeforeUninstall: false` 时要求它已停止。禁用服务不强行启动；缺失、外部同名、跨版本归属冲突或配置漂移均不接管、不覆盖、不删除，失败保留收据供检查恢复。更新不转移其他版本／外部安装的服务所有权。
+
+**WinFsp 与 Lertaro 不是可直接替换成通用服务声明的示例。** 当前 WinFsp 配方是交互式 MSI／内核驱动工作流；`piko install winfsp` 不会因此自动安装 MSI 驱动或注册其服务。Lertaro 有 Data／身份迁移和定制管理员脚本，须保留并核验其迁移与所有权逻辑。普通用户态 SCM 声明不能代替 MSI、内核驱动、数据／身份迁移或这些脚本；这两类真实管理员验收仍需独立完成。
+
 ### system：管理员集成例外
 
-平台项 `admin` 必须同时提供 `install`／`remove`，两者使用与 bootstrap 相同的可执行声明。服务、驱动或 COM 扩展需要源提供明确配方，不把整个 Scoop 脚本直接导入。
+平台项 `admin` 必须同时提供 `install`／`remove`，两者使用与 bootstrap 相同的可执行声明。驱动、COM 扩展和带数据／身份迁移的系统集成仍需明确配方；标准用户态服务可采用上面的 `services` 数组，不把整个 Scoop 脚本直接导入。
 
-依赖后台服务才能使用的软件可声明 `admin.required: true`：`install` 只准备文件并显示管理员审批步骤，`use` 和命令启动必须已有成功的系统集成记录。开始菜单入口和桌面 `{root}` 使用真实版本路径，不经 `current` 联接。升级先撤销旧集成、安装新集成，全部成功后才切换默认版本，并保留原来的 `latest`／版本请求；失败保留旧目录、阶段日志和可重新审批的失败记录，不自动重放脚本。卸载或清理版本前必须成功执行该版本的 `system --remove`（即使服务由应用自行注册、没有旧审批记录）；该步骤由配方安全识别归属、保留数据并清理后台服务。普通卸载不会假装已完成需要管理员权限的操作。
+依赖后台服务才能使用的软件可声明 `admin.required: true`：`install` 只准备文件并显示管理员审批步骤，`use` 和命令启动必须已有成功的系统集成记录。开始菜单入口和桌面 `{root}` 使用真实版本路径，不经 `current` 联接。升级先撤销旧集成、安装新集成，全部成功后才切换默认版本，并保留原来的 `latest`／版本请求；失败保留旧目录、阶段日志和可重新审批的失败记录，不自动重放脚本。
+
+**卸载自动执行已经成功批准的安装所保存的 `admin.remove`**，无需重新抓取 manifest，也不要求先手动 `piko system --remove`。保存的声明、代码内容与批准仍须校验，需要权限时自行在管理员终端执行卸载；没有成功批准记录不能因为 manifest 写了 remove 就执行代码。install 与 remove 的 running／completed／failed 结果分别持久保存，remove 不覆盖成功 install 的证据。失败或运行中／结果不确定时保留程序与现场，先检查并显式协调后再重试；不将未知外部安装视为已批准集成。普通卸载保留用户持久化数据。
 
 ```powershell
 piko system main/flclash --dry-run
@@ -621,13 +671,13 @@ piko system main/flclash --remove --dry-run
 piko system main/flclash --remove --approve-admin --binding <新的预览摘要>
 ```
 
-必须单独 `--approve-admin` 并已处于管理员终端；**不自动 UAC 提权，不自动打开防火墙、不启用系统功能、不重启 Explorer／系统**。预览含脚本、参数和内容摘要。系统执行不是沙箱或事务；失败／运行中记录会阻止卸载，需检查后按配方撤销／重试。活动系统集成仍绑定具体版本；安装候选后可用 `system <包>@<新版> --upgrade --dry-run` 合并预览旧撤销／新安装，再以单独 `--approve-admin --binding <摘要>` 执行。需要自行提升终端，记录阶段但不冒充事务；失败不自动重放脚本。集成脚本除 `native` EXE 与 `powershell` 外还支持 `javascript`（`.js`／`.mjs`／`.ts`）：在已提权的 Piko 进程内由内置 Bun 运行时执行 `export default async (ctx) => {}`，`ctx` 含 `args`（声明参数）、`env`、`root` 与 `packageDir`；无 Shell 转义／引号问题，抛出即失败并记录。
+首次安装／显式变更系统集成必须单独 `--approve-admin` 并已处于管理员终端；**不自动 UAC 提权，不自动打开防火墙、不启用系统功能、不重启 Explorer／系统**。预览含脚本、参数和内容摘要。卸载复用已批准的 remove，不再要求手动预先撤销；但失败／运行中结果必须检查，不能静默重跑。系统执行不是沙箱或事务，脚本可任意修改外部系统，不能承诺通用完整回滚。活动集成仍绑定具体版本；安装候选后可用 `system <包>@<新版> --upgrade --dry-run` 合并预览旧撤销／新安装，再以单独 `--approve-admin --binding <摘要>` 执行。集成脚本除 `native` EXE 与 `powershell` 外还支持 `javascript`（`.js`／`.mjs`／`.ts`）：在已提权的 Piko 进程内由内置 Bun 运行时执行 `export default async (ctx) => {}`，`ctx` 含 `args`（声明参数）、`env`、`root` 与 `packageDir`；无 Shell 转义／引号问题，抛出即失败并记录。
 
 独立源已提供 FlClashHelperService 和 TortoiseSVN Shell 扩展配方：先拒绝外部现有服务／注册值／CommonProgramFiles 路径，保留配方自己的所有权记录；撤销只恢复拥有的值，不照搬 Scoop 的整树删除。TortoiseSVN MSI 的重复架构文件以 `files` 中 `#File表标识` 精确选择；无明确映射仍拒绝重名。
 
 TortoiseSVN 配方修订 `1.15.0.29830-piko.1` 起，COM／overlay 直接指向独立版本目录，不再使用固定 `CommonProgramFiles` junction；安装候选及切换系统注册不删除旧版 DLL。客户端卸载／版本清理系统集成包前通过 Windows Restart Manager 检查加载的 EXE／DLL：占用版本预览为 `defer-in-use`，结果为 `deferred-in-use`，保留旧版并在用户自行注销／重启后重新清理。直接 uninstall 在移动目录前拒绝占用。检查失败不视为无人使用；仍有进程在检查后加载文件的竞争窗口，不保证消除一切共享锁。普通更新不会绕过活动系统集成的管理员批准。详见软件源 `guides/tortoise-svn.md`。配方的 HKCU 隔离注册切换与真实 DLL 占用检查已验证；**真实 HKLM 管理员实装、Explorer UI、服务／驱动验收仍未据此认证**。
 
-以上新增元数据使用 **state schema 6**，仍可读 schema 1–5。导出只记录 desktop／bootstrap／system 意图，不带注册表旧值、Profile、用户数据或批准；目标机重新审核。需要 bootstrap 生成命令的默认选择会明确阻止自动恢复，须先单独安装／批准引导再选择。
+当前使用 **state schema 9**：`receipts[install.id]` 统一保存每次安装的受管理副作用，`services[<install.id>/<serviceName>]` 独立保存服务归属与配置；`packageId` 必须是 `state.installs` 的 64 位十六进制安装 ID，不是多版本共享的 `install.key`。旧 desktop／profiles／startMenu／bootstraps／admin 字段仅在迁移期间保留作事务投影，不是第二套独立卸载入口。持久化数据记录 `data` 仍是保留用户数据的正式状态，不能随迁移删除。导出只记录集成意图，不带注册表旧值、Profile、用户数据或批准；目标机重新审核。需要 bootstrap 生成命令的默认选择会明确阻止自动恢复，须先单独安装／批准引导再选择。
 
 ## npm 脚本
 
@@ -658,14 +708,17 @@ piko maintenance orphans
 piko maintenance quarantine --dry-run
 piko maintenance quarantine --yes
 piko recover
+piko recover --rollback          # 仅回滚可证明归属的受管理效果／状态
 piko recover --force
 ```
 
 缓存清理保留已安装版本依赖的原始 npm 快照。绕过校验只对本次指定便携版本有效，不使用或写入可信下载缓存，后续仍校验；npm 不接受绕过。缓存损坏明确失败。
 
-安装提交中断后按 journal **继续完成登记但不选默认**；未写入合法 journal 的目录不自动删除。maintenance 只隔离具有合法收据的未登记安装，不自动采纳或删除未知目录，持久化数据保留。普通操作被 Ctrl+C 中断留下的 `mutation.lock` 由**下一条写命令自动接管**：锁记录的 owner 进程已退出时直接回收并按已有 journal 恢复，owner 仍存活时才拒绝并提示重试；`piko recover --force` 仍可用于显式检查后清理，但不再是必需步骤。自升级中断留下的 `operations/self-update.json` 同样由下一条写命令自动收敛：尚未换过程序就丢弃该次更新，已经换过则只补写收据与备份，不重新下载。
+安装晋升、默认切换、卸载、更新以及各集成事务保留各自的安全检查和 journal；通用 operation journal 补充阶段 checkpoint，而不是替换原来的收据、路径、链接和 revision 校验。恢复默认继续／前滚可以安全证明的阶段；显式 `piko recover --rollback` 仅撤销其管理边界内有记录且通过预检的效果与状态，保留持久化用户数据。恢复会先检查整份计划的路径、来源、所有权、内容与外部漂移；冲突保留日志和现场，不静默覆盖。bootstrap／admin／npm 脚本等任意代码的 running 或不确定边界须先人工检查、显式协调，不自动重放，也不保证回滚这些代码已经产生的外部影响。没有合法 journal 的未知目录不自动删除。
 
-**单个操作失败只影响它自己。** 已安装命令的启动只读取最近提交的状态：残留的安装／选择／删除／重建／桌面／数据日志不再让所有命令一起失败（它们只会在下一条写命令或 `piko doctor` 时前滚），只有仍在移动状态目录的数据目录迁移与目录布局迁移会阻止启动。安装时若 Start Menu 同名 `.lnk` 已存在且无法证明由 Piko 写入，只跳过该快捷方式并保留原文件，不再让整次安装失败。
+普通操作被 Ctrl+C 中断留下的 `mutation.lock` 由**下一条写命令自动接管**：owner 已退出时回收锁并检查 journal，owner 仍存活时拒绝；回收死锁不代表授权重跑任意代码。`piko recover --force` 用于显式检查后的死锁处理，不绕过漂移／所有权检查。自升级的独立 `operations/self-update.json` 在尚未换程序时丢弃该次更新，已换过则只补收据与备份，不重新下载。
+
+已安装命令的启动只读取最近提交的状态，单个残留操作不让所有包一起失败；仍在移动状态目录的数据／布局迁移会阻止启动。journal 未解决时相关写操作须先安全恢复。Start Menu 外部同名文件不会被覆盖，按安装流程报告冲突或跳过并保留原文件。
 
 ## Piko 自升级
 
@@ -706,7 +759,7 @@ piko self update D:\downloads\piko.exe --sha256 <EXE_SHA256> --yes
   apps/<package>/current/       # 当前版本 junction；来源身份保存在内部元数据
   shims/                       # 4.5 KiB 原生 EXE + 同名 .shim，不再链接整个 Bun EXE
   persist/
-  sources/
+  sources/<alias>/latest.json   # 唯一受管理 HTTP 索引；fetchedAt 在 Source 元数据中
   cache/                       # artifacts + npm-input + npm 缓存
   staging/
   operations/
@@ -714,7 +767,7 @@ piko self update D:\downloads\piko.exe --sha256 <EXE_SHA256> --yes
   mutation.lock/
 ```
 
-0.4.0 当前可读 schema 1–8；schema 8 用于可读软件／数据目录，schema 7 用于普通依赖记录、Bash Profile 与 npm 兼容元数据，写入后不要换回只支持 schema 6 的旧 EXE；env 和 Git 提交元数据使用 schema >=4，npm 内容批准使用 schema >=3，Shell／文件持久化使用 schema >=5，桌面／引导／管理员集成使用 schema 6。旧版会拒绝不支持的状态；没有原始快照的遗留 npm 安装需明确卸载重装才能批准，不把任意当前目录当可信输入。
+当前客户端可读 schema 1–9，写入 schema 9。schema 8 引入可读软件／数据目录，schema 9 引入按安装 ID 的统一副作用收据与独立服务收据；HTTP Source 记录 `fetchedAt`，历史 Git 来源证据保留但不再用于 fetch。不手工改 schemaVersion，不换回无法读取当前状态的旧 EXE。没有原始快照的遗留 npm 安装需明确卸载重装才能批准，不把任意当前目录当可信输入。
 
 ## 验收与边界
 
@@ -731,7 +784,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-sandbox.ps
 
 最终以 `results/report.json` 的 `status=passed`、结束时间和退出码为准，窗口打印 PASS 不等于报告已发布。报告写入有短暂文件占用重试；旧报告和 pending 内容保留，不为绕过锁截断文件。沙盒内辅助脚本可双击检查网络或重跑，不需复制命令。结果作为不可信数据读取，不自动执行。
 
-本机已测试 Git HTTP 安装/刷新、参数与标准流、退出码、隔离 Ctrl+C、内容批准、恢复、自升级和安装入口。尚缺 Windows 10 清洁 VM、PowerShell 7 沙盒、真实 Rust 工具链、管理员服务／COM／驱动、所有交互 TUI/原生模块及全格式沙盒验收。性能由 `docs/verification/performance.json` 记录。延迟加载避免 shim 初始化安装分支，完整快照文件摘要采用 16 路有界并发且保持旧批准指纹兼容；仍有 Bun 启动开销。
+历史构建曾测试 Git／HTTP 安装刷新、参数与标准流、退出码、隔离 Ctrl+C、内容批准、恢复、自升级和安装入口；其中 Git fetch 已退出当前支持范围，历史结果不能证明本轮实现通过。本轮最终检查结果待集成验证填写。尚缺 Windows 10 清洁 VM、PowerShell 7 沙盒、真实 Rust 工具链、管理员服务／COM／驱动、浏览器／GUI、所有交互 TUI／原生模块及全格式沙盒验收。性能历史记录在 `docs/verification/performance.json`，不代表本轮重构的实测结果。
 
 **待外部条件**：签名证书、正式发布仓库/权限和正式 HTTPS 软件源托管未提供。当前本地未签名包、固定目录和 CI 配置不等于已正式发布；远端 CI 尚未运行。macOS/Linux、原生 ARM64、系统 EXE/MSI 安装器、任意非 npm 源码构建、项目级环境和接管外部安装不属于本轮 Windows 首发范围。
 

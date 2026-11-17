@@ -1,6 +1,5 @@
 import {
   mkdir,
-  readFile,
   readdir,
   rename,
   lstat,
@@ -20,6 +19,7 @@ import {
 import { atomicJson, exists, fail, json, noLinks, sha256 } from "./util.ts";
 import { Store, validateState, acquireMutationLock } from "./store.ts";
 import type { Install, State } from "./types.ts";
+import { readSourceIndex } from "./source-fetch.ts";
 
 function targetState(before: State): State {
   validateState(before);
@@ -158,12 +158,7 @@ async function preflight(root: string, before: State, after: State) {
     };
     await walk(join(root, i.dir));
     if (i.dir !== next.dir) {
-      const manifest = JSON.parse(
-        await readFile(
-          join(root, "sources", i.source.identity, "index.json"),
-          "utf8",
-        ),
-      );
+      const manifest = await readSourceIndex(root, i.source);
       if (!manifest.packages[i.name])
         fail("Source index missing during migration");
       const sourceFile = manifest.packages[i.name].versions[i.version];

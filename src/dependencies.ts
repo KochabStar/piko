@@ -1,14 +1,10 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  chooseVersion,
-  normalizeIndex,
-  parseSpec,
-  refresh,
-} from "./catalog.ts";
+import { chooseVersion, parseSpec } from "./catalog.ts";
+import { ensureSourceIndex, readSourceIndex } from "./source-fetch.ts";
 import { resolveCommand } from "./commands.ts";
 import { packageKey } from "./store.ts";
-import { fail, json, noLinks } from "./util.ts";
+import { fail, noLinks } from "./util.ts";
 import type { Dependency, Source, State } from "./types.ts";
 
 // Shell startup uses validated local metadata: never fetch on opening a terminal.
@@ -18,14 +14,21 @@ export async function dependencyAliases(
   name: string,
   refreshSource = true,
 ): Promise<Record<string, string> | undefined> {
-  if (refreshSource)
-    return (await refresh(root, structuredClone(source))).packages[name]
-      ?.aliases;
-  const path = join(root, "sources", source.identity, "index.json");
-  await noLinks(path);
-  return normalizeIndex(await json(path)).packages[name]?.aliases;
+  const index = refreshSource
+    ? await ensureSourceIndex(root, source)
+    : await readSourceIndex(root, source);
+  return index.packages[name]?.aliases;
 }
 
+export type DependencyCheck = {
+  package: string;
+  commands: string[];
+  installedVersions: string[];
+  selectedVersion: string | null;
+  satisfied: boolean;
+  issues: string[];
+  advice: string[];
+};
 // Preflight only: dependencies never install, select or claim commands implicitly.
 export async function dependencyStatus(
   root: string,
@@ -33,8 +36,8 @@ export async function dependencyStatus(
   source: Source,
   dependencies: Dependency[] = [],
   refreshSource = true,
-) {
-  const results = [];
+): Promise<DependencyCheck[]> {
+  const results: DependencyCheck[] = [];
   for (const dependency of dependencies) {
     const parsed = parseSpec(dependency.package),
       provider = parsed.source ? state.sources[parsed.source] : source,

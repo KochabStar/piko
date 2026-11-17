@@ -1,6 +1,6 @@
 {
   "name": "piko",
-  "version": "0.4.24",
+  "version": "0.4.25",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,6 +15,7 @@
     "verify": "bun run typecheck && bun run build && bun test",
     "source:serve": "bun scripts/serve-source.ts",
     "source:check": "bun scripts/check-source.ts",
+    "source:runtime": "bun scripts/build-source-runtime.ts",
     "release:check": "bun scripts/check-release.ts",
     "smoke:real": "bun scripts/smoke-real.ts",
     "m0": "bun scripts/m0.ts",

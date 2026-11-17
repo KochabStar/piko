@@ -48,6 +48,8 @@ const index: Index = {
 const overrides = new Map<string, Partial<Manifest["platforms"][string]>>();
 let downloads = 0,
   unavailable = false;
+let failArtifact = false;
+let beforeArtifact: (() => void) | undefined;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -58,6 +60,9 @@ const server = Bun.serve({
         ? new Response("offline", { status: 503 })
         : Response.json(index);
     if (path === "/file.exe") {
+      beforeArtifact?.();
+      if (failArtifact)
+        return new Response("fixture artifact unavailable", { status: 400 });
       downloads++;
       return new Response(bytes);
     }
@@ -131,7 +136,7 @@ const run = async (root: string, args: string[]) => {
   return { out, err, code };
 };
 
-test("catalog channels reject recursion, collisions and invalid runtime identities", () => {
+test("catalog channels allow future numeric constraints while rejecting recursion and invalid identities", () => {
   expect(chooseVersion(versions, "lts", "3.0.0", { lts: "1" })).toBe("1.1.0");
   expect(
     chooseVersion(["release-x"], "stable", undefined, { stable: "release-x" }),
@@ -139,7 +144,7 @@ test("catalog channels reject recursion, collisions and invalid runtime identiti
   const invalidAliases: Record<string, string>[] = [
     { latest: "1" },
     { lts: "stable", stable: "lts" },
-    { lts: "9" },
+    { lts: "../9" },
     { lts: "^1" },
   ];
   for (const aliases of invalidAliases) {
@@ -147,6 +152,12 @@ test("catalog channels reject recursion, collisions and invalid runtime identiti
     value.packages.tool!.aliases = aliases;
     expect(() => normalizeIndex(value)).toThrow();
   }
+  const future = structuredClone(index);
+  future.packages.tool!.aliases = { lts: "9" };
+  expect(normalizeIndex(future).packages.tool!.aliases).toEqual({ lts: "9" });
+  expect(() =>
+    chooseVersion(versions, "lts", undefined, future.packages.tool!.aliases),
+  ).toThrow("matches 9");
   const value = structuredClone(index);
   value.packages.tool!.runtime = { family: "../java", distribution: "vendor" };
   expect(() => normalizeIndex(value)).toThrow();
@@ -432,69 +443,66 @@ test("inventory confirmation binds state and manifests; interrupted restore is s
   } finally {
     overrides.delete("tool/1.0.0");
   }
-  const saved = target.install.bind(target);
-  let once = true;
-  target.install = async (...args) => {
-    if (once) {
-      once = false;
-      throw new Error("simulated network failure");
-    }
-    return await saved(...args);
-  };
-  await expect(
-    importInventory(target, inventory, { confirmed: true }),
-  ).rejects.toThrow("simulated");
+  failArtifact = true;
+  try {
+    await expect(
+      importInventory(target, inventory, { confirmed: true }),
+    ).rejects.toThrow("400");
+  } finally {
+    failArtifact = false;
+  }
   expect(Object.keys((await target.store.read()).sources)).toEqual(["main"]);
   expect(Object.values((await target.store.read()).installs)).toEqual([]);
   await importInventory(target, inventory, { confirmed: true });
   expect(exportInventory(await target.store.read())).toEqual(inventory);
 });
 
-test("inventory refuses state or manifest drift between confirmation and installation", async () => {
+test("inventory installs its approved exact manifest when source metadata changes during download", async () => {
   const origin = await manager();
   await origin.install("tool@1.0.0");
   await origin.use("tool@1");
   const inventory = exportInventory(await origin.store.read());
-  const target = new Packages(join(work, crypto.randomUUID())),
-    install = target.install.bind(target);
-  target.install = async (...args) => {
+  const target = new Packages(join(work, crypto.randomUUID()));
+  const preview = await planInventory(target, inventory);
+  beforeArtifact = () => {
     overrides.set("tool/1.0.0", {
       configFiles: { "changed.ini": "not approved" },
     });
-    return await install(...args);
   };
   try {
-    await expect(
-      importInventory(target, inventory, { confirmed: true }),
-    ).rejects.toThrow("Manifest changed");
+    await importInventory(target, inventory, {
+      confirmed: true,
+      binding: preview.binding,
+    });
   } finally {
+    beforeArtifact = undefined;
     overrides.delete("tool/1.0.0");
   }
-  expect(Object.values((await target.store.read()).installs)).toEqual([]);
-  target.install = async (...args) => {
-    await target.store.mutate(async () => {});
-    return await install(...args);
-  };
-  await expect(
-    importInventory(target, inventory, { confirmed: true }),
-  ).rejects.toThrow("State changed");
-  expect((await target.store.read()).defaults).toEqual({});
+  const state = await target.store.read();
+  const installed = Object.values(state.installs)[0]!;
+  expect(installed.manifestHash).toBe(preview.manifests["main/tool@1.0.0"]);
+  expect(await exists(join(target.root, installed.dir, "changed.ini"))).toBe(
+    false,
+  );
+  expect(state.defaults[installed.key]!.id).toBe(installed.id);
 });
 
-test("cleanup rechecks receipts inside the write lock rather than deleting drifted files", async () => {
-  const p = await manager(),
-    i = await p.install("tool@1.0.0"),
-    uninstall = p.uninstall.bind(p);
-  p.uninstall = async (...args) => {
-    await atomicJson(join(p.root, i.dir, ".piko-install.json"), {
-      ...i,
-      checksum: "tampered",
-    });
-    return await uninstall(...args);
-  };
-  const result = await p.cleanupVersions("tool", 0, { confirmed: true });
-  expect(result[0]?.status).toBe("failed");
-  expect(result[0]?.error).toContain("receipt changed");
+test("version cleanup preserves installations with drifted local receipts", async () => {
+  const p = await manager();
+  const i = await p.install("tool@1.0.0");
+  await atomicJson(join(p.root, i.dir, ".piko-install.json"), {
+    ...i,
+    checksum: "tampered",
+  });
+  const plan = await p.versionCleanupPlan("tool", 0);
+  expect(
+    plan.entries.find((entry) => entry.installation.id === i.id)?.action,
+  ).toBe("defer-drift");
+  const result = await p.cleanupVersions("tool", 0, {
+    confirmed: true,
+    binding: plan.binding,
+  });
+  expect(result[0]?.status).toBe("deferred-drift");
   expect(await exists(join(p.root, i.dir, "tool.exe"))).toBe(true);
   expect((await p.store.read()).installs[i.id]?.id).toBe(i.id);
 });

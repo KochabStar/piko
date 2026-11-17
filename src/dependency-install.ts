@@ -1,22 +1,43 @@
 import semver from "semver";
-import { chooseVersion, loadManifest, parseSpec, refresh } from "./catalog.ts";
+import { chooseVersion, parseSpec } from "./catalog.ts";
+import {
+  resolvePackageManifest,
+  resolutionSession,
+} from "./package-resolution.ts";
+import { ensureSourceIndex } from "./source-fetch.ts";
 import { dependencyStatus } from "./dependencies.ts";
 import { installId, packageKey } from "./store.ts";
 import { fail, sha256 } from "./util.ts";
+import { bindOperation, runOperation } from "./journal.ts";
+import { installPackage } from "./ops/install.ts";
 import type { Packages } from "./packages.ts";
-import type { Source } from "./types.ts";
+import type { Index, Manifest, Source } from "./types.ts";
 
 // Explicit, bounded graph planning. Existing defaults are fixed constraints;
 // this command never silently changes an existing provider or claims commands.
-export async function planDependencies(packages: Packages, spec: string) {
+export type DependencyInstallOptions = {
+  offline?: boolean;
+  withService?: boolean;
+};
+export async function planDependencies(
+  packages: Packages,
+  spec: string,
+  options: DependencyInstallOptions = {},
+) {
   const state = await packages.store.read(),
     root = parseSpec(spec);
   if (root.source === "npm")
     fail("Use ordinary npm install after explicitly selecting managed Node");
-  const indexes = new Map<string, Awaited<ReturnType<typeof refresh>>>();
+  const indexes = new Map<string, Index>();
+  const resolution = resolutionSession();
   const indexFor = async (source: Source) => {
     if (!indexes.has(source.identity))
-      indexes.set(source.identity, await refresh(packages.root, source));
+      indexes.set(
+        source.identity,
+        await ensureSourceIndex(packages.root, source, {
+          offline: options.offline,
+        }),
+      );
     return indexes.get(source.identity)!;
   };
   const sources = Object.values(state.sources).filter(
@@ -34,6 +55,7 @@ export async function planDependencies(packages: Packages, spec: string) {
     commands: Set<string>;
     version: string;
     hash: string;
+    manifest: Manifest;
     dependencies: string[];
     select: boolean;
   };
@@ -70,14 +92,30 @@ export async function planDependencies(packages: Packages, spec: string) {
       });
     const selected = !isRoot && state.defaults[key];
     const selectedVersion = selected && state.installs[selected.id]!.version;
-    const available = Object.keys(entry.versions).filter(accepts);
+    const resolved = selectedVersion
+      ? undefined
+      : await resolvePackageManifest(
+          packages.root,
+          state,
+          source,
+          name,
+          entry,
+          request,
+          { offline: options.offline, session: resolution },
+        );
+    const available = [
+      ...new Set([
+        ...Object.keys(entry.versions),
+        ...(resolved ? [resolved.version] : []),
+      ]),
+    ].filter(accepts);
     const preferred = choices.get(key);
     const version =
       selectedVersion ||
       (preferred && accepts(preferred)
         ? preferred
-        : accepts(entry.latest)
-          ? entry.latest
+        : resolved && accepts(resolved.version)
+          ? resolved.version
           : available
               .filter((v) => semver.valid(v) && !semver.prerelease(v))
               .sort(semver.rcompare)[0] ||
@@ -96,13 +134,18 @@ export async function planDependencies(packages: Packages, spec: string) {
       choices.set(key, version);
       throw replan; // Rebuild edges so discarded versions leave no stale requirements.
     }
-    const manifest = await loadManifest(
-      packages.root,
-      source,
-      entry.versions[version]!,
-      name,
-      version,
-    );
+    const manifest =
+      resolved?.version === version
+        ? resolved
+        : await resolvePackageManifest(
+            packages.root,
+            state,
+            source,
+            name,
+            entry,
+            version,
+            { offline: options.offline, session: resolution },
+          );
     const distribution = manifest.platforms["windows-x64"]!;
     if (!isRoot && !selected) {
       if (
@@ -132,12 +175,18 @@ export async function planDependencies(packages: Packages, spec: string) {
         fail("Dependency does not provide " + command);
     }
     if (selected) {
-      const checks = await dependencyStatus(packages.root, state, source, [
-        {
-          package: source.alias + "/" + name + "@" + version,
-          commands: [...requiredCommands],
-        },
-      ]);
+      const checks = await dependencyStatus(
+        packages.root,
+        state,
+        source,
+        [
+          {
+            package: source.alias + "/" + name + "@" + version,
+            commands: [...requiredCommands],
+          },
+        ],
+        !options.offline,
+      );
       if (checks.some((c) => !c.satisfied))
         fail(
           "Existing dependency default needs explicit reconciliation: " +
@@ -153,6 +202,7 @@ export async function planDependencies(packages: Packages, spec: string) {
       commands: requiredCommands,
       version,
       hash: sha256(JSON.stringify(manifest)),
+      manifest,
       dependencies: [],
       select: !isRoot && !selected,
     };
@@ -206,6 +256,14 @@ export async function planDependencies(packages: Packages, spec: string) {
       package: n.source.alias + "/" + n.name,
       version: n.version,
       manifestHash: n.hash,
+      source: {
+        alias: n.source.alias,
+        url: n.source.url,
+        type: n.source.type,
+        identity: n.source.identity,
+      },
+      name: n.name,
+      manifest: n.manifest,
       installed: !!state.installs[installId(key, n.version)],
       select: n.select,
       request: [...n.requests][0]!,
@@ -215,7 +273,15 @@ export async function planDependencies(packages: Packages, spec: string) {
   return {
     revision: state.revision,
     steps,
-    binding: sha256(JSON.stringify([state.revision, spec, steps])),
+    binding: sha256(
+      JSON.stringify([
+        state.revision,
+        spec,
+        steps,
+        !!options.offline,
+        !!options.withService,
+      ]),
+    ),
     warning:
       "Only explicit --with-deps --yes with an unchanged --binding installs/selects dependencies. Root installation does not select a default. Completed steps remain after failure; preview again to retry.",
   };
@@ -225,31 +291,51 @@ export async function installWithDependencies(
   packages: Packages,
   spec: string,
   binding: string,
+  options: DependencyInstallOptions = {},
 ) {
-  const plan = await planDependencies(packages, spec);
-  if (!binding || binding !== plan.binding)
-    fail(
-      "Dependency plan changed; preview --with-deps --dry-run and pass its --binding",
-    );
-  let revision = plan.revision;
-  for (const step of plan.steps) {
-    await packages.install(
-      step.package + "@" + step.version,
-      false,
-      revision,
-      step.manifestHash,
-    );
-    revision++;
-    if (step.select) {
-      await packages.use(step.package + "@" + step.version, {
-        expectedRevision: revision,
+  return await runOperation(
+    packages.store,
+    "install",
+    spec,
+    { ...options, dependencies: true },
+    async () => {
+      const plan = await planDependencies(packages, spec, options);
+      if (!binding || binding !== plan.binding)
+        fail(
+          "Dependency plan changed; preview --with-deps --dry-run and pass its --binding",
+        );
+      await bindOperation(packages.store, {
+        kind: "dependencies",
+        spec,
+        steps: plan.steps,
+        options,
       });
-      revision++;
-    }
-  }
-  return {
-    status: "completed",
-    steps: plan.steps,
-    defaultUnchangedForRoot: true,
-  };
+      let revision = plan.revision;
+      for (const step of plan.steps) {
+        await installPackage(packages, step.package + "@" + step.version, {
+          ...options,
+          expectedRevision: revision,
+          expectedManifestHash: step.manifestHash,
+          bound: {
+            source: step.source,
+            name: step.name,
+            version: step.version,
+            manifest: step.manifest,
+          },
+        });
+        revision = (await packages.store.read()).revision;
+        if (step.select) {
+          await packages.use(step.package + "@" + step.version, {
+            expectedRevision: revision,
+          });
+          revision = (await packages.store.read()).revision;
+        }
+      }
+      return {
+        status: "completed",
+        steps: plan.steps,
+        defaultUnchangedForRoot: true,
+      };
+    },
+  );
 }
