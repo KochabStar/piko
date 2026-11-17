@@ -1308,7 +1308,9 @@ export function nextManifest(
     if (old.url === oldDownloads[0].url) {
       d.url = candidate.url;
       if (candidate.sha256) d.sha256 = candidate.sha256;
-      else if (candidate.version !== current.version) delete d.sha256;
+      // Clear the stale digest without moving its slot when payload verification
+      // restores it: installed manifest hashes bind JSON property order.
+      else if (candidate.version !== current.version) d.sha256 = undefined;
       if (rule.maxBytes !== undefined) d.maxBytes = rule.maxBytes;
     } else
       requireThat(

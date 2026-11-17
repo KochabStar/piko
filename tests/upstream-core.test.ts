@@ -11,6 +11,7 @@ import type {
   UpstreamRule,
 } from "../src/upstream.ts";
 import type { Manifest } from "../src/types.ts";
+import { sha256 } from "../src/util.ts";
 
 const hash = "a".repeat(64);
 const baseline: Manifest = {
@@ -275,6 +276,47 @@ test("same-version URL and digest identities are immutable", () => {
   expect(() =>
     nextManifest(baseline, { ...candidate, sha256: "b".repeat(64) }, feedRule),
   ).toThrow("immutable");
+});
+
+test("PE-derived same-artifact resolution retains installed manifest identity", () => {
+  for (const multiple of [false, true]) {
+    const download = {
+      url: "https://publisher.example/tool.exe",
+      sha256: hash,
+      format: "file" as const,
+      file: "tool.exe",
+    };
+    const current: Manifest = {
+      schemaVersion: 1,
+      name: "tool",
+      version: "1.0.0.4",
+      platforms: {
+        "windows-x64": multiple
+          ? { downloads: [download], bin: { tool: "tool.exe" } }
+          : { ...download, bin: { tool: "tool.exe" } },
+      },
+    };
+    const next = nextManifest(
+      current,
+      {
+        version: "1.0.0",
+        url: download.url,
+        provenance: "https://publisher.example/feed",
+        versionFromPE: true,
+      },
+      { provider: "node", trust: "https", versionFromPE: true },
+    );
+    const platform = next.platforms["windows-x64"];
+    const resolved = platform.downloads?.[0] ?? platform;
+    expect(resolved.sha256).toBeUndefined();
+    expect(
+      current.platforms["windows-x64"].downloads?.[0]?.sha256 ??
+        current.platforms["windows-x64"].sha256,
+    ).toBe(hash);
+    resolved.sha256 = hash;
+    next.version = current.version;
+    expect(sha256(JSON.stringify(next))).toBe(sha256(JSON.stringify(current)));
+  }
 });
 
 test("retargeting changes service payload paths but keeps code and arguments literal", () => {

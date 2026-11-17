@@ -1,5 +1,7 @@
 # QQNT official download authorization (0.4.1)
 
+Runtime resolution clears historical SHA-256 values without changing their JSON property position. After payload verification restores the digest and reads the full PE version, an unchanged QQ download retains the exact source manifest hash used by existing installations. This avoids false same-version overwrite conflicts without rewriting installation records or relaxing payload, signature or manifest-content checks.
+
 Piko 0.4.1 supports the QQNTV2 public download channel without storing short-lived signed URLs in a source manifest.
 
 - A manifest retains the exact, unsigned `https://qqdl.gtimg.cn/qqfile/QQNTV2/...` artifact URL and expected SHA-256. Historical installs sign their recorded URL, never a newly fetched `latest` URL.

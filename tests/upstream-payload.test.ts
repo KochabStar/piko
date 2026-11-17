@@ -242,6 +242,13 @@ test("HTTPS delegation computes an exact content pin without inventing publisher
     expect(
       distributionDownloads(next.platforms["windows-x64"]!)[0]!.sha256,
     ).toBe(sha256(bytes));
+    const exact = manifest();
+    exact.version = upstream.version;
+    const platform = exact.platforms["windows-x64"]!;
+    platform.url = url;
+    platform.sha256 = sha256(bytes);
+    platform.maxBytes = 512 * 1024 * 1024;
+    expect(sha256(JSON.stringify(next))).toBe(sha256(JSON.stringify(exact)));
     expect(upstream).toEqual(original);
     expect(
       await readFile(join(root, "cache/artifacts", sha256(bytes))),
