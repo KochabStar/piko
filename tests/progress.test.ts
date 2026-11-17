@@ -319,7 +319,13 @@ test("compiled CLI progress stays on stderr; JSON, pipes, CI and no-progress rem
     exe = join(import.meta.dir, "../dist/piko.exe");
   const run = async (args: string[], expected = 0) => {
     const child = Bun.spawn([exe, ...args], {
-      env: { ...process.env, PIKO_HOME: home, NO_COLOR: "1", CI: "1" },
+      env: {
+        ...process.env,
+        PIKO_HOME: home,
+        NO_COLOR: "1",
+        CI: "1",
+        WT_SESSION: "piko-progress-test",
+      },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

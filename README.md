@@ -315,7 +315,7 @@ Shell 初始化读取最近已提交并经过内容审批的快照，不因 `mut
 
 `info` 默认显示来源、最新／请求版本、依赖问题和已安装版本，不输出完整收据；`source list`、`command list` 使用精简表格，`cache list` 按缓存类别汇总数量与磁盘占用（`cache clean` 摘要同样报告可释放空间），`--verbose` 再展开路径／版本明细。搜索和列表不再重复打印每次相同的使用提示。执行代码、数据删除、系统集成等审批预览同样默认使用人类可读输出：完整脚本正文、参数、内容摘要、binding 与安全警告不省略。
 
-- 进度写 stderr，最终结果写 stdout。默认在管道、重定向、CI 或 `TERM=dumb` 环境中关闭动态进度，避免转义字符污染日志。
+- 进度写 stderr，最终结果写 stdout。默认在管道、重定向、CI 或 `TERM=dumb` 环境中关闭动态进度，避免转义字符污染日志。任务栏与通知控制序列仅写入实际 TTY；继承 `WT_SESSION` 的管道或重定向也不会收到这些序列。
 - `--progress always` 可在重定向环境输出纯文本下载进度；配合 `--verbose` 输出全部阶段日志。`--progress never`／`--no-progress` 关闭进度。
 - `--color auto|always|never` 控制交互终端配色；`--no-color` 和 `NO_COLOR` 优先禁用颜色，关闭颜色不影响进度信息。
 - 所有命令默认输出人类可读文本：`list`／`search`／`info`／表格类命令使用精简表格；`cleanup`、`doctor`、`reset`、`maintenance`、`cache`、`import` 等计划与结果使用表格或逐行摘要；`bootstrap`、`system`、`integrate`、`persist`、`rust`、`scripts` 等审批预览使用缩进键值文本，脚本正文按原样完整展示，binding 单独成行。

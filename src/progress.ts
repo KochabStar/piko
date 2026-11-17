@@ -240,7 +240,7 @@ export class ProgressRenderer {
     this.closed = true;
     if (this.clock) clearInterval(this.clock);
     if (!this.seen) return;
-    if (this.options.taskbar) {
+    if (this.options.tty && this.options.taskbar) {
       // Clear the taskbar indicator and toast the outcome so a long download
       // can finish while the user works in another window.
       this.options.write("\x1b]9;4;0;\x07");
