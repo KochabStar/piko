@@ -12,7 +12,7 @@ import { constants } from "node:fs";
 import { join } from "node:path";
 import { artifactBytes } from "./cache.ts";
 import { distributionDownloads, normalizeManifest } from "./catalog.ts";
-import { downloadArtifact } from "./downloader.ts";
+import { downloadArtifact, type ArtifactIdentity } from "./downloader.ts";
 import { extractionState, writeArtifactFile } from "./artifacts.ts";
 import { ensureInnoUnpacker, ensureSevenZip } from "./helpers.ts";
 import { ensureInstallerTool } from "./installer-tools.ts";
@@ -63,7 +63,12 @@ export async function prepareUpstreamManifest(
   current: Manifest,
   candidate: UpstreamCandidate,
   rule: UpstreamRule,
-  options: { preview?: boolean; offline?: boolean } = {},
+  options: {
+    preview?: boolean;
+    offline?: boolean;
+    identity?: ArtifactIdentity;
+    onIdentity?: (identity: ArtifactIdentity) => void;
+  } = {},
 ): Promise<Manifest> {
   rule = validateUpstreamRule(rule);
   const next = nextManifest(current, candidate, rule);
@@ -143,7 +148,13 @@ export async function prepareUpstreamManifest(
                 ? fail(
                     "Offline upstream preparation requires a saved exact manifest and verified cached artifacts",
                   )
-                : await downloadArtifact(root, url, state, limit);
+                : await downloadArtifact(
+                    root,
+                    url,
+                    state,
+                    limit,
+                    url === candidate.url ? options : undefined,
+                  );
           const hash = verifyPublishedDigests(bytes, expected);
           if (assetBytes !== undefined && bytes.length !== assetBytes)
             fail(
@@ -218,7 +229,7 @@ export async function prepareUpstreamManifest(
       }
       const artifact = await acquire(
         download.url,
-        expected,
+        { ...expected, sha256: expected.sha256 ?? historicalPin },
         limit,
         fromCandidate ? candidate.assetBytes : undefined,
       );

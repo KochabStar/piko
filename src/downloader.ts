@@ -68,15 +68,87 @@ export async function findAria2(
   }
 }
 
+// HTTP validators establish freshness, never content authenticity. Only a
+// completed transfer carrying the same validator may bind it to a SHA-256 pin.
+export type ArtifactIdentity = {
+  header: "etag" | "x-cos-version-id";
+  value: string;
+  bytes: number;
+};
+type IdentityDownload = {
+  identity?: ArtifactIdentity;
+  onIdentity?: (identity: ArtifactIdentity) => void;
+};
+function responseIdentity(response: Response): ArtifactIdentity | undefined {
+  const bytes = Number(
+    response.headers.get("content-range")?.match(/\/(\d+)$/)?.[1] ??
+      response.headers.get("content-length"),
+  );
+  if (!Number.isSafeInteger(bytes) || bytes < 1) return;
+  const version = response.headers.get("x-cos-version-id");
+  if (version && /^[A-Za-z0-9._~+=/-]{1,512}$/.test(version))
+    return { header: "x-cos-version-id", value: version, bytes };
+  const etag = response.headers.get("etag");
+  if (etag && /^"[\x21\x23-\x7e]{1,512}"$/.test(etag))
+    return { header: "etag", value: etag, bytes };
+}
+export function sameArtifactIdentity(
+  a: ArtifactIdentity | undefined,
+  b: ArtifactIdentity | undefined,
+): boolean {
+  return (
+    !!a &&
+    !!b &&
+    a.header === b.header &&
+    a.value === b.value &&
+    a.bytes === b.bytes
+  );
+}
+export async function probeArtifactIdentity(
+  value: string,
+): Promise<ArtifactIdentity | undefined> {
+  let response: Response;
+  try {
+    response = await downloadResponse(value, {
+      method: "HEAD",
+      headers: new Headers({
+        "Accept-Encoding": "identity",
+        "Cache-Control": "no-cache",
+      }),
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      /^Download failed: HTTP (405|501)\b/.test(error.message)
+    )
+      return;
+    throw error;
+  }
+  try {
+    return responseIdentity(response);
+  } finally {
+    await response.body?.cancel();
+  }
+}
+function identityHeaders(offset: number, identity?: ArtifactIdentity): Headers {
+  return new Headers({
+    "Accept-Encoding": "identity",
+    Range: `bytes=${offset}-${identity ? identity.bytes - 1 : ""}`,
+    ...(identity ? { "Cache-Control": "no-cache" } : {}),
+    ...(identity?.header === "etag" ? { "If-Match": identity.value } : {}),
+  });
+}
+
 export async function downloadArtifact(
   root: string,
   value: string,
   state?: State,
   limit = 512 * 1024 * 1024,
+  options: IdentityDownload = {},
 ): Promise<Uint8Array> {
   const aria2 = await findAria2(root, state);
-  if (!aria2) return await downloadWithFetch(root, value, limit);
-  return await downloadWithAria2(root, value, aria2, limit);
+  if (!aria2) return await downloadWithFetch(root, value, limit, options);
+  return await downloadWithAria2(root, value, aria2, limit, options);
 }
 
 type Remainder = {
@@ -132,6 +204,7 @@ async function downloadWithFetch(
   root: string,
   value: string,
   limit: number,
+  options: IdentityDownload = {},
 ): Promise<Uint8Array> {
   const staging = join(root, "staging");
   await noLinks(staging);
@@ -141,6 +214,8 @@ async function downloadWithFetch(
   await mkdir(stage, { recursive: true });
   const partial = join(stage, "partial");
   let expected: number | undefined = await readTotal(stage);
+  const fresh = (await prefixSize(stage, limit)) === 0;
+  let bound = fresh && !!options.identity;
   const run = async (): Promise<Uint8Array> => {
     let offset = await prefixSize(stage, limit);
     if (expected !== undefined && offset === expected) {
@@ -160,12 +235,14 @@ async function downloadWithFetch(
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       const response = await downloadResponse(value, {
-        headers: new Headers({
-          "Accept-Encoding": "identity",
-          Range: `bytes=${offset}-`,
-        }),
+        headers: identityHeaders(offset, options.identity),
         signal: watch.signal,
       });
+      if (
+        options.identity &&
+        !sameArtifactIdentity(options.identity, responseIdentity(response))
+      )
+        bound = false;
       const shape = remainder(response, offset, limit);
       if (!shape) {
         await response.body?.cancel();
@@ -244,6 +321,7 @@ async function downloadWithFetch(
     }
   });
   await removeTree(stage);
+  if (bound) options.onIdentity?.(options.identity!);
   return bytes;
 }
 
@@ -310,6 +388,7 @@ export async function downloadWithAria2(
   value: string,
   executable: string,
   limit = 512 * 1024 * 1024,
+  options: IdentityDownload = {},
 ): Promise<Uint8Array> {
   // aria2 cannot enforce Piko's redirect policy itself. Relay validated GETs
   // over a private loopback endpoint; Bun retains TLS/redirect/credential
@@ -327,6 +406,8 @@ export async function downloadWithAria2(
     token = crypto.randomUUID();
   const emit = progressSink();
   let expected: number | undefined = await readTotal(stage);
+  const fresh = (await prefixSize(stage, limit)) === 0;
+  let bound = fresh && !!options.identity;
   const identity = new URL(value);
   const qqSession = isQQDownload(identity)
     ? new QQDownloadSession(identity)
@@ -351,13 +432,16 @@ export async function downloadWithAria2(
         if (++attempt.requests > 128) fail("Too many aria2 range requests");
         const response = await downloadResponse(value, {
           method: request.method as "GET" | "HEAD",
-          headers: new Headers({
-            "Accept-Encoding": "identity",
-            Range: `bytes=${attempt.offset}-`,
-          }),
+          headers: identityHeaders(attempt.offset, options.identity),
           signal: attempt.abort.signal,
           qqSession,
         });
+        if (
+          request.method === "GET" &&
+          options.identity &&
+          !sameArtifactIdentity(options.identity, responseIdentity(response))
+        )
+          bound = false;
         const shape = remainder(response, attempt.offset, limit);
         if (!shape || (shape.whole && attempt.offset !== 0)) {
           await response.body?.cancel();
@@ -548,6 +632,7 @@ export async function downloadWithAria2(
       }
     });
     await removeTree(stage);
+    if (bound) options.onIdentity?.(options.identity!);
     return bytes;
   } finally {
     server.stop(true);

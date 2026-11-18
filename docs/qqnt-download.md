@@ -1,13 +1,11 @@
 # QQNT official download authorization (0.4.1)
 
-Runtime resolution clears historical SHA-256 values without changing their JSON property position. After payload verification restores the digest and reads the full PE version, an unchanged QQ download retains the exact source manifest hash used by existing installations. This avoids false same-version overwrite conflicts without rewriting installation records or relaxing payload, signature or manifest-content checks.
-
 Piko 0.4.1 supports the QQNTV2 public download channel without storing short-lived signed URLs in a source manifest.
 
 - A manifest retains the exact, unsigned `https://qqdl.gtimg.cn/qqfile/QQNTV2/...` artifact URL and expected SHA-256. Historical installs sign their recorded URL, never a newly fetched `latest` URL.
 - Just before an uncached download, the built-in downloader requests a signature from the fixed official public `GetSign` endpoint on `im.qq.com`. No account, Cookie, GitHub token or third-party relay is used.
 - The signing request is a bounded, 15-second POST with redirects disabled and a 64 KiB response limit. Returned URLs must retain the exact HTTPS CDN origin, resource path and non-signature query parameters; credentials, alternate ports, fragments and duplicate/missing signature fields are rejected.
-- Signed values are process-memory-only. Hash-addressed artifact caching, install receipts and manifests retain their existing identities. Cache hits do not contact the signing API.
+- Signed values are process-memory-only. Hash-addressed artifact caching, install receipts and manifests retain their existing identities. Exact cached installs do not contact the signing API; online latest discovery may authorize a HEAD request to check freshness without downloading the payload.
 - Built-in downloads and the private aria2 range relay use the same resolver. Parallel ranges share one in-flight authorization per download. A 401/403 may refresh authorization once; failure never silently uses an unsigned URL, skips checksums or falls back to another downloader.
 - Existing redirect, payload-size and SHA-256 checks remain in force. QQ signed downloads additionally reject cross-host or different-artifact redirects. Error messages omit upstream response bodies and signed URLs.
 - Old `QQNT/` artifacts and unrelated downloads keep their original behavior. No manifest schema, dynamic script field or arbitrary request endpoint is introduced.
@@ -23,3 +21,13 @@ An isolated Windows x64 installation using an empty artifact cache installed QQN
 ## Upgrade order
 
 Upgrade Piko to 0.4.1 or newer before using a source version that points at QQNTV2. Older clients can still install the retained unsigned legacy QQNT version, but do not know how to authorize the new channel. No third-party download service is deployed or required.
+
+Runtime resolution clears historical SHA-256 values without changing their JSON property position. After payload verification restores the digest and reads the full PE version, an unchanged QQ download retains the exact source manifest hash used by existing installations. This avoids false same-version overwrite conflicts without rewriting installation records or relaxing payload, signature or manifest-content checks.
+
+## Repeated online resolution
+
+QQ and WeChat feeds may report three version components while the verified PE reports four. Piko binds the feed candidate and original URL to the verified exact manifest only after a complete download and all existing payload checks succeed. Freshness uses QQ's strong ETag or WeChat's COS object version ID, observed on both the HEAD probe and the actual download response. WeChat downloads request an explicitly bounded full Range to obtain this metadata. Both built-in downloads and the aria2 relay preserve the same checks.
+
+An unchanged object reuses the saved exact manifest and SHA-256-verified artifact. A changed object still requires full version, layout, digest and declared signature verification; a stable URL alone is never a cache hit. Weak ETags, MD5, timestamps and size alone cannot establish freshness. Missing metadata or an old resumable prefix cannot create a binding. Existing installs without that evidence may need one complete download before subsequent online resolutions can reuse it safely. Offline and exact replay continue to use their saved manifests and trusted cache.
+
+Regression coverage: `tests/helpers.test.ts` exercises both downloaders and identity mismatches; `tests/upstream-payload-installers.test.ts` exercises three-to-four-component versions, stable-URL patch changes, offline replay and corrupted cached payloads.

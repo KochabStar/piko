@@ -1,14 +1,33 @@
 # 新电脑安装 Piko
 
-Piko 是 Windows x64 单文件程序，**不需要先安装 Git、Node 或 Bun，也不需要管理员权限**。根目录的 `install.ps1` 是在线／本地 ZIP 引导入口；发行 ZIP 内的 `install.ps1` 是原有离线 EXE 安装器，两者用途不同。
-
-> 在线安装需要至少一个已发布、标为 Latest 的稳定版 Release。只有 tag、Actions artifact、草稿或预发布版不够；尚未发布时会明确报错，不会改用未经校验的构建。
->
-> **公开访问前提：** 当前在线脚本不携带 GitHub 认证。若 `KochabStar/piko` 为私有仓库，即使已发布 Release，匿名新机也无法在线安装；默认软件源 `KochabStar/piko-source` 也需要可匿名访问。保留私有仓库时，请通过已认证的 GitHub CLI 下载资产，再使用下面的本地 ZIP 方式；私有源需另行配置，或先使用 `-NoSource`。不要为了安装而把访问令牌写进 URL 或脚本。
+Piko 是 Windows x64 单文件程序，不需要先安装 Git、Node 或 Bun，也不需要管理员权限。
 
 ## 在线安装最新稳定版
 
-在普通 PowerShell 5.1 或 PowerShell 7 中下载并审阅脚本，再运行：
+### 一条命令安装
+
+打开普通 PowerShell 5.1 或 PowerShell 7，粘贴：
+
+```powershell
+irm https://github.com/KochabStar/piko/releases/latest/download/install.ps1 | iex
+```
+
+命令下载并执行官方 Release 中的在线安装脚本，默认安装到 `%LOCALAPPDATA%\piko`（已设置 `PIKO_HOME` 时沿用该目录），加入用户 PATH 并配置默认源 `main`。当前 PowerShell 可直接使用 `piko`，其他已打开的终端和 IDE 需重开。
+
+安装后试用：
+
+```powershell
+piko --version
+piko install main/node
+piko use main/node
+node --version
+```
+
+`install` 只安装；`use` 选择命令行默认版本。升级 Piko 用 `piko update --yes`，不要反复运行安装脚本覆盖不同构建。
+
+### 先审阅脚本／自定义安装
+
+若不希望直接执行远端脚本，先下载并审阅，再运行：
 
 ```powershell
 Invoke-WebRequest https://github.com/KochabStar/piko/releases/latest/download/install.ps1 -UseBasicParsing -OutFile install-piko.ps1
@@ -18,11 +37,11 @@ Invoke-WebRequest https://github.com/KochabStar/piko/releases/latest/download/in
 .\install-piko.ps1 -PikoHome D:\piko
 ```
 
-根目录 `install.ps1` 默认 `-Version latest`，无需每次修改版本号：它查询 GitHub 的 `/releases/latest`，选择最新稳定 Release，下载 `piko-<版本>-windows-x64.zip` 及其 `.zip.sha256`，校验整个 ZIP，再核对包内 `release.json`、`SHA256SUMS.txt` 与 EXE 摘要。仅提取、执行确切的 `piko.exe`，**不运行 ZIP 内脚本**。下载有超时、重定向和体积限制，拒绝 HTTPS 降级。预发布版不参与默认安装，需要显式指定 `-Version`。
+根目录 `install.ps1` 默认 `-Version latest`，通过 GitHub Latest 页面的重定向识别最新稳定版本，不依赖有匿名配额限制的 JSON API。随后下载对应 ZIP 及其 `.zip.sha256`，校验整个 ZIP，再核对包内版本和 EXE 摘要。只提取并执行已校验的 `piko.exe`，不运行 ZIP 内脚本；预发布版须显式指定 `-Version`。在线入口要求 Release 及软件源可匿名访问；私有仓库使用下方认证下载方式。
 
 上面的下载地址使用 Release 附件中的根目录在线脚本，与发行 ZIP 内的离线脚本不同。若当前会话的执行策略阻止脚本，可审阅后使用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-piko.ps1`，这只影响该子进程，不永久更改执行策略；完成后重开终端。
 
-同一发布渠道提供的摘要可发现损坏，但不能抵御发布账号或渠道整体被攻陷。发行物未签名；需要更强信任时，从独立可信渠道核对 ZIP 摘要并传入 `-Sha256`，脚本自身也应通过可信渠道取得或核对。
+一条命令安装意味着信任远端安装脚本。发行物目前未签名；同一发布渠道的摘要能发现损坏，不能抵御发布渠道整体被攻陷。需要更强信任时，请先审阅脚本，并从独立可信渠道核对 ZIP 摘要后传入 `-Sha256`。
 
 ```powershell
 .\install-piko.ps1 -Version 0.4.0 -Sha256 <独立核对的ZIP摘要>
@@ -81,18 +100,18 @@ piko doctor
 
 ### 推荐：推送版本 tag 后自动发布
 
-`.github/workflows/verify.yml` 在普通 push／PR 时只校验并上传 Actions artifact；只有推送 `v<版本>` tag 才会在校验成功后创建 GitHub Release。当前源码版本为 `0.4.26`；发布前同时修改 `package.json` 和 `src/version.ts`，再使用新的 tag，不覆盖已发布版本。
+`.github/workflows/verify.yml` 在普通 push／PR 时只校验并上传 Actions artifact；只有推送 `v<版本>` tag 才会在校验成功后创建 GitHub Release。当前源码版本为 `0.4.27`；发布前同时修改 `package.json` 和 `src/version.ts`，再使用新的 tag，不覆盖已发布版本。
 
 先提交要发布的代码和工作流，确认工作区干净，再执行：
 
 ```powershell
 git status --short             # 应无输出；不要发布尚未提交的修改
 git push origin master
-git tag -a v0.4.26 -m "Piko 0.4.26"
-git push origin v0.4.26
+git tag -a v0.4.27 -m "Piko 0.4.27"
+git push origin v0.4.27
 # 查看校验／发布结果：
 gh run list --repo KochabStar/piko --workflow verify.yml --limit 5
-gh release view v0.4.26 --repo KochabStar/piko
+gh release view v0.4.27 --repo KochabStar/piko
 ```
 
 工作流会校验 tag 与两处版本声明一致，在 Windows 上重新构建并运行测试、格式／沙盒打包检查、发行包解包与隔离安装校验；全部成功后才使用受限的 `GITHUB_TOKEN` 发布以下五个附件，无需另配个人令牌：

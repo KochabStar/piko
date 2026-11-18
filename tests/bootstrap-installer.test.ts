@@ -26,9 +26,25 @@ let archive = new Uint8Array();
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
-  fetch(request) {
+  fetch(request): Response {
     const path = new URL(request.url).pathname;
     requests.push(path);
+    if (path.startsWith("/release-test/")) {
+      const mode = path.split("/")[2];
+      const base = `/release-test/${mode}/releases`;
+      if (!path.endsWith("/latest") || mode === "noredirect")
+        return new Response("release page");
+      if (mode === "missing") return new Response("missing", { status: 404 });
+      const location =
+        mode === "external"
+          ? `http://localhost:${server.port}${base}/tag/v1.2.3`
+          : mode === "wrong"
+            ? "/another/repository/releases/tag/v1.2.3"
+            : mode === "loop"
+              ? path
+              : `${base}/tag/v1.2.3${mode === "preview" ? "-beta.1" : mode === "query" ? "?download=1" : ""}`;
+      return new Response(null, { status: 302, headers: { location } });
+    }
     if (path === "/release.zip") return new Response(archive);
     if (path === "/index.json")
       return Response.json({ schemaVersion: 1, packages: {} });
@@ -94,7 +110,7 @@ async function release() {
     shells[0]!,
     [
       "-Command",
-      "$ErrorActionPreference='Stop';Compress-Archive -LiteralPath $env:PIKO_ZIP_FOLDER -DestinationPath $env:PIKO_ZIP_OUT",
+      "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.IO.Compression;Add-Type -AssemblyName System.IO.Compression.FileSystem;$zip=[IO.Compression.ZipFile]::Open($env:PIKO_ZIP_OUT,[IO.Compression.ZipArchiveMode]::Create);try{$prefix=[IO.Path]::GetFileName($env:PIKO_ZIP_FOLDER)+'/';foreach($file in [IO.Directory]::GetFiles($env:PIKO_ZIP_FOLDER)){[void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,$file,($prefix+[IO.Path]::GetFileName($file)),[IO.Compression.CompressionLevel]::Optimal)}}finally{$zip.Dispose()}",
     ],
     { ...process.env, PIKO_ZIP_FOLDER: folder, PIKO_ZIP_OUT: file },
   );
@@ -272,6 +288,46 @@ test("verified ZIP still rejects inconsistent executable bytes before setup", as
   expect(result.code).not.toBe(0);
   expect(result.err).toContain("Executable checksum mismatch");
   expect(await Bun.file(join(home, "apps/piko/piko.exe")).exists()).toBe(false);
+}, 60000);
+
+test("latest release discovery uses the stable web redirect and rejects invalid release identities", async () => {
+  for (const shell of shells) {
+    for (const mode of [
+      "stable",
+      "preview",
+      "external",
+      "wrong",
+      "query",
+      "loop",
+      "missing",
+      "noredirect",
+    ]) {
+      const result = await run(
+        shell,
+        [
+          "-Command",
+          "$ErrorActionPreference='Stop';$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($env:PIKO_INSTALL_SCRIPT,[ref]$tokens,[ref]$errors);if($errors.Count){throw ($errors|Out-String)};$functions=$ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Assert-PikoUrl','Resolve-PikoVersion')},$false);. ([scriptblock]::Create(($functions.Extent.Text -join [Environment]::NewLine)));Resolve-PikoVersion ([uri]$env:PIKO_RELEASE_URL)",
+        ],
+        {
+          ...process.env,
+          PIKO_INSTALL_SCRIPT: installer,
+          PIKO_RELEASE_URL: `http://127.0.0.1:${server.port}/release-test/${mode}/releases/latest`,
+        },
+      );
+      if (mode === "stable") {
+        expect({
+          code: result.code,
+          out: result.out.trim(),
+          err: result.err,
+        }).toEqual({ code: 0, out: "v1.2.3", err: "" });
+      } else {
+        expect({ mode, rejected: result.code !== 0 }).toEqual({
+          mode,
+          rejected: true,
+        });
+      }
+    }
+  }
 }, 60000);
 
 test("installer parses in every available PowerShell without changing persistent PATH or execution policy", async () => {

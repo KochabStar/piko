@@ -16,6 +16,9 @@ import { helperOutput } from "../src/helpers-process.ts";
 import { peFileVersion } from "../src/upstream-validation.ts";
 import type { Manifest } from "../src/types.ts";
 import type { UpstreamRule } from "../src/upstream.ts";
+import { Packages } from "../src/packages.ts";
+import { appendManifest } from "../src/manifest-template.ts";
+import { resolvePackageManifest } from "../src/package-resolution.ts";
 
 const work = await mkdtemp(join(tmpdir(), "piko-upstream-installer-"));
 afterAll(() =>
@@ -398,6 +401,180 @@ installerTest(
       expect(await exists(join(input, "SETUP_WAS_EXECUTED"))).toBe(false);
     } finally {
       server.stop(true);
+    }
+  },
+  120000,
+);
+
+installerTest(
+  "PE-derived latest reuses exact manifests by entity identity and detects stable-URL patches",
+  async () => {
+    // A real inert Windows PE fixture, with only its fixed file-version resource
+    // changed. The HTTPS-trust recipe deliberately makes no publisher-signature
+    // claim; signature failures are covered by preparation tests separately.
+    const original = await readFile(
+      join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe"),
+    );
+    const payload = (patch: number) => {
+      const bytes = Buffer.from(original);
+      const fixed = bytes.indexOf(Buffer.from([0xbd, 0x04, 0xef, 0xfe]));
+      expect(fixed).toBeGreaterThan(0);
+      bytes.writeUInt32LE(2 << 16, fixed + 8);
+      bytes.writeUInt32LE(patch, fixed + 12);
+      return bytes;
+    };
+    for (const header of ["etag", "x-cos-version-id"] as const) {
+      const root = join(work, crypto.randomUUID());
+      await seedInstallerTools(root);
+      let patch = 1,
+        downloads = 0,
+        mismatch = false;
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch(request) {
+          const base = `http://127.0.0.1:${server.port}/`;
+          const path = new URL(request.url).pathname;
+          if (path === "/index.json")
+            return Response.json({
+              schemaVersion: 1,
+              packages: {
+                application: {
+                  latest: "1.0.0.0",
+                  versions: { "1.0.0.0": "application.json" },
+                },
+              },
+            });
+          if (path === "/feed.json") return Response.json({ version: "2.0.0" });
+          if (path === "/application.json") {
+            const document = appendManifest(undefined, {
+              schemaVersion: 1,
+              name: "application",
+              version: "1.0.0.0",
+              platforms: {
+                "windows-x64": {
+                  url: base + "old.exe",
+                  sha256: "1".repeat(64),
+                  format: "file",
+                  file: "tool.exe",
+                  bin: { tool: "tool.exe" },
+                },
+              },
+            });
+            document.upstream = {
+              provider: "json",
+              trust: "https",
+              url: base + "feed.json",
+              versionPath: "version",
+              urlTemplate: base + "tool.exe",
+              versionFromPE: true,
+            };
+            return Response.json(document);
+          }
+          const bytes = payload(patch);
+          const version = String(
+            mismatch && request.method !== "HEAD" ? patch + 1 : patch,
+          );
+          const headers = new Headers({
+            "Content-Length": String(bytes.length),
+            [header]: header === "etag" ? JSON.stringify(version) : version,
+          });
+          if (request.method === "HEAD") return new Response(null, { headers });
+          downloads++;
+          const start = Number(
+            /^bytes=(\d+)-/.exec(request.headers.get("range") ?? "")?.[1] ?? 0,
+          );
+          headers.set("Content-Length", String(bytes.length - start));
+          headers.set(
+            "Content-Range",
+            `bytes ${start}-${bytes.length - 1}/${bytes.length}`,
+          );
+          return new Response(bytes.subarray(start), { status: 206, headers });
+        },
+      });
+      try {
+        const packages = new Packages(root);
+        await packages.addSource("main", `http://127.0.0.1:${server.port}/`);
+        const first = await packages.install("main/application@latest");
+        expect(first.version).toBe("2.0.0.1");
+        expect(
+          (await packages.install("main/application@latest")).manifestHash,
+        ).toBe(first.manifestHash);
+        expect(downloads).toBe(1);
+        const state = await packages.store.read();
+        const source = state.sources.main!;
+        const entry = {
+          latest: "1.0.0.0",
+          versions: { "1.0.0.0": "application.json" },
+        };
+        expect(
+          (
+            await resolvePackageManifest(
+              root,
+              state,
+              source,
+              "application",
+              entry,
+              "latest",
+              { preview: true },
+            )
+          ).version,
+        ).toBe("2.0.0.1");
+        expect(downloads).toBe(1);
+        // Same three-part hint and URL, different object/ETag and PE patch.
+        patch = 2;
+        const second = await packages.install("main/application@latest");
+        expect(second.version).toBe("2.0.0.2");
+        expect(downloads).toBe(2);
+        expect(
+          (
+            await resolvePackageManifest(
+              root,
+              state,
+              source,
+              "application",
+              entry,
+              "latest",
+              { offline: true },
+            )
+          ).version,
+        ).toBe("2.0.0.2");
+        expect(
+          (
+            await resolvePackageManifest(
+              root,
+              state,
+              source,
+              "application",
+              entry,
+              "2.0.0.1",
+              { offline: true },
+            )
+          ).version,
+        ).toBe("2.0.0.1");
+        expect(downloads).toBe(2);
+        // A successful content validation with mismatching HEAD/GET validators
+        // must not create freshness evidence, even for an already-known version.
+        patch = 3;
+        mismatch = true;
+        await packages.install("main/application@latest");
+        expect(downloads).toBe(3);
+        mismatch = false;
+        await packages.install("main/application@latest");
+        expect(downloads).toBe(4);
+        await packages.install("main/application@latest");
+        expect(downloads).toBe(4);
+        await writeFile(
+          join(root, "cache/artifacts", sha256(payload(3))),
+          "tampered",
+        );
+        await expect(
+          packages.install("main/application@latest"),
+        ).rejects.toThrow("Cached artifact checksum mismatch");
+        expect(downloads).toBe(4);
+      } finally {
+        server.stop(true);
+      }
     }
   },
   120000,

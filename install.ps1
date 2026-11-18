@@ -101,6 +101,34 @@ function Receive-PikoFile([uri]$Url, [string]$Output, [long]$Limit) {
         } finally { if ($response) { $response.Dispose() } }
     }
 }
+function Resolve-PikoVersion([uri]$Url) {
+    Assert-PikoUrl $Url
+    if (-not $Url.AbsolutePath.EndsWith('/releases/latest')) { throw 'Invalid latest release URL.' }
+    $origin = $Url.GetLeftPart([UriPartial]::Authority)
+    $tagPath = '^' + [regex]::Escape(($Url.AbsolutePath -replace '/latest$', '/tag/')) + '(v?[0-9]+\.[0-9]+\.[0-9]+)$'
+    for ($redirect = 0; $redirect -lt 8; $redirect++) {
+        $request = [Net.HttpWebRequest]::Create($Url)
+        $request.AllowAutoRedirect = $false
+        $request.Timeout = 120000
+        $request.UserAgent = 'Piko-Installer/1.0'
+        if ($Proxy) { $request.Proxy = [Net.WebProxy]::new($Proxy) }
+        $response = $null
+        try {
+            $response = $request.GetResponse()
+            if ([int]$response.StatusCode -notin @(301, 302, 303, 307, 308) -or -not $response.Headers['Location']) {
+                throw 'Latest release did not redirect to a stable version.'
+            }
+            $next = [uri]::new($Url, $response.Headers['Location'])
+            Assert-PikoUrl $next
+            if ($next.GetLeftPart([UriPartial]::Authority) -cne $origin -or $next.Scheme -ne $Url.Scheme -or $next.Query) {
+                throw 'Unexpected latest release redirect.'
+            }
+            if ($next.AbsolutePath -cmatch $tagPath) { return $Matches[1] }
+            $Url = $next
+        } finally { if ($response) { $response.Dispose() } }
+    }
+    throw 'Latest release redirect limit exceeded.'
+}
 function Invoke-Piko([string]$Executable, [string[]]$Arguments) {
     $result = & $Executable @Arguments
     if ($LASTEXITCODE -ne 0) { throw "Piko command failed ($LASTEXITCODE): $($Arguments -join ' ')" }
@@ -146,12 +174,8 @@ try {
         $archive = Join-Path $temp 'release.zip'
         if ($PSCmdlet.ParameterSetName -eq 'Release') {
             if ($Version -eq 'latest') {
-                $metadataFile = Join-Path $temp 'github-release.json'
-                try { Receive-PikoFile ([uri]"https://api.github.com/repos/$Repository/releases/latest") $metadataFile 2097152 }
-                catch { throw "Cannot resolve a published Piko release. Publish a release first or use -ArchivePath with -Sha256. $($_.Exception.Message)" }
-                $release = [IO.File]::ReadAllText($metadataFile) | ConvertFrom-Json
-                if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Latest release metadata is not a stable version.' }
-                $Version = [string]$release.tag_name
+                try { $Version = Resolve-PikoVersion ([uri]"https://github.com/$Repository/releases/latest") }
+                catch { throw "Cannot resolve a published Piko release. Use -ArchivePath with -Sha256 for offline installation. $($_.Exception.Message)" }
             }
             $number = $Version -replace '^v', ''
             $tag = if ($Version.StartsWith('v')) { $Version } else { 'v' + $Version }

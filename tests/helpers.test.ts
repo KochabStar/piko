@@ -19,6 +19,8 @@ import {
   downloadArtifact,
   downloadWithAria2,
   findAria2,
+  probeArtifactIdentity,
+  type ArtifactIdentity,
 } from "../src/downloader.ts";
 import { capture, exists, sha256 } from "../src/util.ts";
 import { seedSevenZip, aria2Fixture } from "./helper-fixtures.ts";
@@ -530,3 +532,130 @@ test("built-in downloader resumes a dropped artifact instead of restarting it", 
     server.stop(true);
   }
 }, 30000);
+
+test("freshness validators bind only completed matching transfers in both downloaders", async () => {
+  const bytes = Buffer.alloc(128 * 1024, 42);
+  const settings = {
+    header: "etag",
+    value: JSON.stringify("release-a"),
+    mismatch: false,
+  };
+  const ranges: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const headers = new Headers({ "Content-Length": String(bytes.length) });
+      headers.set(
+        settings.header,
+        settings.mismatch && request.method !== "HEAD"
+          ? settings.header === "etag"
+            ? JSON.stringify("release-b")
+            : "release-b"
+          : settings.value,
+      );
+      if (request.method === "HEAD") return new Response(null, { headers });
+      const range = request.headers.get("range") ?? "";
+      ranges.push(range);
+      const start = Number(/^bytes=(\d+)-/.exec(range)?.[1] ?? 0);
+      headers.set("Content-Length", String(bytes.length - start));
+      headers.set(
+        "Content-Range",
+        `bytes ${start}-${bytes.length - 1}/${bytes.length}`,
+      );
+      return new Response(bytes.subarray(start), { status: 206, headers });
+    },
+  });
+  const saved = process.env.PATH,
+    savedPath = process.env.Path;
+  try {
+    process.env.PATH = "";
+    delete process.env.Path;
+    const url = `http://127.0.0.1:${server.port}/file`;
+    for (const transport of ["fetch", "aria2"] as const) {
+      for (const header of ["etag", "x-cos-version-id"] as const) {
+        settings.header = header;
+        settings.value =
+          header === "etag" ? JSON.stringify("release-a") : "release-a";
+        for (const mismatch of [false, true]) {
+          settings.mismatch = mismatch;
+          const identity = await probeArtifactIdentity(url);
+          expect(identity?.header).toBe(header);
+          const bound: ArtifactIdentity[] = [];
+          const root = join(work, crypto.randomUUID());
+          const options = {
+            identity,
+            onIdentity: (value: ArtifactIdentity) => {
+              bound.push(value);
+            },
+          };
+          const result =
+            transport === "fetch"
+              ? await downloadArtifact(
+                  root,
+                  url,
+                  undefined,
+                  bytes.length,
+                  options,
+                )
+              : await downloadWithAria2(
+                  root,
+                  url,
+                  aria2,
+                  bytes.length,
+                  options,
+                );
+          expect(sha256(result)).toBe(sha256(bytes));
+          expect(bound).toEqual(mismatch ? [] : [identity!]);
+        }
+      }
+    }
+    expect(
+      ranges.every((range) => range === `bytes=0-${bytes.length - 1}`),
+    ).toBe(true);
+    // A prefix left by an earlier process has no bound entity evidence. A
+    // successful remainder must not retroactively bless those older bytes.
+    settings.header = "etag";
+    settings.value = JSON.stringify("release-a");
+    settings.mismatch = false;
+    for (const transport of ["fetch", "aria2"] as const) {
+      const root = join(work, crypto.randomUUID());
+      const stage = join(
+        root,
+        "staging",
+        transport + "-" + sha256(url).slice(0, 16),
+      );
+      await mkdir(stage, { recursive: true });
+      await writeFile(join(stage, "partial"), bytes.subarray(0, 1024));
+      const identity = await probeArtifactIdentity(url);
+      const bound: ArtifactIdentity[] = [];
+      const options = {
+        identity,
+        onIdentity: (value: ArtifactIdentity) => {
+          bound.push(value);
+        },
+      };
+      const result =
+        transport === "fetch"
+          ? await downloadArtifact(root, url, undefined, bytes.length, options)
+          : await downloadWithAria2(root, url, aria2, bytes.length, options);
+      expect(sha256(result)).toBe(sha256(bytes));
+      expect(bound).toEqual([]);
+    }
+    settings.header = "etag";
+    settings.value = "W/" + JSON.stringify("weak");
+    expect(await probeArtifactIdentity(url)).toBeUndefined();
+    settings.header = "x-cos-meta-md5";
+    settings.value = "a".repeat(32);
+    expect(await probeArtifactIdentity(url)).toBeUndefined();
+    settings.header = "etag";
+    settings.value = "";
+    expect(await probeArtifactIdentity(url)).toBeUndefined();
+  } finally {
+    if (saved === undefined) delete process.env.PATH;
+    else process.env.PATH = saved;
+    if (savedPath === undefined) delete process.env.Path;
+    else process.env.Path = savedPath;
+    server.stop(true);
+  }
+}, 120000);

@@ -14,6 +14,12 @@ import {
   type UpstreamNetwork,
 } from "./upstream.ts";
 import { prepareUpstreamManifest } from "./upstream-payload.ts";
+import { artifactBytes } from "./cache.ts";
+import {
+  probeArtifactIdentity,
+  sameArtifactIdentity,
+  type ArtifactIdentity,
+} from "./downloader.ts";
 import { githubMetadata } from "./github-metadata.ts";
 import {
   atomicJson,
@@ -275,6 +281,103 @@ export async function resolvePackageManifest(
         network(root, state, session),
         constraint,
       );
+      const derivesVersion = !!(candidate.versionFromPE || rule.versionFromPE);
+      const identity = derivesVersion
+        ? await probeArtifactIdentity(candidate.url)
+        : undefined;
+      if (
+        identity &&
+        identity.bytes > (rule.maxBytes ?? 2 * 1024 * 1024 * 1024)
+      )
+        fail("Upstream artifact exceeds the source download ceiling");
+      const identityPath = join(
+        root,
+        "cache",
+        "resolved-artifacts",
+        sha256(
+          JSON.stringify([
+            source.identity,
+            name,
+            policy,
+            candidate.version,
+            candidate.url,
+          ]),
+        ) + ".json",
+      );
+      if (derivesVersion && identity) {
+        await noLinks(identityPath);
+        if (await exists(identityPath)) {
+          const prior = await json(identityPath);
+          if (
+            prior.source !== source.identity ||
+            prior.name !== name ||
+            prior.policy !== policy ||
+            prior.url !== candidate.url ||
+            prior.candidateVersion !== candidate.version
+          )
+            fail("Resolved artifact cache identity mismatch");
+          if (sameArtifactIdentity(prior.identity, identity)) {
+            const saved = await savedManifest(
+              root,
+              source,
+              name,
+              prior.version,
+            );
+            if (saved) {
+              const downloads = distributionDownloads(
+                saved.platforms["windows-x64"]!,
+              );
+              if (
+                downloads[0]!.url !== candidate.url ||
+                downloads[0]!.sha256 !== prior.sha256
+              )
+                fail("Resolved artifact cache content mismatch");
+              if (
+                (candidate.sha256 &&
+                  candidate.sha256.toLowerCase() !== prior.sha256) ||
+                (["sha512", "md5", "stripPrefix"] as const).some(
+                  (field) =>
+                    candidate[field] !== undefined &&
+                    prior.candidate?.[field] !== candidate[field],
+                )
+              )
+                fail(
+                  "Published upstream version has different content; refusing overwrite",
+                );
+              assertResolvedConstraint(saved.version, constraint);
+              if (
+                options.currentVersion &&
+                compareVersions(saved.version, options.currentVersion) < 0
+              )
+                fail(
+                  "Upstream/request resolves to an older version; refusing downgrade",
+                );
+              await options.preflight?.(saved);
+              // Freshness never bypasses SHA-256, including for already-installed
+              // candidates. An evicted payload is fetched against its saved pin,
+              // not downloaded merely to rediscover the same version and hash.
+              for (const download of downloads)
+                await artifactBytes(
+                  root,
+                  download.url,
+                  download.sha256,
+                  false,
+                  state,
+                  download.maxBytes,
+                  !!options.preview,
+                );
+              if (!options.preview)
+                await atomicJson(requestPath, {
+                  source: source.identity,
+                  request,
+                  policy,
+                  version: saved.version,
+                });
+              return saved;
+            }
+          }
+        }
+      }
       if (
         candidate.version === baseline.version &&
         !candidate.versionFromPE &&
@@ -365,6 +468,7 @@ export async function resolvePackageManifest(
       const path = exactPath(root, source, name, candidate.version);
       const saved = await savedManifest(root, source, name, candidate.version);
       let manifest: Manifest;
+      let boundIdentity: ArtifactIdentity | undefined;
       if (saved) {
         const prior = await json(path);
         if (prior.policy !== policy)
@@ -395,6 +499,12 @@ export async function resolvePackageManifest(
           baseline,
           candidate,
           rule,
+          {
+            identity,
+            onIdentity: (value) => {
+              boundIdentity = value;
+            },
+          },
         );
         assertResolvedConstraint(manifest.version, constraint);
         if (
@@ -434,6 +544,19 @@ export async function resolvePackageManifest(
           manifest,
         });
       }
+      if (boundIdentity)
+        await atomicJson(identityPath, {
+          source: source.identity,
+          name,
+          policy,
+          url: candidate.url,
+          candidateVersion: candidate.version,
+          candidate: { ...candidate, assetBytes: undefined },
+          identity: boundIdentity,
+          version: manifest.version,
+          sha256: distributionDownloads(manifest.platforms["windows-x64"]!)[0]!
+            .sha256,
+        });
       await atomicJson(requestPath, {
         source: source.identity,
         request,

@@ -667,7 +667,10 @@ test("invalid PE bytes, advertised length conflicts and same-version replacement
         unchanged,
         rule,
       ),
-    ).rejects.toThrow("immutable version retained");
+    ).rejects.toThrow();
+    expect(
+      await exists(join(work, "immutable", "cache/artifacts", sha256(bytes))),
+    ).toBe(false);
     const before = requests();
     await expect(
       prepareUpstreamManifest(
