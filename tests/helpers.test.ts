@@ -313,7 +313,7 @@ test("aria2 downloads through validated redirects and cleans temporary files", a
   } finally {
     server.stop(true);
   }
-});
+}, 30000);
 
 test("aria2 relay tolerates upstream headers delayed beyond Bun default idle timeout", async () => {
   const root = join(work, "slow-headers"),

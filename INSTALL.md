@@ -100,18 +100,18 @@ piko doctor
 
 ### 推荐：推送版本 tag 后自动发布
 
-`.github/workflows/verify.yml` 在普通 push／PR 时只校验并上传 Actions artifact；只有推送 `v<版本>` tag 才会在校验成功后创建 GitHub Release。当前源码版本为 `0.4.27`；发布前同时修改 `package.json` 和 `src/version.ts`，再使用新的 tag，不覆盖已发布版本。
+`.github/workflows/verify.yml` 在普通 push／PR 时只校验并上传 Actions artifact；只有推送 `v<版本>` tag 才会在校验成功后创建 GitHub Release。当前源码版本为 `0.4.28`；发布前同时修改 `package.json` 和 `src/version.ts`，再使用新的 tag，不覆盖已发布版本。
 
 先提交要发布的代码和工作流，确认工作区干净，再执行：
 
 ```powershell
 git status --short             # 应无输出；不要发布尚未提交的修改
 git push origin master
-git tag -a v0.4.27 -m "Piko 0.4.27"
-git push origin v0.4.27
+git tag -a v0.4.28 -m "Piko 0.4.28"
+git push origin v0.4.28
 # 查看校验／发布结果：
 gh run list --repo KochabStar/piko --workflow verify.yml --limit 5
-gh release view v0.4.27 --repo KochabStar/piko
+gh release view v0.4.28 --repo KochabStar/piko
 ```
 
 工作流会校验 tag 与两处版本声明一致，在 Windows 上重新构建并运行测试、格式／沙盒打包检查、发行包解包与隔离安装校验；全部成功后才使用受限的 `GITHUB_TOKEN` 发布以下五个附件，无需另配个人令牌：
