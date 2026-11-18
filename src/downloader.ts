@@ -174,16 +174,20 @@ function remainder(
     start = Number(rangeParts?.[1]),
     end = Number(rangeParts?.[2]),
     total = Number(rangeParts?.[3]);
-  if (response.status === 206 && rangeParts) {
+  // Some CDNs return a complete body as HTTP 200 while still including
+  // Content-Range. Accept only the entire entity, never a partial 200 body.
+  if ([200, 206].includes(response.status) && rangeParts) {
     if (
-      ![start, end, total].every(Number.isSafeInteger) ||
-      start !== offset ||
+      ![start, end, total, length].every(Number.isSafeInteger) ||
+      length < 0 ||
+      start !== (response.status === 200 ? 0 : offset) ||
+      start > end ||
       end !== total - 1 ||
       total > limit ||
       (length !== 0 && length !== total - start)
     )
       return undefined;
-    return { length, total, whole: false };
+    return { length, total, whole: response.status === 200 };
   }
   if (
     response.status !== 200 ||
@@ -443,9 +447,18 @@ export async function downloadWithAria2(
         )
           bound = false;
         const shape = remainder(response, attempt.offset, limit);
-        if (!shape || (shape.whole && attempt.offset !== 0)) {
+        if (!shape) {
           await response.body?.cancel();
           fail("Resume range was not honored or exceeds the size limit");
+        }
+        if (shape.whole && attempt.offset > 0 && request.method === "GET") {
+          // A full response replaces the saved prefix; never append it to the
+          // old bytes. HEAD metadata alone must not discard resumable data.
+          await removeTree(partial);
+          attempt.offset = 0;
+          attempt.ranges = new TransferRanges();
+          attempt.received = 0;
+          bound = false;
         }
         const known = shape.total;
         if (known) {

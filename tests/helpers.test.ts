@@ -659,3 +659,141 @@ test("freshness validators bind only completed matching transfers in both downlo
     server.stop(true);
   }
 }, 120000);
+
+test("resuming handles full responses without appending them to an old prefix", async () => {
+  const bytes = Buffer.alloc(128 * 1024, 42);
+  const saved = process.env.PATH,
+    savedPath = process.env.Path;
+  try {
+    process.env.PATH = "";
+    delete process.env.Path;
+    for (const transport of ["fetch", "aria2"] as const) {
+      for (const ignoresGetRange of [true, false]) {
+        const root = join(work, crypto.randomUUID());
+        const requested: string[] = [];
+        const server = Bun.serve({
+          hostname: "127.0.0.1",
+          port: 0,
+          fetch(request) {
+            const range = request.headers.get("range") ?? "";
+            if (request.method === "GET") requested.push(range);
+            if (request.method === "HEAD" || ignoresGetRange)
+              return new Response(request.method === "HEAD" ? null : bytes, {
+                headers: { "Content-Length": String(bytes.length) },
+              });
+            const start = Number(/^bytes=(\d+)-/.exec(range)?.[1] ?? 0);
+            return new Response(bytes.subarray(start), {
+              status: 206,
+              headers: {
+                "Content-Length": String(bytes.length - start),
+                "Content-Range": `bytes ${start}-${bytes.length - 1}/${bytes.length}`,
+              },
+            });
+          },
+        });
+        try {
+          const url = `http://127.0.0.1:${server.port}/file`;
+          const stage = join(
+            root,
+            "staging",
+            transport + "-" + sha256(url).slice(0, 16),
+          );
+          await mkdir(stage, { recursive: true });
+          // Different old bytes prove a full response replaces the prefix.
+          await writeFile(
+            join(stage, "partial"),
+            ignoresGetRange ? Buffer.alloc(1024, 17) : bytes.subarray(0, 1024),
+          );
+          await writeFile(join(stage, "total"), String(bytes.length));
+          const result =
+            transport === "fetch"
+              ? await downloadArtifact(root, url, undefined, bytes.length)
+              : await downloadWithAria2(root, url, aria2, bytes.length);
+          expect(sha256(result)).toBe(sha256(bytes));
+          expect(requested[0]).toBe("bytes=1024-");
+          expect(await readdir(join(root, "staging"))).toEqual([]);
+        } finally {
+          server.stop(true);
+        }
+      }
+    }
+  } finally {
+    if (saved === undefined) delete process.env.PATH;
+    else process.env.PATH = saved;
+    if (savedPath === undefined) delete process.env.Path;
+    else process.env.Path = savedPath;
+  }
+}, 60000);
+
+test("complete HTTP 200 Content-Range bodies replace prefixes but partial or oversized bodies are rejected", async () => {
+  const bytes = Buffer.alloc(128 * 1024, 42);
+  const saved = process.env.PATH,
+    savedPath = process.env.Path;
+  try {
+    process.env.PATH = "";
+    delete process.env.Path;
+    for (const transport of ["fetch", "aria2"] as const) {
+      for (const offset of [0, 1024]) {
+        for (const variant of [
+          "whole",
+          "partial",
+          "short",
+          "large",
+          "malformed",
+        ]) {
+          const root = join(work, crypto.randomUUID());
+          const server = Bun.serve({
+            hostname: "127.0.0.1",
+            port: 0,
+            fetch(request) {
+              const start = variant === "partial" ? offset + 1 : 0;
+              const end =
+                variant === "short" ? bytes.length - 2 : bytes.length - 1;
+              const total =
+                variant === "large" ? bytes.length + 1 : bytes.length;
+              return new Response(request.method === "HEAD" ? null : bytes, {
+                headers: {
+                  "Content-Length": String(bytes.length),
+                  "Content-Range":
+                    variant === "malformed"
+                      ? "invalid"
+                      : `bytes ${start}-${end}/${total}`,
+                },
+              });
+            },
+          });
+          try {
+            const url = `http://127.0.0.1:${server.port}/file`;
+            if (offset) {
+              const stage = join(
+                root,
+                "staging",
+                transport + "-" + sha256(url).slice(0, 16),
+              );
+              await mkdir(stage, { recursive: true });
+              await writeFile(join(stage, "partial"), Buffer.alloc(offset, 17));
+              await writeFile(join(stage, "total"), String(bytes.length));
+            }
+            const result =
+              transport === "fetch"
+                ? downloadArtifact(root, url, undefined, bytes.length)
+                : downloadWithAria2(root, url, aria2, bytes.length);
+            if (variant === "whole") {
+              expect(sha256(await result)).toBe(sha256(bytes));
+            } else {
+              await expect(result).rejects.toThrow("Resume range");
+            }
+            expect(await readdir(join(root, "staging"))).toEqual([]);
+          } finally {
+            server.stop(true);
+          }
+        }
+      }
+    }
+  } finally {
+    if (saved === undefined) delete process.env.PATH;
+    else process.env.PATH = saved;
+    if (savedPath === undefined) delete process.env.Path;
+    else process.env.Path = savedPath;
+  }
+}, 120000);

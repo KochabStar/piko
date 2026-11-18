@@ -613,36 +613,74 @@ async function extractNsisFiles(
       entry,
     ]),
   );
-  const selected = Object.entries(files).map(([from, to]) => {
-    relativeFile(from);
-    const entry = listing.get(from);
-    if (!entry || entry.directory)
-      fail("Explicit NSIS file is missing or not a regular file");
-    entryBudget(state, entry.size ?? 0);
-    const path = into ? into + "/" + to : to;
-    return { entry, target: targetPath(destination, path, false, state) };
-  });
-  // Only the exact declared regular files go through bounded stdout.
-  // Validate every mapping before creating files; never execute NSIS code.
-  for (const { entry, target } of selected) {
+  const selected = new Map(
+    Object.entries(files).map(([from, to]) => {
+      relativeFile(from);
+      const entry = listing.get(from);
+      if (!entry || entry.directory)
+        fail("Explicit NSIS file is missing or not a regular file");
+      entryBudget(state, entry.size ?? 0);
+      const path = into ? into + "/" + to : to;
+      return [from, targetPath(destination, path, false, state)] as const;
+    }),
+  );
+  // NSIS solid streams otherwise decompress from the beginning for every file.
+  // Divide bounded stdout in archive order using only validated entry lengths.
+  const batch: { raw: string; path: string; size: number }[] = [];
+  let characters = resolve(archive).length + 256;
+  const flush = async () => {
+    if (!batch.length) return;
+    await helperFiles(
+      executable,
+      [
+        "x",
+        "-tnsis",
+        "-so",
+        "-spd",
+        "-y",
+        "-bd",
+        "-bb0",
+        "-pPIKO_NO_PASSWORD",
+        "--",
+        resolve(archive),
+        ...batch.map((file) => file.raw),
+      ],
+      batch,
+    );
+    batch.length = 0;
+    characters = resolve(archive).length + 256;
+  };
+  for (const entry of listing.values()) {
+    const target = selected.get(entry.path);
+    if (!target) continue;
     await noLinks(target);
     await mkdir(dirname(target), { recursive: true });
+    if (entry.size !== undefined) {
+      if (
+        batch.length &&
+        (batch.length === 128 || characters + entry.raw.length + 4 > 16000)
+      )
+        await flush();
+      batch.push({ raw: entry.raw, path: target, size: entry.size });
+      characters += entry.raw.length + 4;
+      continue;
+    }
+    // Sizeless entries retain individual bounded extraction and actual-byte
+    // accounting; they cannot be split safely out of concatenated stdout.
+    await flush();
     await containerFile(
       executable,
       archive,
       "nsis",
       entry,
       target,
-      entry.size === undefined
-        ? Math.min(state.fileLimit, state.limit - state.total)
-        : state.fileLimit,
+      Math.min(state.fileLimit, state.limit - state.total),
     );
-    if (entry.size === undefined) {
-      state.total += (await lstat(target)).size;
-      if (!Number.isSafeInteger(state.total) || state.total > state.limit)
-        fail("Archive expanded size limit exceeded");
-    }
+    state.total += (await lstat(target)).size;
+    if (!Number.isSafeInteger(state.total) || state.total > state.limit)
+      fail("Archive expanded size limit exceeded");
   }
+  await flush();
 }
 
 async function extractNested(

@@ -605,6 +605,7 @@ test("real NSIS selects only its named nested payload or explicit files and neve
   await mkdir(input);
   await writeFile(join(input, "tool.exe"), "NSIS inner portable tool");
   await writeFile(join(input, "empty.bin"), "");
+  await writeFile(join(input, "second.bin"), "distinct second solid payload");
   const inner = join(input, "payload.7z");
   await capture(full, ["a", "-t7z", inner, "tool.exe"], { cwd: input });
   const setup = join(input, "setup.exe");
@@ -613,7 +614,8 @@ test("real NSIS selects only its named nested payload or explicit files and neve
     script,
     [
       "Unicode true",
-      "SetCompress off",
+      "SetCompressor /SOLID lzma",
+      "SetDatablockOptimize off",
       'Name "Piko extraction fixture"',
       'OutFile "setup.exe"',
       "SilentInstall silent",
@@ -623,6 +625,7 @@ test("real NSIS selects only its named nested payload or explicit files and neve
       'SetOutPath "$INSTDIR"',
       'File /oname=direct.exe "tool.exe"',
       'File /oname=empty.bin "empty.bin"',
+      'File /oname=second.bin "second.bin"',
       "FileOpen $0 $EXEDIR\\SETUP_WAS_EXECUTED w",
       'FileWrite $0 "must not execute"',
       "FileClose $0",
@@ -665,6 +668,7 @@ test("real NSIS selects only its named nested payload or explicit files and neve
   ).rejects.toThrow("missing");
   const mapped = join(work, "nsis-mapped");
   const files = {
+    "second.bin": "bin/second.bin",
     "direct.exe": "bin/renamed.exe",
     "empty.bin": "data/empty.bin",
   };
@@ -673,7 +677,11 @@ test("real NSIS selects only its named nested payload or explicit files and neve
     "nsis",
     mapped,
     undefined,
-    extractionState(Buffer.byteLength("NSIS inner portable tool")),
+    extractionState(
+      Buffer.byteLength(
+        "NSIS inner portable tooldistinct second solid payload",
+      ),
+    ),
     "app",
     full,
     undefined,
@@ -683,6 +691,9 @@ test("real NSIS selects only its named nested payload or explicit files and neve
     "NSIS inner portable tool",
   );
   expect((await readFile(join(mapped, "app/data/empty.bin"))).length).toBe(0);
+  expect(await readFile(join(mapped, "app/bin/second.bin"), "utf8")).toBe(
+    "distinct second solid payload",
+  );
   expect(await exists(join(mapped, "$PLUGINSDIR"))).toBe(false);
   expect(await exists(join(input, "SETUP_WAS_EXECUTED"))).toBe(false);
   expect(() =>
