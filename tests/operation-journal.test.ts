@@ -23,6 +23,7 @@ import {
   recordOperationState,
   runOperation,
   trackOperationFile,
+  checkpoint,
   trackOperationMove,
 } from "../src/journal.ts";
 import { inspectOperations, recoverOperations } from "../src/ops/recover.ts";
@@ -555,6 +556,54 @@ for (const interruption of ["journal", "phase"] as const) {
     expect((await pendingOperations(p.root))[0]).toEqual(journal);
   });
 }
+test("discard abandons the failed admin journal and frees unrelated writes", async () => {
+  const { p, install, spec } = await failedAdminRemoval("admin-discard");
+  await orphan(p.store);
+  const rows = await recoverOperations(p.store, { mode: "discard" });
+  expect(rows.map((row) => row.status)).toEqual(["discarded"]);
+  expect(await pendingOperations(p.root)).toEqual([]);
+  const state = await p.store.readCommitted();
+  expect(state.receipts![install.id]!.admin!.install?.status).toBe("completed");
+  expect(state.receipts![install.id]!.admin!.remove?.status).toBe("failed");
+  // Unrelated global writes are usable again.
+  await p.store.mutate(async () => undefined);
+  // The package flow retries through a fresh explicit command.
+  await writeFile(join(p.root, "remove-input"), "ok");
+  await p.uninstall(spec);
+  expect((await p.store.readCommitted()).installs[install.id]).toBeUndefined();
+});
+
+test("discard refuses an interrupted journal and keeps it pending", async () => {
+  const { p, journal } = await failedAdminRemoval("admin-discard-running");
+  journal.status = "running";
+  await atomicJson(operationPath(p.root, journal), journal);
+  await orphan(p.store);
+  const rows = await recoverOperations(p.store, { mode: "discard" });
+  expect(rows[0]?.status).toBe("blocked");
+  expect(rows[0]?.error ?? "").toContain("Only failed operations");
+  expect(await pendingOperations(p.root)).toHaveLength(1);
+});
+
+test("a failed admin migration inside an update closes the journal itself", async () => {
+  const store = await isolated("update-admin-close");
+  await expect(
+    runOperation(
+      store,
+      "update",
+      "main/tool",
+      { phases: ["pkg/admin-upgrade"] },
+      async () => {
+        await checkpoint(store, "pkg/admin-upgrade", async () => {
+          throw new Error("admin migration failed");
+        });
+      },
+    ),
+  ).rejects.toThrow(
+    "interrupted update closed: committed versions stay installed",
+  );
+  expect(await inspectOperations(store.root)).toEqual([]);
+  await store.mutate(async () => undefined);
+});
 
 test("retry still rejects modified approved code without adopting the failed journal", async () => {
   const { p, install, spec, journal } =

@@ -427,6 +427,30 @@ export async function runOperation<T>(
           await rm(operationPath(store.root, journal), { force: true });
         else {
           await save(value);
+          if (executionBoundary && kind === "update") {
+            // The failed approved execution is durably recorded in state
+            // receipts. Close the interrupted update instead of leaving a
+            // tombstone that blocks every unrelated package: committed
+            // versions stay installed, the previous default stays selected,
+            // and a fresh explicit command retries the migration.
+            try {
+              // recover.ts imports this module; defer the cycle until closure
+              // is actually required, like the rollback import below.
+              await (
+                await import("./ops/recover.ts")
+              ).discardFailedOperation(store, journal);
+              await rm(operationPath(store.root, journal), { force: true });
+            } catch (closure) {
+              await save(value);
+              throw new AggregateError(
+                [error, closure],
+                `${error instanceof Error ? error.message : String(error)}; closing the interrupted update blocked: ${closure instanceof Error ? closure.message : String(closure)}; run piko recover`,
+              );
+            }
+            throw new Error(
+              `${error instanceof Error ? error.message : String(error)}; interrupted update closed: committed versions stay installed and the previous default remains selected; fix the cause and rerun the update`,
+            );
+          }
           const failedServiceOwnership = Object.values(
             captured?.services ?? {},
           ).some((receipt) => receipt.status === "failed");

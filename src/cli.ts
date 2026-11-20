@@ -285,9 +285,9 @@ Inspect, update, roll back, or recover Piko itself.
 
 Install this Piko executable for the current user; --path adds its shims to user PATH.
 `,
-  recover: `Usage: piko recover [--continue | --rollback] [--dry-run] [--force] [--json]
+  recover: `Usage: piko recover [--continue | --rollback | --discard] [--dry-run] [--force] [--json]
 
-Resume interrupted operations by default (--continue), or restore their recorded snapshots with --rollback. --dry-run only inspects pending operations. --force only reclaims a stale mutation lock; it never bypasses ownership or snapshot bindings and cannot be combined with --dry-run.
+Resume interrupted operations by default (--continue), or restore their recorded snapshots with --rollback. An operation that failed inside approved execution (admin/bootstrap/scripts) blocks both modes; --discard explicitly abandons such a failed operation, keeping committed state, the current default version and receipt history, so unrelated packages keep working and the package flow can be retried with a fresh explicit command. --dry-run only inspects pending operations. --force only reclaims a stale mutation lock; it never bypasses ownership or snapshot bindings and cannot be combined with --dry-run.
 `,
   doctor: `Usage: piko doctor [--json]
 
@@ -390,6 +390,7 @@ async function main(): Promise<number> {
       "with-service": { type: "boolean" },
       continue: { type: "boolean" },
       rollback: { type: "boolean" },
+      discard: { type: "boolean" },
       lock: { type: "boolean" },
       data: { type: "boolean" },
       fresh: { type: "boolean" },
@@ -457,10 +458,18 @@ async function main(): Promise<number> {
     fail("Choose --offline or --refresh, not both");
   if (values["with-service"] && !["install", "update"].includes(command))
     fail("--with-service is supported only by install and package update");
-  if ((values.continue || values.rollback) && command !== "recover")
-    fail("--continue and --rollback are supported only by recover");
-  if (values.continue && values.rollback)
-    fail("Choose --continue or --rollback, not both");
+  if (
+    (values.continue || values.rollback || values.discard) &&
+    command !== "recover"
+  )
+    fail("--continue, --rollback and --discard are supported only by recover");
+  if (
+    (values.continue ? 1 : 0) +
+      (values.rollback ? 1 : 0) +
+      (values.discard ? 1 : 0) >
+    1
+  )
+    fail("Choose one of --continue, --rollback or --discard");
   if (values.refresh && command !== "search")
     fail(
       "--refresh is supported only by search; use source refresh [alias] for catalogs",
@@ -494,7 +503,7 @@ async function main(): Promise<number> {
     uninstall: ["force"],
     source: ["force", "refresh"],
     service: [],
-    recover: ["continue", "rollback", "dry-run", "force"],
+    recover: ["continue", "rollback", "discard", "dry-run", "force"],
     doctor: [],
     status: ["distribution"],
     outdated: ["distribution"],
@@ -1875,7 +1884,11 @@ async function main(): Promise<number> {
       }
       if (values.force) await recoverStaleMutationLock(root);
       const rows = await recoverOperations(store, {
-        mode: values.rollback ? "rollback" : "resume",
+        mode: values.discard
+          ? "discard"
+          : values.rollback
+            ? "rollback"
+            : "resume",
       });
       if (values.json) console.log(JSON.stringify(rows, null, 2));
       else
@@ -1893,7 +1906,12 @@ async function main(): Promise<number> {
               )
             : "No pending operations.",
         );
-      if (rows.some((row) => row.status === "blocked")) return 1;
+      if (rows.some((row) => row.status === "blocked")) {
+        console.error(
+          "Hint: an operation that failed inside approved execution can be abandoned with piko recover --discard; committed state, the current default version and receipt history are preserved.",
+        );
+        return 1;
+      }
       break;
     }
     case "scripts": {

@@ -44,7 +44,7 @@ export type RecoveryRow = {
   id: string;
   kind: string;
   packageId: string;
-  status: "resumed" | "rolled-back" | "blocked";
+  status: "resumed" | "rolled-back" | "discarded" | "blocked";
   error?: string;
 };
 
@@ -186,6 +186,31 @@ async function restoreRemovedDirectories(
   }
 }
 
+/** Restore app directories a dead owner moved to staging but never committed. */
+async function restoreUncommittedRemovals(
+  store: Store,
+  journal: OperationJournal,
+  installs: Map<string, Install>,
+): Promise<void> {
+  const current = await store.readCommitted();
+  const uncommittedRemovals = journal.moves.filter(
+    (move) =>
+      move.from.startsWith("apps/") &&
+      move.to.startsWith("staging/") &&
+      [...installs.values()].some(
+        (install) =>
+          install.dir.replaceAll("\\", "/") === move.from &&
+          !!current.installs[install.id],
+      ),
+  );
+  if (uncommittedRemovals.length)
+    await restoreRemovedDirectories(
+      store,
+      { ...journal, moves: uncommittedRemovals },
+      installs,
+    );
+}
+
 async function cleanupNewFiles(
   store: Store,
   journal: OperationJournal,
@@ -301,23 +326,7 @@ async function resumeOperation(
   assertBoundState(journal, await store.readCommitted());
   assertNoArbitraryExecution(journal);
   const installs = await knownInstalls(store, journal);
-  const current = await store.readCommitted();
-  const uncommittedRemovals = journal.moves.filter(
-    (move) =>
-      move.from.startsWith("apps/") &&
-      move.to.startsWith("staging/") &&
-      [...installs.values()].some(
-        (install) =>
-          install.dir.replaceAll("\\", "/") === move.from &&
-          !!current.installs[install.id],
-      ),
-  );
-  if (uncommittedRemovals.length)
-    await restoreRemovedDirectories(
-      store,
-      { ...journal, moves: uncommittedRemovals },
-      installs,
-    );
+  await restoreUncommittedRemovals(store, journal, installs);
   await reconcileLegacyEffects(store);
   await store.recoverInstallation();
   await store.recoverRebuild();
@@ -326,9 +335,28 @@ async function resumeOperation(
   await store.recoverRemoval();
 }
 
+/** Explicitly abandon a failed operation. Committed phases stay facts, the
+ * durable approved-execution history stays in state receipts, and a fresh
+ * explicit command retries the package flow; only the resumable plan ends. */
+export async function discardFailedOperation(
+  store: Store,
+  journal: OperationJournal,
+): Promise<void> {
+  if (journal.status !== "failed")
+    fail(
+      "Only failed operations can be discarded; interrupted ones resume with piko recover",
+    );
+  assertBoundState(journal, await store.readCommitted());
+  const installs = await knownInstalls(store, journal);
+  await restoreUncommittedRemovals(store, journal, installs);
+}
+
 export async function recoverOperations(
   store: Store,
-  options: { mode?: "resume" | "rollback"; rollback?: boolean } = {},
+  options: {
+    mode?: "resume" | "rollback" | "discard";
+    rollback?: boolean;
+  } = {},
 ): Promise<RecoveryRow[]> {
   const mode =
     options.mode ?? (options.rollback === true ? "rollback" : "resume");
@@ -347,6 +375,8 @@ export async function recoverOperations(
       try {
         await withRecoveryOperation(store, journal, async () => {
           if (mode === "resume") await resumeOperation(store, journal);
+          else if (mode === "discard")
+            await discardFailedOperation(store, journal);
           else await rollbackOperation(store, journal);
         });
         await rm(operationPath(store.root, journal), { force: true });
@@ -354,7 +384,12 @@ export async function recoverOperations(
           id: journal.id,
           kind: journal.kind,
           packageId: journal.packageId,
-          status: mode === "resume" ? "resumed" : "rolled-back",
+          status:
+            mode === "resume"
+              ? "resumed"
+              : mode === "discard"
+                ? "discarded"
+                : "rolled-back",
         });
       } catch (error) {
         rows.push({
