@@ -21,6 +21,7 @@ import {
   selfUpdateStatus,
 } from "../src/self-update.ts";
 import { Packages } from "../src/packages.ts";
+import { recoverOperations } from "../src/ops/recover.ts";
 import { shimConfiguration } from "../src/shims.ts";
 import { capture, exists } from "../src/util.ts";
 const work = await mkdtemp(join(tmpdir(), "piko-self-tests-"));
@@ -192,6 +193,43 @@ test("older executable upgrades to new bytes and interrupted directory swap roll
   expect(await readFile(join(root, "apps/piko/state.json"), "utf8")).toBe(
     state,
   );
+}, 60000);
+
+test("recover finalizes an interrupted self-update swap instead of deferring to its own lock", async () => {
+  const root = join(work, "recover-swap"),
+    operation = "self-update-" + crypto.randomUUID();
+  const dead = Bun.spawn([exe, "--version"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await dead.exited;
+  const standIn = join(work, "recover-swap-old.bin");
+  await writeFile(standIn, "stand-in bytes; only hashed and copied, never run");
+  await mkdir(join(root, "apps/piko"), { recursive: true });
+  await mkdir(join(root, "staging", operation), { recursive: true });
+  await mkdir(join(root, "operations"), { recursive: true });
+  await copyFile(exe, join(root, "apps/piko/piko.exe"));
+  await copyFile(exe, join(root, "staging", operation, "candidate.exe"));
+  await copyFile(standIn, join(root, "staging", operation, "old.exe"));
+  const journal = join(root, "operations/self-update.json");
+  await writeFile(
+    journal,
+    JSON.stringify({
+      operation,
+      names: ["piko"],
+      parent: dead.pid,
+      phase: "swapping",
+      oldHash: await executableHash(standIn),
+      checksum: await executableHash(exe),
+    }),
+  );
+  const rows = await recoverOperations(new Packages(root).store);
+  expect(rows).toEqual([]);
+  expect(await exists(journal)).toBe(false);
+  expect((await selfUpdateStatus(root)).last?.phase).toBe("committed");
+  expect(
+    (await run(root, join(root, "shims/piko.exe"), ["--version"])).trim(),
+  ).toBe(VERSION);
 }, 60000);
 
 test("release installer verifies checksum before execution and uses an isolated requested root", async () => {

@@ -37,6 +37,7 @@ import {
   synchronizeReceipts,
 } from "../receipt.ts";
 import { restoreOperationServices } from "../service.ts";
+import { resumeSelfUpdate } from "../self-update.ts";
 import type { Install, State } from "../types.ts";
 import { resumeOperationPlan } from "./replay.ts";
 
@@ -360,6 +361,10 @@ export async function recoverOperations(
 ): Promise<RecoveryRow[]> {
   const mode =
     options.mode ?? (options.rollback === true ? "rollback" : "resume");
+  // A pending self-update swap must be finalized while the mutation lock is
+  // still free; resumeSelfUpdate defers whenever the lock exists, so taking
+  // the lease first would make the documented `piko recover` a no-op for it.
+  await resumeSelfUpdate(store.root);
   return await store.withMutationLock(async () => {
     const journals = await assertRecoverableOperations(store.root);
     if (!journals.length) {
