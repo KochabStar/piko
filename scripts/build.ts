@@ -1,7 +1,10 @@
-import { buildShim } from "./build-shim.ts";
 import { buildSandboxRegistry } from "./sandbox-registry.ts";
 import { mkdir } from "node:fs/promises";
-await buildShim();
+// The launcher is the committed src/generated/shim.ts payload: builds must be
+// deterministic across machines, or a runner-toolchain recompile silently
+// drops other known launchers from the embedded compatibility set (the
+// 0.4.29/0.4.30 CI builds refused every locally written shim). Regenerating
+// after a shim.c change is the explicit `bun run build:shim` step.
 await mkdir("dist", { recursive: true });
 const result = await Bun.build({
   entrypoints: ["src/cli.ts"],

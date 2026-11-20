@@ -1,6 +1,6 @@
 {
   "name": "piko",
-  "version": "0.4.30",
+  "version": "0.4.31",
   "private": true,
   "type": "module",
   "scripts": {
@@ -21,7 +21,8 @@
     "m0": "bun scripts/m0.ts",
     "build:network-probe": "bun scripts/build-network-probe.ts",
     "sandbox:prepare": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-sandbox.ps1",
-    "sandbox:check": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/sandbox.test.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/sandbox-report.test.ps1"
+    "sandbox:check": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/sandbox.test.ps1 && powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/sandbox-report.test.ps1",
+    "build:shim": "bun scripts/build-shim.ts"
   },
   "dependencies": {
     "semver": "7.8.5",
