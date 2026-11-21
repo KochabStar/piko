@@ -32,6 +32,7 @@ export function extractionState(limit = totalLimit) {
     count: 0,
     total: 0,
     fileLimit,
+    overlay: false,
     paths: new Map<string, { path: string; directory: boolean }>(),
   };
 }
@@ -52,8 +53,14 @@ function targetPath(
       isDir = n < parts.length || directory,
       normalized = parent.toLowerCase(),
       prior = state.paths.get(normalized);
-    if (prior && (prior.path !== parent || !prior.directory || !isDir))
-      fail(`Duplicate, overlapping or case-colliding artifact path: ${path}`);
+    if (prior && (prior.path !== parent || !prior.directory || !isDir)) {
+      // An overlaying download may replace a file it already owns at the
+      // same path; any other overlap (directories, case, renames) stays fatal.
+      if (!(state.overlay && prior.path === parent && !isDir))
+        fail(
+          `Duplicate, overlapping or case-colliding artifact path: ${path}`,
+        );
+    }
     state.paths.set(normalized, { path: parent, directory: isDir });
   }
   return inside(destination, join(destination, path));
@@ -177,7 +184,7 @@ export async function extractZip(
                 yield chunk;
               }
             },
-            createWriteStream(target, { flags: "wx" }),
+            createWriteStream(target, { flags: state.overlay ? "w" : "wx" }),
           );
           if (bytes !== entry.uncompressedSize) fail("ZIP entry size mismatch");
         }
@@ -319,6 +326,7 @@ async function extractSevenZip(
         ...batch.map((file) => file.raw),
       ],
       batch,
+      state.overlay,
     );
   }
 }

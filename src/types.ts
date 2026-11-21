@@ -267,6 +267,9 @@ export type Download = {
   file?: string;
   stripPrefix?: string;
   into?: string;
+  // Only a later combined download may overlay: its extraction replaces
+  // file paths already written by earlier downloads instead of failing.
+  overlay?: boolean;
 };
 export type Distribution = {
   bin: Record<string, string | Bin>;

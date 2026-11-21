@@ -266,6 +266,7 @@ export function normalizeManifest(
     "maxBytes",
     "cabinets",
     "payload",
+    "overlay",
   ];
   let downloads: unknown[];
   if (p.downloads !== undefined) {
@@ -278,6 +279,13 @@ export function normalizeManifest(
       fail("Use either a single download or 1–32 downloads, not both");
     downloads = p.downloads;
   } else downloads = [p];
+  downloads.forEach((download, n) => {
+    if (download && typeof download === "object" && "overlay" in download) {
+      if (!Array.isArray(p.downloads) || n === 0)
+        fail("overlay requires combined downloads and cannot be the first");
+      if (download.overlay !== true) fail("overlay must be true");
+    }
+  });
   for (const download of downloads) {
     if (
       !record(download) ||

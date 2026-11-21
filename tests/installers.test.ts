@@ -591,6 +591,60 @@ test("the 7z# signature scan materialises offset-hidden payloads for explicit se
   ).rejects.toThrow();
 });
 
+test("an overlaying download replaces same-path files instead of colliding", async () => {
+  const root = join(work, "overlay");
+  await mkdir(join(root, "top"), { recursive: true });
+  await writeFile(join(root, "top/tool.exe"), "first");
+  await capture(full, ["a", "-tzip", join(work, "overlay-a.zip"), "top"], {
+    cwd: root,
+  });
+  await writeFile(join(root, "top/tool.exe"), "second");
+  await capture(full, ["a", "-tzip", join(work, "overlay-b.zip"), "top"], {
+    cwd: root,
+  });
+  const state = extractionState();
+  const destination = join(work, "overlay-extracted");
+  await extractArchive(
+    join(work, "overlay-a.zip"),
+    "zip",
+    destination,
+    undefined,
+    state,
+  );
+  expect(await readFile(join(destination, "top/tool.exe"), "utf8")).toBe(
+    "first",
+  );
+  state.overlay = true;
+  await extractArchive(
+    join(work, "overlay-b.zip"),
+    "zip",
+    destination,
+    undefined,
+    state,
+  );
+  expect(await readFile(join(destination, "top/tool.exe"), "utf8")).toBe(
+    "second",
+  );
+  // Without the overlay flag the same second extraction is fatal.
+  const fresh = extractionState();
+  await extractArchive(
+    join(work, "overlay-a.zip"),
+    "zip",
+    join(work, "overlay-fresh"),
+    undefined,
+    fresh,
+  );
+  await expect(
+    extractArchive(
+      join(work, "overlay-b.zip"),
+      "zip",
+      join(work, "overlay-fresh"),
+      undefined,
+      fresh,
+    ),
+  ).rejects.toThrow("Duplicate");
+});
+
 test("batched stdout extraction enforces exact byte partitions, empty files and no diagnostics", async () => {
   const root = join(work, "batch");
   await mkdir(root);

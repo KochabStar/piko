@@ -675,25 +675,31 @@ export async function installPackage(
             detail: `${download.format}; artifact ${n + 1}/${downloads.length}`,
           });
           const format = download.format;
-          await checkpoint(ops.store, `${id}/extract-${n}`, () =>
-            extractArchive(
-              archive,
-              format,
-              stage,
-              download.stripPrefix,
-              extraction,
-              download.into,
-              sevenZip,
-              inno,
-              {
-                files: download.files,
-                nested: download.nested,
-                lessMsi,
-                cabinets,
-                payload: download.payload,
-              },
-            ),
-          );
+          const previousOverlay = extraction.overlay;
+          extraction.overlay = download.overlay === true;
+          try {
+            await checkpoint(ops.store, `${id}/extract-${n}`, () =>
+              extractArchive(
+                archive,
+                format,
+                stage,
+                download.stripPrefix,
+                extraction,
+                download.into,
+                sevenZip,
+                inno,
+                {
+                  files: download.files,
+                  nested: download.nested,
+                  lessMsi,
+                  cabinets,
+                  payload: download.payload,
+                },
+              ),
+            );
+          } finally {
+            extraction.overlay = previousOverlay;
+          }
         }
       }
       report({

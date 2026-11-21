@@ -134,6 +134,7 @@ export async function helperFiles(
   executable: string,
   args: string[],
   files: { path: string; size: number }[],
+  overlay = false,
 ): Promise<void> {
   const child = Bun.spawn([executable, ...args], {
     stdin: "ignore",
@@ -151,7 +152,7 @@ export async function helperFiles(
         if (!Number.isSafeInteger(entry.size) || entry.size < 0)
           fail("Invalid batched helper size");
         await noLinks(entry.path);
-        file = await open(entry.path, "wx");
+        file = await open(entry.path, overlay ? "w" : "wx");
         if (entry.size !== 0) break;
         await file.close();
         file = undefined;
