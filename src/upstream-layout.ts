@@ -93,7 +93,10 @@ async function extractTabbit(
   if (!tools.sevenZip || steps.length > 3 || !steps.length)
     fail("Tabbit requires a verified unpacker and bounded nested recipe");
   let current = archive,
-    format = download.format,
+    format: Exclude<Download["format"], "file"> | "7z#" =
+      download.format === "file"
+        ? fail("Nested extraction requires an archive distribution")
+        : download.format,
     prefix: string | undefined;
   let resolved = false;
   for (const [n, step] of steps.entries()) {

@@ -250,7 +250,7 @@ export type ArchiveFormat =
   | "pe";
 export type NestedArchive = {
   path: string;
-  format: "zip" | "7z";
+  format: "zip" | "7z" | "7z#";
   stripPrefix?: string;
 };
 export type Download = {

@@ -700,12 +700,12 @@ async function extractNested(
     fail("Unsupported nested extraction chain");
   await withScratch(archive, async (scratch) => {
     let current = archive,
-      currentFormat = format,
+      currentFormat: Exclude<Download["format"], "file"> | "7z#" = format,
       prefix: string | undefined;
     for (const [n, step] of steps.entries()) {
       relativeFile(step.path);
       if (step.stripPrefix) relativeFile(step.stripPrefix);
-      if (!["7z", "zip"].includes(step.format))
+      if (!["7z", "zip", "7z#"].includes(step.format))
         fail("Unsupported nested format");
       // Large selected container layers remain bounded to 2 GiB and the shared
       // expanded quota; final application files keep their original limit.
@@ -732,6 +732,34 @@ async function extractNested(
         );
         entryBudget(intermediate, (await lstat(target)).size);
         current = target;
+      } else if (currentFormat === "7z#") {
+        // 7-Zip's signature scan (-t#) materialises every embedded archive of
+        // a proprietary bootstrapper as a numbered file; the next explicit step
+        // selects from exactly that bounded output, never from the raw bytes.
+        if (!executable)
+          fail("Nested signature scan requires verified full 7-Zip");
+        const output = join(scratch, "layer-" + n);
+        await mkdir(output, { recursive: true });
+        await noLinks(output);
+        await helperOutput(
+          executable,
+          [
+            "x",
+            "-t#",
+            "-y",
+            "-o" + output,
+            "-pPIKO_NO_PASSWORD",
+            "--",
+            resolve(current),
+          ],
+          8 * 1024 * 1024,
+        );
+        const selected = inside(output, join(output, step.path));
+        await noLinks(selected);
+        const info = await lstat(selected);
+        if (!info.isFile() || info.size > intermediate.fileLimit)
+          fail("Nested payload is not a bounded regular file");
+        current = selected;
       } else {
         const output = join(scratch, "layer-" + n);
         await extractArchive(
@@ -755,6 +783,8 @@ async function extractNested(
       currentFormat = step.format;
       prefix = step.stripPrefix;
     }
+    if (currentFormat === "7z#")
+      fail("The final nested step must extract a real archive");
     await extractArchive(
       current,
       currentFormat,

@@ -387,7 +387,7 @@ export function normalizeManifest(
       for (const step of download.nested) {
         if (
           !record(step) ||
-          !["7z", "zip"].includes(step.format) ||
+          !["7z", "zip", "7z#"].includes(step.format) ||
           Object.keys(step).some(
             (k) => !["path", "format", "stripPrefix"].includes(k),
           )
@@ -396,6 +396,10 @@ export function normalizeManifest(
         relativeFile(step.path);
         if (step.stripPrefix !== undefined) relativeFile(step.stripPrefix);
       }
+      // The signature scan materialises embedded archives; it can only be an
+      // intermediate layer, never the format the managed tree is extracted from.
+      if (download.nested.at(-1)!.format === "7z#")
+        fail("The final nested step must extract a real archive");
     }
     if (download.format === "nsis") {
       if (!download.nested && !download.files)

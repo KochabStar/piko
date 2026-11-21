@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import {
   cp,
+  appendFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -378,8 +379,10 @@ test("new archive declarations reject unsafe mappings, unlimited downloads and a
     { format: "7z", nested: [{ path: "payload", format: "msi" }] },
     {
       format: "7z",
-      stripPrefix: "x",
-      nested: [{ path: "payload", format: "7z" }],
+      nested: [
+        { path: "bootstrapper", format: "7z#" },
+        { path: "4.7z", format: "7z#" },
+      ],
     },
   ])
     expect(() =>
@@ -524,6 +527,68 @@ test("explicit nested ZIP/7z chains share extraction budgets and reject missing 
   expect(
     (await readdir(work)).some((n) => n.startsWith("container-extract-")),
   ).toBe(false);
+});
+
+test("the 7z# signature scan materialises offset-hidden payloads for explicit selection", async () => {
+  const root = join(work, "scan-chain");
+  await mkdir(root);
+  // A bootstrapper blob: arbitrary bytes followed by a real 7z archive, the
+  // same shape proprietary installers (WPS Office) use to hide payloads at
+  // raw offsets where no nested path can address them.
+  await writeFile(join(root, "bootstrapper"), "not an archive at all");
+  const payload = join(work, "scan-payload-src");
+  await mkdir(join(payload, "top"), { recursive: true });
+  await writeFile(join(payload, "top/tool.exe"), "inner tool");
+  await capture(full, ["a", "-t7z", join(work, "scan-payload.7z"), "top"], {
+    cwd: payload,
+  });
+  await appendFile(
+    join(root, "bootstrapper"),
+    await readFile(join(work, "scan-payload.7z")),
+  );
+  await capture(
+    full,
+    ["a", "-tzip", join(work, "scan-outer.zip"), "bootstrapper"],
+    { cwd: root },
+  );
+  const scanned = join(work, "scan-extracted");
+  await extractArchive(
+    join(work, "scan-outer.zip"),
+    "zip",
+    scanned,
+    undefined,
+    undefined,
+    undefined,
+    full,
+    undefined,
+    {
+      nested: [
+        { path: "bootstrapper", format: "7z#" },
+        { path: "2.7z", format: "7z" },
+      ],
+    },
+  );
+  expect(
+    await readFile(join(scanned, "top/tool.exe"), "utf8"),
+  ).toBe("inner tool");
+  await expect(
+    extractArchive(
+      join(work, "scan-outer.zip"),
+      "zip",
+      join(work, "scan-missing"),
+      undefined,
+      undefined,
+      undefined,
+      full,
+      undefined,
+      {
+        nested: [
+          { path: "bootstrapper", format: "7z#" },
+          { path: "missing.7z", format: "7z" },
+        ],
+      },
+    ),
+  ).rejects.toThrow();
 });
 
 test("batched stdout extraction enforces exact byte partitions, empty files and no diagnostics", async () => {
