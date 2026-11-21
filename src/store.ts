@@ -1404,20 +1404,6 @@ export class Store {
       startMenuRepairKeys?: string[];
     } = {},
   ): Promise<T> {
-    const pending = await import("./journal.ts").then((m) =>
-      m.pendingOperations(this.root),
-    );
-    if (pending.length && !this.recovering) {
-      this.recovering = true;
-      try {
-        const { recoverOperations } = await import("./ops/recover.ts");
-        await recoverOperations(this);
-      } catch {
-        // Recovery failure leaves the journal; the write gate reports it.
-      } finally {
-        this.recovering = false;
-      }
-    }
     await assertOrdinaryWrite(this);
     await resumeSelfUpdate(this.root);
     return await this.withMutationLock(async () => {
