@@ -343,10 +343,24 @@ export async function discardFailedOperation(
   store: Store,
   journal: OperationJournal,
 ): Promise<void> {
-  if (journal.status !== "failed")
-    fail(
-      "Only failed operations can be discarded; interrupted ones resume with piko recover",
-    );
+  if (journal.status !== "failed") {
+    // An interrupted operation whose journal never recorded anything beyond
+    // the starting snapshot (no bindings, moves, files or committed states)
+    // has nothing to resume and nothing to roll back, yet blocks the whole
+    // store: its resume needs intent data that was never saved (live
+    // incident: an uninstall killed before saving its binding). Discarding a
+    // provably inert running journal is the explicit exit.
+    const inert =
+      journal.status === "running" &&
+      journal.bindings.length === 0 &&
+      journal.moves.length === 0 &&
+      journal.files.length === 0 &&
+      journal.states.length === 1;
+    if (!inert)
+      fail(
+        "Only failed operations can be discarded; interrupted ones resume with piko recover",
+      );
+  }
   assertBoundState(journal, await store.readCommitted());
   const installs = await knownInstalls(store, journal);
   await restoreUncommittedRemovals(store, journal, installs);

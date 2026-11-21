@@ -584,6 +584,70 @@ test("discard refuses an interrupted journal and keeps it pending", async () => 
   expect(await pendingOperations(p.root)).toHaveLength(1);
 });
 
+test("discard frees a provably inert running journal and unblocks the store", async () => {
+  const { p, install } = await failedAdminRemoval("admin-discard-inert");
+  // Craft the journal exactly like an uninstall killed before saving its
+  // binding: running status, nothing beyond the starting snapshot. The
+  // before snapshot IS the current state (no writes since the fixture's
+  // committed receipts).
+  const current = await p.store.readCommitted();
+  // Use the same encoder the journal itself uses for before/states.
+  const { gzipSync } = await import("node:zlib");
+  const body = Buffer.from(JSON.stringify(current));
+  const encodedSnapshot = {
+    data: gzipSync(body).toString("base64"),
+    hash: (await import("node:crypto")).createHash("sha256").update(body).digest("hex"),
+    revision: current.revision,
+  };
+  const journal = {
+    id: crypto.randomUUID(),
+    kind: "uninstall",
+    packageId: "main/recoverytool",
+    startedAt: new Date().toISOString(),
+    pid: 2147483647,
+    status: "running",
+    phases: [
+      {
+        name: "uninstall-state",
+        status: "running",
+        at: new Date().toISOString(),
+      },
+    ],
+    files: [],
+    moves: [],
+    options: {},
+    bindings: [],
+    before: encodedSnapshot,
+    states: [encodedSnapshot],
+  };
+  await rm(operationPath(p.root, (await pendingOperations(p.root))[0]!), {
+    force: true,
+  });
+  await atomicJson(
+    join(p.root, "operations", "operation-" + journal.id + ".json"),
+    journal,
+  );
+  const rows = await recoverOperations(p.store, { mode: "discard" });
+  expect(
+    rows.filter((row) => row.status === "discarded").length,
+  ).toBeGreaterThanOrEqual(1);
+  expect(await pendingOperations(p.root)).toEqual([]);
+  // The install and its receipt survive; only the dead plan is gone.
+  expect((await p.store.readCommitted()).installs[install.id]).toBeDefined();
+  await p.store.mutate(async () => undefined);
+});
+
+test("discard still refuses a running journal that recorded side effects", async () => {
+  const { p, journal } = await failedAdminRemoval("admin-discard-active");
+  journal.status = "running";
+  await atomicJson(operationPath(p.root, journal), journal);
+  await orphan(p.store);
+  const rows = await recoverOperations(p.store, { mode: "discard" });
+  expect(rows[0]?.status).toBe("blocked");
+  expect(rows[0]?.error ?? "").toContain("Only failed operations");
+  expect(await pendingOperations(p.root)).toHaveLength(1);
+});
+
 test("a failed admin migration inside an update closes the journal itself", async () => {
   const store = await isolated("update-admin-close");
   await expect(
