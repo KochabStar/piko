@@ -314,7 +314,10 @@ export async function runOperation<T>(
   return await store.withMutationLock(async () => {
     validateJson(options);
     const retry = await retryFailedUninstall(store, kind, spec, options);
-    if (!retry) await assertOrdinaryWrite(store);
+    if (!retry) {
+      await autoRecoverDeadJournals(store);
+      await assertOrdinaryWrite(store);
+    }
     const before = retry?.before ?? snapshot(await store.readCommitted());
     const journal: OperationJournal = retry ?? {
       id: crypto.randomUUID(),
@@ -619,6 +622,30 @@ function validateJournal(value: unknown): asserts value is OperationJournal {
       )
         fail("Invalid operation move boundary");
     }
+  }
+}
+
+/**
+ * Before an ordinary write blocks on a dead-owner journal, try to recover it
+ * automatically. This keeps `piko update *` / `piko install` usable after a
+ * previous run was killed: inert journals (zero side effects) are discarded,
+ * resumable ones finish their remaining phases, and only genuinely blocked
+ * journals (admin-phase failures the user must inspect) still require an
+ * explicit `piko recover`.
+ */
+async function autoRecoverDeadJournals(store: Store): Promise<void> {
+  if (store.recovering) return;
+  const pending = await pendingOperations(store.root);
+  if (!pending.length) return;
+  store.recovering = true;
+  try {
+    const { recoverOperations } = await import("./ops/recover.ts");
+    await recoverOperations(store);
+  } catch {
+    // Recovery failure leaves the journal in place; assertOrdinaryWrite
+    // reports exactly what remains and how to handle it.
+  } finally {
+    store.recovering = false;
   }
 }
 export async function pendingOperations(

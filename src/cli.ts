@@ -287,7 +287,7 @@ Install this Piko executable for the current user; --path adds its shims to user
 `,
   recover: `Usage: piko recover [--continue | --rollback | --discard] [--dry-run] [--force] [--json]
 
-Resume interrupted operations by default (--continue), or restore their recorded snapshots with --rollback. An operation that failed inside approved execution (admin/bootstrap/scripts) blocks both modes; --discard explicitly abandons such a failed operation, keeping committed state, the current default version and receipt history, so unrelated packages keep working and the package flow can be retried with a fresh explicit command. --dry-run only inspects pending operations. --force only reclaims a stale mutation lock; it never bypasses ownership or snapshot bindings and cannot be combined with --dry-run.
+Resume interrupted operations by default (--continue), or restore their recorded snapshots with --rollback. An operation that failed inside approved execution (admin/bootstrap/scripts) blocks both modes; --discard explicitly abandons such a failed operation, keeping committed state, the current default version and receipt history, so unrelated packages keep working and the package flow can be retried with a fresh explicit command. Install, update and uninstall automatically attempt safe recovery of dead-owner journals before starting: inert ones (zero side effects) are discarded and resumable ones finish, so a killed run does not block the next; only admin-phase failures require the explicit commands above. --dry-run only inspects pending operations. --force only reclaims a stale mutation lock; it never bypasses ownership or snapshot bindings and cannot be combined with --dry-run.
 `,
   doctor: `Usage: piko doctor [--json]
 
