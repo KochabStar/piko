@@ -131,6 +131,13 @@ function transform(
       p.desktop[kind] = p.desktop[kind].map((e: any) =>
         typeof e === "string" ? path(e) : { ...e, path: path(e.path) },
       );
+  // Bootstrap arguments may pin the distribution version (source installs
+  // check out the exact tag); they interpolate the same version fields as
+  // download paths. Everything else in the declaration stays literal.
+  if (p.bootstrap?.args)
+    p.bootstrap.args = p.bootstrap.args.map((a: any) =>
+      typeof a === "string" ? path(a) : a,
+    );
   return m;
 }
 

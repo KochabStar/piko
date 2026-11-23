@@ -201,6 +201,14 @@ export async function outdated(
       candidate: null,
       status: "failed",
     };
+    if (i.selfUpdate) {
+      row.status = "self-update";
+      row.reason = "Package updates itself; piko update delegates to it";
+      results.push(row);
+      continue;
+    }
+    row.candidate = null;
+    row.status = "failed";
     try {
       if (i.kind === "npm") {
         const context = await npmContext(ops.root, state, i.name);

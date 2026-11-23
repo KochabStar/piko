@@ -102,6 +102,42 @@ test("service binPath participates in template expansion while arguments remain 
   expect(normalizeManifest(document, "tool", "1.0.0")).toEqual(manifest);
 });
 
+test("bootstrap arguments pin the distribution version and keep other fields literal", () => {
+  const manifest = release("1.0.0", {
+    persist: ["home"],
+    bootstrap: {
+      path: "install.ps1",
+      kind: "powershell",
+      args: ["-NonInteractive", "-Commit", "v1.0.0"],
+      env: { HERMES_HOME: "{persist}/home" },
+      outputs: ["home/bin/tool.exe"],
+      timeoutMinutes: 120,
+    },
+    selfUpdate: {
+      command: ["{persist}/home/bin/tool.exe", "update"],
+      versionCommand: ["{persist}/home/bin/tool.exe", "--version"],
+    },
+  });
+  const document = appendManifest(undefined, manifest);
+  const recipe = Object.values<any>(document.recipes)[0]!;
+  const platform = recipe.platforms["windows-x64"];
+  expect(platform.bootstrap.args).toEqual([
+    "-NonInteractive",
+    "-Commit",
+    "v{version}",
+  ]);
+  expect(platform.bootstrap.env).toEqual({ HERMES_HOME: "{persist}/home" });
+  expect(platform.bootstrap.timeoutMinutes).toBe(120);
+  expect(platform.selfUpdate.command[1]).toBe("update");
+  expect(normalizeManifest(document, "tool", "1.0.0")).toEqual(manifest);
+  const resolved = resolveManifestDocument(document, "tool", "1.0.0") as any;
+  expect(resolved.platforms["windows-x64"].bootstrap.args).toEqual([
+    "-NonInteractive",
+    "-Commit",
+    "v1.0.0",
+  ]);
+});
+
 test("version-specific recipes and multiple download checksums remain isolated", () => {
   const a = release("1.0.0");
   const b = release("2.0.0", {

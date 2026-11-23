@@ -1,4 +1,5 @@
 import { report } from "../progress.ts";
+import { join } from "node:path";
 import { npmContext } from "../npm.ts";
 import { WindowsEffects } from "../windows-effects.ts";
 import { fail } from "../util.ts";
@@ -26,6 +27,7 @@ import { installPackage } from "./install.ts";
 import { installed } from "./shared.ts";
 import { select } from "./use.ts";
 import { outdated } from "./query.ts";
+import { integrationText } from "../desktop.ts";
 import type { Install } from "../types.ts";
 import type {
   PackagesContext,
@@ -70,6 +72,52 @@ async function refreshUpdateSources(
   );
 }
 
+async function delegateSelfUpdate(
+  ops: PackagesContext,
+  install: Install,
+): Promise<void> {
+  const declaration = install.selfUpdate!;
+  report({
+    kind: "stage",
+    label: "Delegate self-update",
+    detail: install.name,
+  });
+  const expand = (list: string[]) =>
+    list.map((argument) => integrationText(ops.store.root, install, argument));
+  const child = Bun.spawn(expand(declaration.command), {
+    cwd: join(ops.store.root, install.dir),
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+    timeout: 90 * 60000,
+  });
+  const code = await child.exited;
+  if (code !== 0)
+    fail("Self-update command failed (exit " + code + "); the install is unchanged");
+  if (declaration.versionCommand) {
+    const probe = Bun.spawn(expand(declaration.versionCommand), {
+      cwd: join(ops.store.root, install.dir),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 120000,
+    });
+    const [output, probeCode] = await Promise.all([
+      new Response(probe.stdout).text(),
+      probe.exited,
+    ]);
+    const version =
+      probeCode === 0 ? output.trim().split(/\r?\n/)[0] : undefined;
+    report({
+      kind: "stage",
+      label: "Self-update applied",
+      detail: version
+        ? install.name + " now reports " + version
+        : install.name + " self-update completed",
+    });
+  }
+}
+
 export async function updatePackage(
   ops: PackagesContext,
   spec: string,
@@ -99,6 +147,12 @@ export async function updatePackage(
       spec,
       request: selection.request,
     });
+    // Self-updating installs manage their own code; piko delegates instead
+    // of downloading a newer distribution version.
+    if (previous.selfUpdate) {
+      await delegateSelfUpdate(ops, previous);
+      return previous;
+    }
     if (selection.request === previous.version) return previous;
     const existingServices = (
       state.receipts?.[previous.id]?.service ?? []

@@ -768,6 +768,7 @@ export async function installPackage(
         ...(platform.bootstrap ? { bootstrap: platform.bootstrap } : {}),
         ...(platform.admin ? { admin: platform.admin } : {}),
         ...(platform.services?.length ? { services: platform.services } : {}),
+        ...(platform.selfUpdate ? { selfUpdate: platform.selfUpdate } : {}),
         ...(platform.env ? { env: platform.env } : {}),
         ...(platform.shell ? { shell: platform.shell } : {}),
         // Keep legacy receipts unchanged; new installs retain declared dependencies.

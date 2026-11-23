@@ -28,7 +28,16 @@ export type ExecDeclaration = {
   env?: Record<string, string>;
   kind?: "native" | "powershell" | "javascript";
 };
-export type BootstrapDeclaration = ExecDeclaration & { outputs: string[] };
+export type BootstrapDeclaration = ExecDeclaration & {
+  outputs: string[];
+  // Installs that provision their own toolchain (source installs) run far
+  // past the default 15-minute budget; a manifest may extend it, bounded.
+  timeoutMinutes?: number;
+};
+export type SelfUpdateDeclaration = {
+  command: string[];
+  versionCommand?: string[];
+};
 export type ServiceDeclaration = {
   name: string;
   displayName: string;
@@ -193,6 +202,7 @@ export type Install = {
   admin?: AdminDeclaration;
   services?: ServiceDeclaration[];
   depends?: Dependency[];
+  selfUpdate?: SelfUpdateDeclaration;
   npmBuild?: NpmBuild;
   scripts?: {
     path: string;
@@ -283,6 +293,9 @@ export type Distribution = {
   bootstrap?: BootstrapDeclaration;
   admin?: AdminDeclaration;
   services?: ServiceDeclaration[];
+  // The package ships its own updater; `piko update` delegates to it
+  // instead of downloading a new distribution version.
+  selfUpdate?: SelfUpdateDeclaration;
   maxExpandedBytes?: number;
 } & (
   | (Download & { downloads?: never })

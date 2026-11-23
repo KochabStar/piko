@@ -2,6 +2,7 @@ import {
   validateAdmin,
   validateBootstrap,
   validateDesktop,
+  validateSelfUpdate,
 } from "./integration-declarations.ts";
 import { persistence, validateTemplates } from "./persistence.ts";
 import { validateShell } from "./shell-declarations.ts";
@@ -519,6 +520,7 @@ export function normalizeManifest(
   }
   if (p.services !== undefined) validateServices(p.services);
   if (p.admin !== undefined) validateAdmin(p.admin);
+  if (p.selfUpdate !== undefined) validateSelfUpdate(p.selfUpdate);
   if (p.shell !== undefined) validateShell(p.shell);
   if (p.env !== undefined) validateEnv(p.env);
   if (value.env !== undefined)
@@ -542,6 +544,7 @@ export function normalizeManifest(
     "desktop",
     "bootstrap",
     "admin",
+    "selfUpdate",
     "shell",
     "bin",
     "depends",

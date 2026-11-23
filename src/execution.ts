@@ -112,11 +112,14 @@ async function planExecution(
   const info = await lstat(target);
   if (!info.isFile() || info.nlink !== 1)
     fail("Execution target is not an unlinked package file");
+  // Approved scripts must stay fully previewable; vendor installers can
+  // reach ~100 KiB, so the ceiling is 256 KiB rather than 64 KiB.
+  const scriptPreviewLimit = 262144;
   if (
     (exec.kind === "powershell" || exec.kind === "javascript") &&
-    info.size > 65536
+    info.size > scriptPreviewLimit
   )
-    fail("Approved integration script exceeds 64 KiB preview limit");
+    fail("Approved integration script exceeds 256 KiB preview limit");
   if (
     install.persist.some(
       (p) => exec.path === p || exec.path.startsWith(p + "/"),
@@ -167,7 +170,7 @@ export async function inspectExecution(
     kind: plan.exec.kind ?? "native",
     script:
       plan.exec.kind === "powershell" || plan.exec.kind === "javascript"
-        ? (await readFile(plan.target, "utf8")).slice(0, 65536)
+        ? (await readFile(plan.target, "utf8")).slice(0, 262144)
         : undefined,
     contentHash: plan.digest,
     args: plan.args,
@@ -326,8 +329,8 @@ async function runExecutionLocked(
         delete env[key];
     if (plan.exec.kind === "powershell" || plan.exec.kind === "javascript") {
       const script = await readFile(plan.target, "utf8");
-      if (Buffer.byteLength(script) > 65536)
-        fail("Approved integration script exceeds 64 KiB preview limit");
+      if (Buffer.byteLength(script) > 262144)
+        fail("Approved integration script exceeds 256 KiB preview limit");
     }
     if (plan.exec.kind === "javascript") {
       // Approved package code runs inside this (already elevated for admin)
@@ -377,6 +380,10 @@ async function runExecutionLocked(
               "-NoLogo",
               "-NoProfile",
               "-NonInteractive",
+              // Process-scoped only: a Restricted machine policy would refuse
+              // every -File bootstrap; nothing persistent is changed.
+              "-ExecutionPolicy",
+              "Bypass",
               "-File",
               plan.target,
               ...plan.args,
@@ -388,7 +395,11 @@ async function runExecutionLocked(
         stdin: "inherit",
         stdout: "inherit",
         stderr: "inherit",
-        timeout: options.admin ? 300000 : 900000,
+        timeout: options.admin
+          ? 300000
+          : (plan.exec as BootstrapDeclaration).timeoutMinutes
+            ? (plan.exec as BootstrapDeclaration).timeoutMinutes! * 60000
+            : 900000,
       });
       const code = await child.exited;
       if (code !== 0)
