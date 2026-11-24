@@ -27,6 +27,21 @@ const palette: Record<Exclude<Tone, "strong">, [number, string]> = {
 };
 export const plainText = (text: string) =>
   text.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "?");
+// 24-bit SGR support. COLORTERM is the standard marker; WT_SESSION marks a
+// Windows Terminal tab. A `sudo piko ...` elevation opens a bare conhost
+// window with neither marker, and the gradient bar degraded to flat ANSI
+// bands there; every Windows console that renders Piko's other ANSI colors
+// parses 24-bit SGR too, so any win32 console counts as truecolor.
+export function detectTrueColor(
+  env: Record<string, string | undefined> = process.env,
+  platform: string = process.platform,
+): boolean {
+  return (
+    /truecolor|24bit/i.test(env.COLORTERM ?? "") ||
+    !!env.WT_SESSION ||
+    platform === "win32"
+  );
+}
 export function tint(text: string, tone: Tone, style: TerminalStyle): string {
   if (!style.color || !text) return text;
   if (tone === "strong") return `\x1b[1m${tint(text, "blue", style)}\x1b[22m`;

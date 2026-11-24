@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   activityLine,
   accentGradient,
+  detectTrueColor,
   fitText,
   progressBar,
   textWidth,
@@ -177,4 +178,15 @@ test("visual decoration cannot inject terminal commands; no-color output and JSO
   const json = '{"version":"2","status":"updated"}';
   expect(humanOutput(json, false)).toBe(json);
   expect(tint("value", "muted", { color: false })).toBe("value");
+});
+
+test("truecolor detection covers bare Windows consoles such as a sudo elevation window", () => {
+  const bare = { COLORTERM: undefined, WT_SESSION: undefined };
+  expect(detectTrueColor({ COLORTERM: "truecolor" }, "linux")).toBe(true);
+  expect(detectTrueColor({ COLORTERM: "24bit" }, "linux")).toBe(true);
+  expect(detectTrueColor({ WT_SESSION: "piko" }, "linux")).toBe(true);
+  // `sudo piko ...` opens a plain conhost window: no WT_SESSION, no
+  // COLORTERM, yet the console parses 24-bit SGR like every win32 console.
+  expect(detectTrueColor(bare, "win32")).toBe(true);
+  expect(detectTrueColor(bare, "linux")).toBe(false);
 });

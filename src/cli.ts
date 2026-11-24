@@ -31,6 +31,7 @@ import {
   importPlanSummary,
   installResultsSummary,
 } from "./display.ts";
+import { detectTrueColor } from "./terminal-style.ts";
 import { VERSION } from "./version.ts";
 import { createInterface } from "node:readline/promises";
 import { resolveCommand, commandNames } from "./commands.ts";
@@ -547,9 +548,7 @@ async function main(): Promise<number> {
     process.env.TERM !== "linux" &&
     process.env.TERM !== "dumb" &&
     (process.env.LC_ALL ?? process.env.LANG ?? "").toUpperCase() !== "C";
-  const trueColor =
-    /truecolor|24bit/i.test(process.env.COLORTERM ?? "") ||
-    !!process.env.WT_SESSION;
+  const trueColor = detectTrueColor();
   const show = (text: string) =>
     console.log(humanOutput(text, outputColor, { unicode, trueColor }));
   const showServices = (rows: ServiceRow[]) => {
